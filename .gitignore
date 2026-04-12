@@ -15,5 +15,12 @@ cover.out
 .idea/
 .vscode/
 
+# Qodana
+qodana.yaml
+qodana-results/
+
+# SonarQube
+.scannerwork/
+
 # OS
 .DS_Store

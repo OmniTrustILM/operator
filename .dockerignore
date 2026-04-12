@@ -3,6 +3,7 @@
 .idea
 .superpowers
 .claude
+.scannerwork
 bin/
 docs/
 deploy/
