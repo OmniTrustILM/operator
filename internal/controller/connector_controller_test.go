@@ -51,7 +51,13 @@ var _ = Describe("Connector Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: otilmcomv1alpha1.ConnectorSpec{
+						Image: otilmcomv1alpha1.ImageSpec{
+							Repository: "test-repo/test-image",
+							Tag:        "latest",
+						},
+						Service: otilmcomv1alpha1.ServiceSpec{},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
