@@ -1,5 +1,8 @@
+# Claude Code
+.claude/
+
+# Superpowers
 .superpowers/
-.idea/
 
 # Binaries and build artifacts
 bin/
@@ -9,6 +12,7 @@ cover.out
 *.test
 
 # IDE
+.idea/
 .vscode/
 
 # OS
