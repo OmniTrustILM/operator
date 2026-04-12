@@ -94,4 +94,4 @@ test/e2e/              - End-to-end tests
 
 ## Design Spec
 
-See `docs/superpowers/specs/2026-04-11-ilm-connector-operator-design.md` for the full design specification including CRD schema, reconciliation flow, and architecture decisions.
+See `docs/design/connector-operator.md` for the full design specification including CRD schema, reconciliation flow, and architecture decisions.

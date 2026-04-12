@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, Operator SDK v1.42.2, Kubebuilder v4, controller-runtime, envtest, Kind, Ginkgo/Gomega, golangci-lint, SonarCloud
 
-**Spec:** `docs/superpowers/specs/2026-04-11-ilm-connector-operator-design.md`
+**Spec:** `docs/design/connector-operator.md`
 
 **Reference implementations:**
 - Cert-manager issuer: `/Users/romancinkais/Development/GitHub-CZERTAINLY/CZERTAINLY-Cert-Manager-Issuer`
@@ -2278,7 +2278,7 @@ make prune-kind-cluster  # Delete Kind cluster
 - All lints must pass before merge
 
 ## Design Spec
-See `docs/superpowers/specs/2026-04-11-ilm-connector-operator-design.md`
+See `docs/design/connector-operator.md`
 ```
 
 - [ ] **Step 2: Update README.md**
