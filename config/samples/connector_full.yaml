@@ -27,6 +27,10 @@ spec:
       cpu: "1"
       memory: 512Mi
 
+  podAnnotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "connector"
+
   securityContext:
     runAsNonRoot: true
     readOnlyRootFilesystem: true

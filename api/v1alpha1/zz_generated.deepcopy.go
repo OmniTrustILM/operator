@@ -164,6 +164,20 @@ func (in *ConnectorSpec) DeepCopyInto(out *ConnectorSpec) {
 		*out = new(SecurityContextSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.PodAnnotations != nil {
+		in, out := &in.PodAnnotations, &out.PodAnnotations
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.PodLabels != nil {
+		in, out := &in.PodLabels, &out.PodLabels
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	if in.Probes != nil {
 		in, out := &in.Probes, &out.Probes
 		*out = new(ProbeSpec)

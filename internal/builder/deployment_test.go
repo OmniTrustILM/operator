@@ -458,3 +458,46 @@ func TestBuildDeploymentGracePeriod(t *testing.T) {
 	require.NotNil(t, podSpec.TerminationGracePeriodSeconds)
 	assert.Equal(t, int64(60), *podSpec.TerminationGracePeriodSeconds)
 }
+
+func TestBuildDeploymentPodAnnotations(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.PodAnnotations = map[string]string{
+		"vault.hashicorp.com/agent-inject": "true",
+		"custom":                           "value",
+	}
+
+	dep := builder.BuildDeployment(conn, "abc123")
+	annotations := dep.Spec.Template.Annotations
+
+	assert.Equal(t, "true", annotations["vault.hashicorp.com/agent-inject"])
+	assert.Equal(t, "value", annotations["custom"])
+	assert.Equal(t, "abc123", annotations[builder.ChecksumAnnotation])
+}
+
+func TestBuildDeploymentPodAnnotationsChecksumPrecedence(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.PodAnnotations = map[string]string{
+		builder.ChecksumAnnotation: "user-value",
+	}
+
+	dep := builder.BuildDeployment(conn, "real-checksum")
+	annotations := dep.Spec.Template.Annotations
+
+	assert.Equal(t, "real-checksum", annotations[builder.ChecksumAnnotation])
+}
+
+func TestBuildDeploymentPodLabels(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.PodLabels = map[string]string{
+		"team":                   "platform",
+		"app.kubernetes.io/name": "override-attempt",
+	}
+
+	dep := builder.BuildDeployment(conn, testChecksum)
+	podLabels := dep.Spec.Template.Labels
+
+	// User label should appear
+	assert.Equal(t, "platform", podLabels["team"])
+	// Operator label takes precedence over user-provided override
+	assert.Equal(t, testConnectorName, podLabels["app.kubernetes.io/name"])
+}

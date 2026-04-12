@@ -57,6 +57,24 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 		podSpec.TerminationGracePeriodSeconds = conn.Spec.Lifecycle.TerminationGracePeriodSeconds
 	}
 
+	// Merge user-provided pod annotations with the checksum annotation.
+	// The checksum annotation takes precedence over user-provided values.
+	podAnnotations := make(map[string]string, len(conn.Spec.PodAnnotations)+1)
+	for k, v := range conn.Spec.PodAnnotations {
+		podAnnotations[k] = v
+	}
+	podAnnotations[ChecksumAnnotation] = configChecksum
+
+	// Merge user-provided pod labels with operator-managed labels.
+	// Operator labels take precedence (they are immutable selectors).
+	podLabels := make(map[string]string, len(conn.Spec.PodLabels)+len(labels))
+	for k, v := range conn.Spec.PodLabels {
+		podLabels[k] = v
+	}
+	for k, v := range labels {
+		podLabels[k] = v
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -70,10 +88,8 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-					Annotations: map[string]string{
-						ChecksumAnnotation: configChecksum,
-					},
+					Labels:      podLabels,
+					Annotations: podAnnotations,
 				},
 				Spec: podSpec,
 			},

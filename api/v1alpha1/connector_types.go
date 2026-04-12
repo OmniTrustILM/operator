@@ -388,6 +388,16 @@ type ConnectorSpec struct {
 	// +optional
 	SecurityContext *SecurityContextSpec `json:"securityContext,omitempty"`
 
+	// PodAnnotations are arbitrary annotations added to the connector pod template.
+	// Useful for integrations like Vault Agent Injector, Istio sidecar injection, etc.
+	// +optional
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+
+	// PodLabels are arbitrary labels added to the connector pod template.
+	// These are merged with the operator-managed labels; operator labels take precedence.
+	// +optional
+	PodLabels map[string]string `json:"podLabels,omitempty"`
+
 	// Probes defines the probe configuration for the connector.
 	// +optional
 	Probes *ProbeSpec `json:"probes,omitempty"`

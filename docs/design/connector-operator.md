@@ -70,6 +70,13 @@ spec:
   replicas: 1                      # default
   resources: {}                    # CPU/memory requests/limits
 
+  # Pod metadata (for third-party integrations like Vault Agent Injector, Istio, etc.)
+  podAnnotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "connector"
+  podLabels:
+    team: platform
+
   # Security
   securityContext:
     runAsNonRoot: true             # default

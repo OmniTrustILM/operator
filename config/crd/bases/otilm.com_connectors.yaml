@@ -206,6 +206,20 @@ spec:
                 required:
                 - enabled
                 type: object
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: |-
+                  PodAnnotations are arbitrary annotations added to the connector pod template.
+                  Useful for integrations like Vault Agent Injector, Istio sidecar injection, etc.
+                type: object
+              podLabels:
+                additionalProperties:
+                  type: string
+                description: |-
+                  PodLabels are arbitrary labels added to the connector pod template.
+                  These are merged with the operator-managed labels; operator labels take precedence.
+                type: object
               probes:
                 description: Probes defines the probe configuration for the connector.
                 properties:

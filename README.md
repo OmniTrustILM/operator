@@ -183,6 +183,8 @@ The `Connector` CRD (`otilm.com/v1alpha1`) supports:
 - `spec.configMapRefs` -- configmap references (as env vars or volume mounts)
 - `spec.volumes` -- additional ephemeral volumes
 - `spec.probes` -- liveness, readiness, startup probe configuration
+- `spec.podAnnotations` -- arbitrary annotations on the pod template (e.g., Vault Agent Injector, Istio)
+- `spec.podLabels` -- arbitrary labels on the pod template (merged with operator labels; operator labels take precedence)
 - `spec.securityContext` -- pod security context
 - `spec.lifecycle` -- termination grace period and PDB settings
 - `spec.metrics` -- metrics endpoint and ServiceMonitor configuration
