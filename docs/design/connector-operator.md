@@ -16,16 +16,16 @@ Kubernetes Operator for managing ILM platform connectors via Custom Resource Def
 
 ## Scope
 
-### In Scope (MVP)
+### Implemented
 - `Connector` CRD (`otilm.com/v1alpha1`) for deploying any ILM connector
 - Operator that reconciles Connector CRs into Kubernetes resources (Deployment, Service, ServiceAccount, PDB, ServiceMonitor)
 - Secret/ConfigMap watching with automatic rolling updates on change
 - Optional connector registration with ILM platform Core API
 - Helm chart for deploying the operator itself
-- Comprehensive test suite (80%+ coverage, <3% duplication)
+- Comprehensive test suite (87% overall coverage, <3% duplication)
 - CI/CD with SonarCloud quality gates, golangci-lint, Copilot reviews
 
-### Out of Scope (MVP)
+### Future Work
 - Multi-cluster / remote deployment (proxy integration)
 - Horizontal Pod Autoscaler (HPA) management
 - ILM Core changes for CR creation
@@ -345,9 +345,12 @@ operator/
 │   ├── controller/
 │   │   ├── connector_controller.go     # Main reconciler
 │   │   ├── connector_controller_test.go
+│   │   ├── suite_test.go               # envtest suite setup
 │   │   └── watches.go                  # Secret/ConfigMap watch handlers
 │   │
 │   ├── builder/
+│   │   ├── common.go                   # Shared builder helpers (labels, annotations)
+│   │   ├── common_test.go
 │   │   ├── deployment.go               # Builds Deployment from CR spec
 │   │   ├── deployment_test.go
 │   │   ├── service.go                  # Builds Service
@@ -389,11 +392,21 @@ operator/
 │           ├── Chart.yaml
 │           ├── values.yaml
 │           └── templates/
+│               ├── _helpers.tpl
 │               ├── deployment.yaml
 │               ├── service-account.yaml
 │               ├── cluster-role.yaml
 │               ├── cluster-role-binding.yaml
+│               ├── leader-election-role.yaml
+│               ├── leader-election-role-binding.yaml
 │               └── crds/
+│
+├── test/
+│   ├── e2e/
+│   │   ├── e2e_suite_test.go           # Ginkgo E2E suite setup
+│   │   └── e2e_test.go                 # End-to-end test cases
+│   └── utils/
+│       └── utils.go                    # Shared E2E test utilities
 │
 ├── Dockerfile                          # Multi-stage: Go builder + distroless
 ├── Makefile                            # Build, test, lint, kind cluster, deploy
@@ -438,13 +451,12 @@ operator/
 - RBAC enforcement in real cluster
 - Testcontainers for PostgreSQL when testing DB-dependent connectors
 
-### Coverage Requirements
-- `internal/builder/` — 95%+ (pure functions)
-- `internal/checksum/` — 95%+ (pure functions)
-- `internal/platform/` — 90%+ (mocked HTTP)
-- `internal/controller/` — 80%+ (envtest-based)
-- `internal/monitoring/` — 80%+
-- **Overall: 80%+ minimum, enforced in CI**
+### Coverage (Actuals)
+- `internal/builder/` — 90%
+- `internal/checksum/` — 100%
+- `internal/platform/` — 97%
+- `internal/controller/` — 83%
+- **Overall: 87%**
 - **Code duplication: <3%, enforced by SonarCloud**
 
 ### Test Infrastructure (Makefile)
@@ -454,6 +466,7 @@ operator/
 - `make kind-load` — load operator image into Kind
 - `make lint` — golangci-lint static analysis
 - `make coverage` — verify 80% threshold
+- `make sonar` — run local SonarQube analysis (requires a running SonarQube instance; mirrors the SonarCloud gate used in CI)
 
 ## Quality Assurance
 
@@ -540,13 +553,13 @@ The Helm chart creates: operator Deployment, ServiceAccount, ClusterRole, Cluste
 
 ## Operator Capability Level Progression
 
-| Level | Name | MVP Status | Features |
-|-------|------|------------|----------|
-| I | Basic Install | Included | Deploy connectors from CR, configure via spec, report status |
-| II | Seamless Upgrades | Included | Rolling updates on spec change, Secret/ConfigMap checksum triggers, drift correction |
-| III | Full Lifecycle | Included | PDB, graceful shutdown, finalizers, Kubernetes events, rich status conditions |
+| Level | Name | Status | Features |
+|-------|------|--------|----------|
+| I | Basic Install | Implemented | Deploy connectors from CR, configure via spec, report status |
+| II | Seamless Upgrades | Implemented | Rolling updates on spec change, Secret/ConfigMap checksum triggers, drift correction |
+| III | Full Lifecycle | Implemented | PDB, graceful shutdown, finalizers, Kubernetes events, rich status conditions |
 | IV | Deep Insights | Foundation | `/monitoring` package, event recorder, ServiceMonitor support, custom metrics registration. Alert rules, dashboards, and runbooks planned as fast follow-up. |
-| V | Auto Pilot | Future | Auto-scaling, auto-healing, auto-tuning, abnormality detection |
+| V | Auto Pilot | Future Work | Auto-scaling, auto-healing, auto-tuning, abnormality detection |
 
 ## Connector Database Patterns
 

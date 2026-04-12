@@ -37,15 +37,36 @@ apiVersion: otilm.com/v1alpha1
 kind: Connector
 metadata:
   name: x509-compliance-provider
+  namespace: default
 spec:
   image:
     repository: docker.io/czertainly/czertainly-x509-compliance-provider
-    tag: "2.13.0"
+    tag: "1.3.1"
   service:
     port: 8080
+  # x509-compliance-provider is a legacy connector using /v1/health,
+  # not the /v2/health/* endpoints used by newer connectors.
+  # Override the default probes accordingly.
+  probes:
+    liveness:
+      path: /v1/health
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 3
+    readiness:
+      path: /v1/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /v1/health
+      periodSeconds: 10
+      failureThreshold: 45
   env:
     - name: SERVER_PORT
       value: "8080"
+    - name: LOG_LEVEL
+      value: "INFO"
 ```
 
 ```bash
@@ -64,7 +85,7 @@ kubectl describe connector x509-compliance-provider
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker or compatible container runtime
 - Kind (for local testing)
 
@@ -82,6 +103,7 @@ kubectl describe connector x509-compliance-provider
 | `make kind-cluster` | Create a Kind cluster for development |
 | `make kind-load` | Load operator image into Kind cluster |
 | `make test-e2e` | Run end-to-end tests |
+| `make sonar` | Run local SonarQube analysis |
 
 ### Run locally
 
@@ -135,3 +157,8 @@ See `config/samples/` for example CRs:
 - [Design Specification](docs/design/connector-operator.md)
 - [Helm Chart](deploy/charts/ilm-operator/)
 - [CLAUDE.md Development Guide](CLAUDE.md)
+- [GitHub Discussion #57](https://github.com/orgs/OmniTrustILM/discussions/57) — context on why the operator exists
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
