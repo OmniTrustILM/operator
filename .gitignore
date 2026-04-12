@@ -1,2 +1,15 @@
 .superpowers/
 .idea/
+
+# Binaries and build artifacts
+bin/
+cover.out
+*.o
+*.exe
+*.test
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store

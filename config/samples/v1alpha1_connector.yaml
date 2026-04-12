@@ -1,0 +1,9 @@
+apiVersion: otilm.com/v1alpha1
+kind: Connector
+metadata:
+  labels:
+    app.kubernetes.io/name: ilm-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: connector-sample
+spec:
+  # TODO(user): Add fields here
