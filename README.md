@@ -157,7 +157,6 @@ See `config/samples/` for example CRs:
 - [Design Specification](docs/design/connector-operator.md)
 - [Helm Chart](deploy/charts/ilm-operator/)
 - [CLAUDE.md Development Guide](CLAUDE.md)
-- [GitHub Discussion #57](https://github.com/orgs/OmniTrustILM/discussions/57) — context on why the operator exists
 
 ## License
 
