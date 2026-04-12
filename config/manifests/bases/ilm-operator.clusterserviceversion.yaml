@@ -66,6 +66,7 @@ spec:
   - email: support@otilm.com
     name: OmniTrust ILM
   maturity: alpha
+  minKubeVersion: 1.28.0
   provider:
     name: OmniTrust ILM
     url: https://otilm.com

@@ -275,7 +275,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-04-12T15:42:13Z"
+    createdAt: "2026-04-12T15:46:03Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1
@@ -537,6 +537,7 @@ spec:
   - email: support@otilm.com
     name: OmniTrust ILM
   maturity: alpha
+  minKubeVersion: 1.28.0
   provider:
     name: OmniTrust ILM
     url: https://otilm.com
