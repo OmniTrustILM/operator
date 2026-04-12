@@ -39,6 +39,9 @@ import (
 
 	otilmcomv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/controller"
+	// Import monitoring package for Prometheus metrics registration side effects.
+	_ "github.com/OmniTrustILM/operator/internal/monitoring"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -51,6 +54,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(otilmcomv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -203,8 +207,9 @@ func main() {
 	}
 
 	if err := (&controller.ConnectorReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("ilm-operator"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Connector")
 		os.Exit(1)
