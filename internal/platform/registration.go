@@ -42,7 +42,7 @@ func Register(ctx context.Context, client *Client, req *RegistrationRequest) (*R
 }
 
 // BuildRegistrationRequest creates a RegistrationRequest from a Connector spec and service endpoint.
-func BuildRegistrationRequest(connectorName, serviceEndpoint string, reg *otilmv1alpha1.RegistrationSpec) *RegistrationRequest {
+func BuildRegistrationRequest(serviceEndpoint string, reg *otilmv1alpha1.RegistrationSpec) *RegistrationRequest {
 	return &RegistrationRequest{
 		Name:             reg.Name,
 		Version:          "v2",

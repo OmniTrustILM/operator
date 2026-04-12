@@ -47,11 +47,13 @@ import (
 )
 
 const (
-	finalizerName  = "otilm.com/finalizer"
-	requeueDelay   = 30 * time.Second
-	condAvailable  = "Available"
-	condProgessing = "Progressing"
-	condDegraded   = "Degraded"
+	finalizerName       = "otilm.com/finalizer"
+	requeueDelay        = 30 * time.Second
+	registrationInitial = 5 * time.Second
+	registrationMax     = 5 * time.Minute
+	condAvailable       = "Available"
+	condProgressing     = "Progressing"
+	condDegraded        = "Degraded"
 )
 
 // ConnectorReconciler reconciles a Connector object.
@@ -61,7 +63,7 @@ type ConnectorReconciler struct {
 	Recorder record.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=otilm.com,resources=connectors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=otilm.com,resources=connectors,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=otilm.com,resources=connectors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=otilm.com,resources=connectors/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -124,7 +126,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if conn.Status.Phase == "" || conn.Status.ObservedGeneration != conn.Generation {
 		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condProgessing,
+			Type:               condProgressing,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: conn.Generation,
 			Reason:             "Reconciling",
@@ -315,7 +317,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Message:            fmt.Sprintf("%d/%d replicas ready", readyReplicas, desiredReplicas),
 		})
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condProgessing,
+			Type:               condProgressing,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: conn.Generation,
 			Reason:             "DeploymentComplete",
@@ -333,7 +335,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// Partially ready -- still updating.
 		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseUpdating
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condProgessing,
+			Type:               condProgressing,
 			Status:             metav1.ConditionTrue,
 			ObservedGeneration: conn.Generation,
 			Reason:             "RolloutInProgress",
@@ -362,7 +364,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			// Not yet ready, but not explicitly failed -- still deploying.
 			conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
 			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-				Type:               condProgessing,
+				Type:               condProgressing,
 				Status:             metav1.ConditionTrue,
 				ObservedGeneration: conn.Generation,
 				Reason:             "WaitingForReplicas",
@@ -376,7 +378,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		needsRegistration := conn.Status.Registration == nil || conn.Status.Registration.UUID == ""
 		if needsRegistration {
 			endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
-			regReq := platform.BuildRegistrationRequest(conn.Name, endpoint, conn.Spec.Registration)
+			regReq := platform.BuildRegistrationRequest(endpoint, conn.Spec.Registration)
 			platformClient := platform.NewClient(conn.Spec.Registration.PlatformUrl)
 
 			regResp, err := platform.Register(ctx, platformClient, regReq)
@@ -392,13 +394,14 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 					})
 					r.Recorder.Eventf(&conn, corev1.EventTypeWarning, monitoring.ReasonRegistrationFailed, "Registration failed: %s", platformErr.Message)
 					if platformErr.Retryable {
-						// 5xx / network error: requeue with backoff.
+						// 5xx / network error: requeue with exponential backoff (5s → 5m).
 						logger.Info("registration failed (retryable), will retry", "error", err)
 						if err := r.Status().Update(ctx, &conn); err != nil {
 							logger.Error(err, "failed to update status after registration failure")
 						}
 						monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "requeue").Inc()
-						return ctrl.Result{RequeueAfter: requeueDelay}, nil
+						backoff := registrationBackoff(&conn)
+						return ctrl.Result{RequeueAfter: backoff}, nil
 					}
 					// 4xx: don't requeue, manual intervention needed.
 					logger.Info("registration failed (non-retryable), manual intervention needed", "error", err)
@@ -466,6 +469,27 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// registrationBackoff computes exponential backoff for registration retries.
+// Uses the registration status to determine retry count via the Degraded condition's
+// last transition time. Backoff: 5s, 10s, 20s, 40s, 80s, 160s, 300s (capped at 5m).
+func registrationBackoff(conn *otilmv1alpha1.Connector) time.Duration {
+	for _, c := range conn.Status.Conditions {
+		if c.Type == condDegraded && c.Status == metav1.ConditionTrue && c.Reason == monitoring.ReasonRegistrationFailed {
+			elapsed := time.Since(c.LastTransitionTime.Time)
+			// Double the backoff based on how long we've been in degraded state
+			backoff := registrationInitial
+			for backoff < elapsed && backoff < registrationMax {
+				backoff *= 2
+			}
+			if backoff > registrationMax {
+				backoff = registrationMax
+			}
+			return backoff
+		}
+	}
+	return registrationInitial
 }
 
 // SetupWithManager sets up the controller with the Manager.

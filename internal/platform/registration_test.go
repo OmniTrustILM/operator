@@ -113,7 +113,7 @@ func TestBuildRegistrationRequest(t *testing.T) {
 		},
 	}
 
-	req := BuildRegistrationRequest("test-connector", "http://my-connector.default.svc.cluster.local:8080", reg)
+	req := BuildRegistrationRequest("http://my-connector.default.svc.cluster.local:8080", reg)
 	assert.Equal(t, "my-connector", req.Name)
 	assert.Equal(t, "v2", req.Version)
 	assert.Equal(t, "http://my-connector.default.svc.cluster.local:8080", req.URL)
@@ -134,7 +134,7 @@ func TestBuildRegistrationRequestAuthNone(t *testing.T) {
 		AuthType: otilmv1alpha1.AuthTypeNone,
 	}
 
-	req := BuildRegistrationRequest("simple-connector", "http://simple.default.svc.cluster.local:8080", reg)
+	req := BuildRegistrationRequest("http://simple.default.svc.cluster.local:8080", reg)
 	assert.Equal(t, "simple-connector", req.Name)
 	assert.Equal(t, "v2", req.Version)
 	assert.Equal(t, "http://simple.default.svc.cluster.local:8080", req.URL)
