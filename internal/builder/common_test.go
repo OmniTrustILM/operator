@@ -9,10 +9,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const testConnectorName = "test-connector"
+
 func newTestConnector() *otilmv1alpha1.Connector {
 	return &otilmv1alpha1.Connector{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-connector",
+			Name:      testConnectorName,
 			Namespace: "default",
 		},
 		Spec: otilmv1alpha1.ConnectorSpec{
@@ -32,7 +34,7 @@ func TestLabels(t *testing.T) {
 	conn := newTestConnector()
 	labels := builder.Labels(conn)
 
-	assert.Equal(t, "test-connector", labels["app.kubernetes.io/name"])
+	assert.Equal(t, testConnectorName, labels["app.kubernetes.io/name"])
 	assert.Equal(t, "ilm-operator", labels["app.kubernetes.io/managed-by"])
 	assert.Equal(t, "connector", labels["app.kubernetes.io/component"])
 	assert.Equal(t, conn.Name, labels["otilm.com/connector"])
@@ -42,7 +44,7 @@ func TestSelectorLabels(t *testing.T) {
 	conn := newTestConnector()
 	labels := builder.SelectorLabels(conn)
 
-	assert.Equal(t, "test-connector", labels["app.kubernetes.io/name"])
+	assert.Equal(t, testConnectorName, labels["app.kubernetes.io/name"])
 	assert.Equal(t, "connector", labels["app.kubernetes.io/component"])
 	assert.Equal(t, conn.Name, labels["otilm.com/connector"])
 	_, exists := labels["app.kubernetes.io/managed-by"]
@@ -51,5 +53,5 @@ func TestSelectorLabels(t *testing.T) {
 
 func TestChildResourceName(t *testing.T) {
 	conn := newTestConnector()
-	assert.Equal(t, "test-connector", builder.ChildResourceName(conn))
+	assert.Equal(t, testConnectorName, builder.ChildResourceName(conn))
 }

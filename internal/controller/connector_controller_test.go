@@ -48,8 +48,16 @@ import (
 )
 
 const (
-	timeout  = 30 * time.Second
-	interval = 250 * time.Millisecond
+	timeout            = 30 * time.Second
+	interval           = 250 * time.Millisecond
+	testConnectorName  = "test-connector"
+	testImage          = "registry.example.com/connector:1.0.0"
+	triggerAnnotation  = "test/trigger"
+	waitingDeployment  = "waiting for Deployment to be created"
+	waitingConnector   = "waiting for Connector to be created"
+	triggerReconcile   = "triggering reconciliation"
+	verifyPhaseFailed  = "verifying phase is Failed"
+	verifyPhaseRunning = "verifying phase is Running"
 )
 
 // helper to create a unique namespace for each test
@@ -123,7 +131,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
 				g.Expect(dep.Labels).To(HaveKeyWithValue(builder.NameLabel, connName))
 				g.Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))
-				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.example.com/connector:1.0.0"))
+				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(testImage))
 				g.Expect(*dep.Spec.Replicas).To(Equal(int32(1)))
 				g.Expect(dep.OwnerReferences).To(HaveLen(1))
 				g.Expect(dep.OwnerReferences[0].Name).To(Equal(connName))
@@ -160,11 +168,11 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
-				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.example.com/connector:1.0.0"))
+				g.Expect(dep.Spec.Template.Spec.Containers[0].Image).To(Equal(testImage))
 			}, timeout, interval).Should(Succeed())
 
 			By("updating the Connector image tag")
@@ -247,7 +255,7 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "reconcile"
+				latest.Annotations[triggerAnnotation] = "reconcile"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -302,7 +310,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(found).To(BeTrue(), "should have a Degraded=True condition")
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Failed")
+			By(verifyPhaseFailed)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -526,7 +534,7 @@ var _ = Describe("Connector Controller", func() {
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
-				g.Expect(c.Status.CurrentImage).To(Equal("registry.example.com/connector:1.0.0"))
+				g.Expect(c.Status.CurrentImage).To(Equal(testImage))
 			}, timeout, interval).Should(Succeed())
 		})
 	})
@@ -594,7 +602,7 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "reconcile-cm"
+				latest.Annotations[triggerAnnotation] = "reconcile-cm"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -649,7 +657,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(found).To(BeTrue(), "should have a Degraded=True condition")
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Failed")
+			By(verifyPhaseFailed)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -742,6 +750,7 @@ var _ = Describe("Connector Controller", func() {
 	// Test 12: findConnectorsForConfigMap watch handler (match)
 	// ---------------------------------------------------------------
 	Context("TestFindConnectorsForConfigMapMatch", func() {
+		const watchCMConnName = "watch-cm-conn"
 		var ns string
 
 		BeforeEach(func() {
@@ -750,16 +759,16 @@ var _ = Describe("Connector Controller", func() {
 
 		It("should return reconcile requests for Connectors that reference the ConfigMap", func() {
 			By("creating a Connector that references a ConfigMap")
-			conn := newConnector("watch-cm-conn", ns)
+			conn := newConnector(watchCMConnName, ns)
 			conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
 				{Name: "watched-cm", Type: otilmv1alpha1.RefTypeEnv},
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
-			By("waiting for Connector to be created")
+			By(waitingConnector)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-cm-conn", Namespace: ns}, &c)).To(Succeed())
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: watchCMConnName, Namespace: ns}, &c)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
 			By("creating a ConfigMap and verifying the watch handler returns requests")
@@ -776,7 +785,7 @@ var _ = Describe("Connector Controller", func() {
 			}
 			requests := reconciler.findConnectorsForConfigMap(ctx, cm)
 			Expect(requests).To(HaveLen(1))
-			Expect(requests[0].Name).To(Equal("watch-cm-conn"))
+			Expect(requests[0].Name).To(Equal(watchCMConnName))
 			Expect(requests[0].Namespace).To(Equal(ns))
 		})
 	})
@@ -799,7 +808,7 @@ var _ = Describe("Connector Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
-			By("waiting for Connector to be created")
+			By(waitingConnector)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-cm-conn2", Namespace: ns}, &c)).To(Succeed())
@@ -824,6 +833,7 @@ var _ = Describe("Connector Controller", func() {
 	// Test 13: findConnectorsForSecret watch handler
 	// ---------------------------------------------------------------
 	Context("TestFindConnectorsForSecret", func() {
+		const watchSecretConnName = "watch-secret-conn"
 		var ns string
 
 		BeforeEach(func() {
@@ -832,16 +842,16 @@ var _ = Describe("Connector Controller", func() {
 
 		It("should return reconcile requests for Connectors that reference the Secret", func() {
 			By("creating a Connector that references a Secret")
-			conn := newConnector("watch-secret-conn", ns)
+			conn := newConnector(watchSecretConnName, ns)
 			conn.Spec.SecretRefs = []otilmv1alpha1.SecretRef{
 				{Name: "watched-secret", Type: otilmv1alpha1.RefTypeEnv},
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
-			By("waiting for Connector to be created")
+			By(waitingConnector)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-secret-conn", Namespace: ns}, &c)).To(Succeed())
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: watchSecretConnName, Namespace: ns}, &c)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
 			secret := &corev1.Secret{
@@ -856,7 +866,7 @@ var _ = Describe("Connector Controller", func() {
 			}
 			requests := reconciler.findConnectorsForSecret(ctx, secret)
 			Expect(requests).To(HaveLen(1))
-			Expect(requests[0].Name).To(Equal("watch-secret-conn"))
+			Expect(requests[0].Name).To(Equal(watchSecretConnName))
 		})
 	})
 
@@ -917,7 +927,7 @@ var _ = Describe("Connector Controller", func() {
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
 				PlatformURL: "http://platform.example.com",
-				Name:        "test-connector",
+				Name:        testConnectorName,
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
@@ -981,7 +991,7 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -997,18 +1007,18 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "replicas-ready"
+				latest.Annotations[triggerAnnotation] = "replicas-ready"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Running")
+			By(verifyPhaseRunning)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -1051,7 +1061,7 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1067,14 +1077,14 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "partial-replicas"
+				latest.Annotations[triggerAnnotation] = "partial-replicas"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1120,7 +1130,7 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1144,18 +1154,18 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "replica-failure"
+				latest.Annotations[triggerAnnotation] = "replica-failure"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Failed")
+			By(verifyPhaseFailed)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -1209,14 +1219,14 @@ var _ = Describe("Connector Controller", func() {
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
 				PlatformURL: server.URL,
-				Name:        "test-connector",
+				Name:        testConnectorName,
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1232,14 +1242,14 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "reg-success"
+				latest.Annotations[triggerAnnotation] = "reg-success"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1252,7 +1262,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(c.Status.Registration.RegisteredAt).NotTo(BeNil())
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Running")
+			By(verifyPhaseRunning)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -1284,14 +1294,14 @@ var _ = Describe("Connector Controller", func() {
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
 				PlatformURL: server.URL,
-				Name:        "test-connector",
+				Name:        testConnectorName,
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1307,14 +1317,14 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "reg-5xx"
+				latest.Annotations[triggerAnnotation] = "reg-5xx"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1358,14 +1368,14 @@ var _ = Describe("Connector Controller", func() {
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
 				PlatformURL: server.URL,
-				Name:        "test-connector",
+				Name:        testConnectorName,
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1381,14 +1391,14 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "reg-4xx"
+				latest.Annotations[triggerAnnotation] = "reg-4xx"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1434,7 +1444,7 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1457,14 +1467,14 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("triggering reconciliation")
+			By(triggerReconcile)
 			Eventually(func(g Gomega) {
 				var latest otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "event-deployed"
+				latest.Annotations[triggerAnnotation] = "event-deployed"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1499,11 +1509,11 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "event-failed"
+				latest.Annotations[triggerAnnotation] = "event-failed"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Failed")
+			By(verifyPhaseFailed)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -1528,7 +1538,7 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "event-recovered"
+				latest.Annotations[triggerAnnotation] = "event-recovered"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
@@ -1560,7 +1570,7 @@ var _ = Describe("Connector Controller", func() {
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
 
-			By("waiting for Deployment to be created")
+			By(waitingDeployment)
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
 				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
@@ -1583,11 +1593,11 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "set-running"
+				latest.Annotations[triggerAnnotation] = "set-running"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 
-			By("verifying phase is Running")
+			By(verifyPhaseRunning)
 			Eventually(func(g Gomega) {
 				var c otilmv1alpha1.Connector
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
@@ -1611,7 +1621,7 @@ var _ = Describe("Connector Controller", func() {
 				if latest.Annotations == nil {
 					latest.Annotations = map[string]string{}
 				}
-				latest.Annotations["test/trigger"] = "set-updating"
+				latest.Annotations[triggerAnnotation] = "set-updating"
 				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
 			}, timeout, interval).Should(Succeed())
 

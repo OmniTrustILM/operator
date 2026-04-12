@@ -12,6 +12,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+const (
+	testChecksum   = "chk"
+	testSecretName = "my-secret"
+	testCMName     = "app-config"
+	testMemory128  = "128Mi"
+	testVolName    = "tmp-data"
+)
+
 func TestBuildDeploymentBasic(t *testing.T) {
 	conn := newTestConnector()
 	replicas := int32(3)
@@ -20,7 +28,7 @@ func TestBuildDeploymentBasic(t *testing.T) {
 
 	dep := builder.BuildDeployment(conn, "abc123")
 
-	assert.Equal(t, "test-connector", dep.Name)
+	assert.Equal(t, testConnectorName, dep.Name)
 	assert.Equal(t, "default", dep.Namespace)
 	assert.Equal(t, builder.Labels(conn), dep.Labels)
 	assert.Equal(t, int32(3), *dep.Spec.Replicas)
@@ -33,7 +41,7 @@ func TestBuildDeploymentBasic(t *testing.T) {
 	assert.Equal(t, "abc123", dep.Spec.Template.Annotations[builder.ChecksumAnnotation])
 
 	// ServiceAccountName
-	assert.Equal(t, "test-connector", dep.Spec.Template.Spec.ServiceAccountName)
+	assert.Equal(t, testConnectorName, dep.Spec.Template.Spec.ServiceAccountName)
 
 	// Container
 	require.Len(t, dep.Spec.Template.Spec.Containers, 1)
@@ -70,7 +78,7 @@ func TestBuildDeploymentProbes(t *testing.T) {
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	// Liveness
@@ -101,7 +109,7 @@ func TestBuildDeploymentDefaultProbes(t *testing.T) {
 	conn := newTestConnector()
 	// Probes is nil by default
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	// Default liveness
@@ -136,7 +144,7 @@ func TestBuildDeploymentEnvVars(t *testing.T) {
 		{Name: "DB_HOST", Value: "localhost"},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	// Find the inline env vars
@@ -155,7 +163,7 @@ func TestBuildDeploymentSecretRefEnv(t *testing.T) {
 	envVarName := "DB_PASSWORD"
 	conn.Spec.SecretRefs = []otilmv1alpha1.SecretRef{
 		{
-			Name: "my-secret",
+			Name: testSecretName,
 			Type: otilmv1alpha1.RefTypeEnv,
 			Keys: []otilmv1alpha1.RefKeyMapping{
 				{
@@ -166,7 +174,7 @@ func TestBuildDeploymentSecretRefEnv(t *testing.T) {
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	// Find env var with ValueFrom
@@ -180,7 +188,7 @@ func TestBuildDeploymentSecretRefEnv(t *testing.T) {
 	require.NotNil(t, found, "expected env var DB_PASSWORD")
 	require.NotNil(t, found.ValueFrom)
 	require.NotNil(t, found.ValueFrom.SecretKeyRef)
-	assert.Equal(t, "my-secret", found.ValueFrom.SecretKeyRef.Name)
+	assert.Equal(t, testSecretName, found.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "password", found.ValueFrom.SecretKeyRef.Key)
 }
 
@@ -188,18 +196,18 @@ func TestBuildDeploymentSecretRefEnvAllKeys(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.SecretRefs = []otilmv1alpha1.SecretRef{
 		{
-			Name: "my-secret",
+			Name: testSecretName,
 			Type: otilmv1alpha1.RefTypeEnv,
 			// No keys → envFrom
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	require.Len(t, c.EnvFrom, 1)
 	require.NotNil(t, c.EnvFrom[0].SecretRef)
-	assert.Equal(t, "my-secret", c.EnvFrom[0].SecretRef.Name)
+	assert.Equal(t, testSecretName, c.EnvFrom[0].SecretRef.Name)
 }
 
 func TestBuildDeploymentSecretRefVolume(t *testing.T) {
@@ -220,7 +228,7 @@ func TestBuildDeploymentSecretRefVolume(t *testing.T) {
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	podSpec := dep.Spec.Template.Spec
 	c := podSpec.Containers[0]
 
@@ -256,19 +264,19 @@ func TestBuildDeploymentConfigMapRefEnv(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
 		{
-			Name: "app-config",
+			Name: testCMName,
 			Type: otilmv1alpha1.RefTypeEnv,
 			// No keys → envFrom
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	// Should have an envFrom with configMapRef
 	var found bool
 	for _, ef := range c.EnvFrom {
-		if ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == "app-config" {
+		if ef.ConfigMapRef != nil && ef.ConfigMapRef.Name == testCMName {
 			found = true
 			break
 		}
@@ -281,13 +289,13 @@ func TestBuildDeploymentConfigMapRefVolume(t *testing.T) {
 	mountPath := "/etc/config"
 	conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
 		{
-			Name:      "app-config",
+			Name:      testCMName,
 			Type:      otilmv1alpha1.RefTypeVolume,
 			MountPath: &mountPath,
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	podSpec := dep.Spec.Template.Spec
 	c := podSpec.Containers[0]
 
@@ -301,7 +309,7 @@ func TestBuildDeploymentConfigMapRefVolume(t *testing.T) {
 	}
 	require.NotNil(t, vol, "expected volume configmap-app-config")
 	require.NotNil(t, vol.ConfigMap)
-	assert.Equal(t, "app-config", vol.ConfigMap.Name)
+	assert.Equal(t, testCMName, vol.ConfigMap.Name)
 
 	// VolumeMount
 	var vm *corev1.VolumeMount
@@ -319,10 +327,10 @@ func TestBuildDeploymentConfigMapRefVolume(t *testing.T) {
 func TestBuildDeploymentEphemeralVolumes(t *testing.T) {
 	conn := newTestConnector()
 	medium := "Memory"
-	sizeLimit := "128Mi"
+	sizeLimit := testMemory128
 	conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{
 		{
-			Name:      "tmp-data",
+			Name:      testVolName,
 			MountPath: "/tmp",
 			EmptyDir: &otilmv1alpha1.EmptyDirSpec{
 				Medium:    &medium,
@@ -331,14 +339,14 @@ func TestBuildDeploymentEphemeralVolumes(t *testing.T) {
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	podSpec := dep.Spec.Template.Spec
 	c := podSpec.Containers[0]
 
 	// Volume
 	var vol *corev1.Volume
 	for i := range podSpec.Volumes {
-		if podSpec.Volumes[i].Name == "tmp-data" {
+		if podSpec.Volumes[i].Name == testVolName {
 			vol = &podSpec.Volumes[i]
 			break
 		}
@@ -346,13 +354,13 @@ func TestBuildDeploymentEphemeralVolumes(t *testing.T) {
 	require.NotNil(t, vol, "expected volume tmp-data")
 	require.NotNil(t, vol.EmptyDir)
 	assert.Equal(t, corev1.StorageMediumMemory, vol.EmptyDir.Medium)
-	expectedSize := resource.MustParse("128Mi")
+	expectedSize := resource.MustParse(testMemory128)
 	assert.True(t, expectedSize.Equal(*vol.EmptyDir.SizeLimit))
 
 	// VolumeMount
 	var vm *corev1.VolumeMount
 	for i := range c.VolumeMounts {
-		if c.VolumeMounts[i].Name == "tmp-data" {
+		if c.VolumeMounts[i].Name == testVolName {
 			vm = &c.VolumeMounts[i]
 			break
 		}
@@ -370,7 +378,7 @@ func TestBuildDeploymentSecurityContext(t *testing.T) {
 		ReadOnlyRootFilesystem: &readOnly,
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	require.NotNil(t, c.SecurityContext)
@@ -389,7 +397,7 @@ func TestBuildDeploymentDefaultSecurityContext(t *testing.T) {
 	conn := newTestConnector()
 	// SecurityContext is nil
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	require.NotNil(t, c.SecurityContext)
@@ -408,7 +416,7 @@ func TestBuildDeploymentResources(t *testing.T) {
 	conn.Spec.Resources = &corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("100m"),
-			corev1.ResourceMemory: resource.MustParse("128Mi"),
+			corev1.ResourceMemory: resource.MustParse(testMemory128),
 		},
 		Limits: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("500m"),
@@ -416,11 +424,11 @@ func TestBuildDeploymentResources(t *testing.T) {
 		},
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	assert.True(t, c.Resources.Requests.Cpu().Equal(resource.MustParse("100m")))
-	assert.True(t, c.Resources.Requests.Memory().Equal(resource.MustParse("128Mi")))
+	assert.True(t, c.Resources.Requests.Memory().Equal(resource.MustParse(testMemory128)))
 	assert.True(t, c.Resources.Limits.Cpu().Equal(resource.MustParse("500m")))
 	assert.True(t, c.Resources.Limits.Memory().Equal(resource.MustParse("512Mi")))
 }
@@ -429,7 +437,7 @@ func TestBuildDeploymentImagePullSecrets(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.Image.PullSecrets = []string{"regcred", "another-secret"}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	podSpec := dep.Spec.Template.Spec
 
 	require.Len(t, podSpec.ImagePullSecrets, 2)
@@ -444,7 +452,7 @@ func TestBuildDeploymentGracePeriod(t *testing.T) {
 		TerminationGracePeriodSeconds: &grace,
 	}
 
-	dep := builder.BuildDeployment(conn, "chk")
+	dep := builder.BuildDeployment(conn, testChecksum)
 	podSpec := dep.Spec.Template.Spec
 
 	require.NotNil(t, podSpec.TerminationGracePeriodSeconds)

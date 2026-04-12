@@ -14,6 +14,13 @@ import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
 
+const (
+	testConnectorName = "my-connector"
+	testAPIVersion    = "v2"
+	testConnectorURL  = "http://my-connector.default.svc.cluster.local:8080"
+	testAuthTypeBasic = "basic"
+)
+
 func TestRegisterSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
@@ -22,16 +29,16 @@ func TestRegisterSuccess(t *testing.T) {
 		var req RegistrationRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
 		require.NoError(t, err)
-		assert.Equal(t, "my-connector", req.Name)
-		assert.Equal(t, "v2", req.Version)
-		assert.Equal(t, "http://my-connector.default.svc.cluster.local:8080", req.URL)
-		assert.Equal(t, "basic", req.AuthType)
+		assert.Equal(t, testConnectorName, req.Name)
+		assert.Equal(t, testAPIVersion, req.Version)
+		assert.Equal(t, testConnectorURL, req.URL)
+		assert.Equal(t, testAuthTypeBasic, req.AuthType)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		require.NoError(t, json.NewEncoder(w).Encode(RegistrationResponse{
 			UUID:   "abc-123",
-			Name:   "my-connector",
+			Name:   testConnectorName,
 			Status: "waitingForApproval",
 		}))
 	}))
@@ -39,14 +46,14 @@ func TestRegisterSuccess(t *testing.T) {
 
 	client := NewClient(server.URL)
 	resp, err := Register(context.Background(), client, &RegistrationRequest{
-		Name:     "my-connector",
-		Version:  "v2",
-		URL:      "http://my-connector.default.svc.cluster.local:8080",
-		AuthType: "basic",
+		Name:     testConnectorName,
+		Version:  testAPIVersion,
+		URL:      testConnectorURL,
+		AuthType: testAuthTypeBasic,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "abc-123", resp.UUID)
-	assert.Equal(t, "my-connector", resp.Name)
+	assert.Equal(t, testConnectorName, resp.Name)
 	assert.Equal(t, "waitingForApproval", resp.Status)
 }
 
@@ -81,8 +88,8 @@ func TestRegisterErrors(t *testing.T) {
 
 			client := NewClient(server.URL)
 			resp, err := Register(context.Background(), client, &RegistrationRequest{
-				Name:    "my-connector",
-				Version: "v2",
+				Name:    testConnectorName,
+				Version: testAPIVersion,
 			})
 			require.Error(t, err)
 			assert.Nil(t, resp)
@@ -97,7 +104,7 @@ func TestRegisterErrors(t *testing.T) {
 
 func TestBuildRegistrationRequest(t *testing.T) {
 	reg := &otilmv1alpha1.RegistrationSpec{
-		Name:     "my-connector",
+		Name:     testConnectorName,
 		AuthType: otilmv1alpha1.AuthTypeBasic,
 		AuthAttributes: []otilmv1alpha1.RegistrationAttribute{
 			{
@@ -113,11 +120,11 @@ func TestBuildRegistrationRequest(t *testing.T) {
 		},
 	}
 
-	req := BuildRegistrationRequest("http://my-connector.default.svc.cluster.local:8080", reg)
-	assert.Equal(t, "my-connector", req.Name)
-	assert.Equal(t, "v2", req.Version)
-	assert.Equal(t, "http://my-connector.default.svc.cluster.local:8080", req.URL)
-	assert.Equal(t, "basic", req.AuthType)
+	req := BuildRegistrationRequest(testConnectorURL, reg)
+	assert.Equal(t, testConnectorName, req.Name)
+	assert.Equal(t, testAPIVersion, req.Version)
+	assert.Equal(t, testConnectorURL, req.URL)
+	assert.Equal(t, testAuthTypeBasic, req.AuthType)
 
 	require.Len(t, req.AuthAttributes, 1)
 	assert.Equal(t, "username", req.AuthAttributes[0].Name)
@@ -136,7 +143,7 @@ func TestBuildRegistrationRequestAuthNone(t *testing.T) {
 
 	req := BuildRegistrationRequest("http://simple.default.svc.cluster.local:8080", reg)
 	assert.Equal(t, "simple-connector", req.Name)
-	assert.Equal(t, "v2", req.Version)
+	assert.Equal(t, testAPIVersion, req.Version)
 	assert.Equal(t, "http://simple.default.svc.cluster.local:8080", req.URL)
 	assert.Equal(t, "none", req.AuthType)
 	assert.Empty(t, req.AuthAttributes)

@@ -14,7 +14,7 @@ func TestBuildService(t *testing.T) {
 	conn := newTestConnector()
 	svc := builder.BuildService(conn)
 
-	assert.Equal(t, "test-connector", svc.Name)
+	assert.Equal(t, testConnectorName, svc.Name)
 	assert.Equal(t, "default", svc.Namespace)
 	assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
 

@@ -29,7 +29,7 @@ func TestBuildServiceMonitor(t *testing.T) {
 	require.NotNil(t, sm)
 
 	// Name and namespace
-	assert.Equal(t, "test-connector", sm.Name)
+	assert.Equal(t, testConnectorName, sm.Name)
 	assert.Equal(t, "default", sm.Namespace)
 
 	// Labels: Labels(conn) merged with spec.metrics.serviceMonitor.labels

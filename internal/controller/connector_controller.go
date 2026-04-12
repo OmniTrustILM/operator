@@ -93,48 +93,129 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}()
 
 	// ---------- Step 1: Fetch Connector CR ----------
-	var conn otilmv1alpha1.Connector
-	if err := r.Get(ctx, req.NamespacedName, &conn); err != nil {
-		if apierrors.IsNotFound(err) {
-			logger.Info("Connector resource not found, likely deleted")
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "unable to fetch Connector")
-		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+	conn, err := r.fetchConnector(ctx, req)
+	if conn == nil {
 		return ctrl.Result{}, err
 	}
 
 	// ---------- Step 2: Finalizer management ----------
-	if conn.DeletionTimestamp != nil {
-		if controllerutil.ContainsFinalizer(&conn, finalizerName) {
-			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonDeleting, "Connector is being deleted")
-			monitoring.ConnectorsManaged.Dec()
-			controllerutil.RemoveFinalizer(&conn, finalizerName)
-			if err := r.Update(ctx, &conn); err != nil {
-				logger.Error(err, "failed to remove finalizer")
-				monitoring.ConnectorsManaged.Inc() // restore on failure
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
-	}
-
-	if !controllerutil.ContainsFinalizer(&conn, finalizerName) {
-		controllerutil.AddFinalizer(&conn, finalizerName)
-		if err := r.Update(ctx, &conn); err != nil {
-			logger.Error(err, "failed to add finalizer")
-			return ctrl.Result{}, err
-		}
-		// Re-fetch after update to avoid conflicts.
-		if err := r.Get(ctx, req.NamespacedName, &conn); err != nil {
-			return ctrl.Result{}, err
-		}
+	done, err := r.handleFinalizer(ctx, req, conn)
+	if done || err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// ---------- Step 3: Set phase Deploying / Progressing ----------
+	previousPhase := r.setInitialPhase(conn)
+
+	// ---------- Step 4: Compute checksums ----------
+	combinedChecksum, requeueResult, err := r.computeChecksums(ctx, req, conn)
+	if requeueResult != nil {
+		return *requeueResult, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// ---------- Step 5: Reconcile child resources ----------
+	if err := r.reconcileChildResources(ctx, req, conn, combinedChecksum); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// ---------- Step 6: Check Deployment status ----------
+	currentDeploy, err := r.updateDeploymentStatus(ctx, req, conn)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// ---------- Step 7: Platform registration ----------
+	if result, err := r.handleRegistration(ctx, req, conn); err != nil || result.RequeueAfter > 0 {
+		return result, err
+	}
+
+	// ---------- Step 8: Update CR status ----------
+	conn.Status.ObservedGeneration = conn.Generation
+	conn.Status.Replicas = currentDeploy.Status.Replicas
+	conn.Status.ReadyReplicas = currentDeploy.Status.ReadyReplicas
+	conn.Status.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
+	conn.Status.CurrentImage = fmt.Sprintf("%s:%s", conn.Spec.Image.Repository, conn.Spec.Image.Tag)
+	conn.Status.ConfigChecksum = combinedChecksum
+
+	if err := r.Status().Update(ctx, conn); err != nil {
+		logger.Error(err, "failed to update Connector status")
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return ctrl.Result{}, err
+	}
+
+	// ---------- Step 9: Emit events ----------
+	r.emitPhaseTransitionEvents(conn, previousPhase)
+
+	// ---------- Step 10: Determine requeue ----------
+	monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "success").Inc()
+
+	if conn.Status.Phase != otilmv1alpha1.ConnectorPhaseRunning {
+		return ctrl.Result{RequeueAfter: requeueDelay}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// fetchConnector retrieves the Connector CR. Returns nil conn if the resource is
+// not found (deleted) or on error.
+func (r *ConnectorReconciler) fetchConnector(ctx context.Context, req ctrl.Request) (*otilmv1alpha1.Connector, error) {
+	logger := log.FromContext(ctx)
+	var conn otilmv1alpha1.Connector
+	if err := r.Get(ctx, req.NamespacedName, &conn); err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Connector resource not found, likely deleted")
+			return nil, nil
+		}
+		logger.Error(err, "unable to fetch Connector")
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return nil, err
+	}
+	return &conn, nil
+}
+
+// handleFinalizer manages adding/removing the finalizer. Returns done=true when
+// the Connector is being deleted and no further reconciliation is needed.
+func (r *ConnectorReconciler) handleFinalizer(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if conn.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(conn, finalizerName) {
+			r.Recorder.Event(conn, corev1.EventTypeNormal, monitoring.ReasonDeleting, "Connector is being deleted")
+			monitoring.ConnectorsManaged.Dec()
+			controllerutil.RemoveFinalizer(conn, finalizerName)
+			if err := r.Update(ctx, conn); err != nil {
+				logger.Error(err, "failed to remove finalizer")
+				monitoring.ConnectorsManaged.Inc() // restore on failure
+				return false, err
+			}
+		}
+		return true, nil
+	}
+
+	if !controllerutil.ContainsFinalizer(conn, finalizerName) {
+		controllerutil.AddFinalizer(conn, finalizerName)
+		if err := r.Update(ctx, conn); err != nil {
+			logger.Error(err, "failed to add finalizer")
+			return false, err
+		}
+		// Re-fetch after update to avoid conflicts.
+		if err := r.Get(ctx, req.NamespacedName, conn); err != nil {
+			return false, err
+		}
+	}
+
+	return false, nil
+}
+
+// setInitialPhase sets the Deploying phase and Progressing condition when the
+// Connector is first seen or its generation changes. Returns the previous phase.
+func (r *ConnectorReconciler) setInitialPhase(conn *otilmv1alpha1.Connector) otilmv1alpha1.ConnectorPhase {
 	previousPhase := conn.Status.Phase
 	if conn.Status.Phase == "" {
-		// First time we've seen this Connector — count it.
+		// First time we've seen this Connector -- count it.
 		monitoring.ConnectorsManaged.Inc()
 	}
 	if conn.Status.Phase == "" || conn.Status.ObservedGeneration != conn.Generation {
@@ -147,15 +228,18 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			Message:            "Connector resources are being reconciled",
 		})
 	}
+	return previousPhase
+}
 
-	// ---------- Step 4: Compute checksums ----------
+// computeChecksums computes checksums for all referenced Secrets and ConfigMaps.
+func (r *ConnectorReconciler) computeChecksums(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector) (string, *ctrl.Result, error) {
 	checksums := make(map[string]string)
 
 	secretNames := make([]string, len(conn.Spec.SecretRefs))
 	for i, sr := range conn.Spec.SecretRefs {
 		secretNames[i] = sr.Name
 	}
-	secretResults, requeueResult, err := r.computeRefChecksums(ctx, &conn, "Secret", secretNames, func(name string) (string, error) {
+	secretResults, requeueResult, err := r.computeRefChecksums(ctx, conn, "Secret", secretNames, func(name string) (string, error) {
 		var secret corev1.Secret
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: conn.Namespace}, &secret); err != nil {
 			return "", err
@@ -163,10 +247,10 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return checksum.ComputeSecretChecksum(&secret), nil
 	}, monitoring.ReasonMissingSecret)
 	if requeueResult != nil {
-		return *requeueResult, nil
+		return "", requeueResult, nil
 	}
 	if err != nil {
-		return ctrl.Result{}, err
+		return "", nil, err
 	}
 	for _, sr := range secretResults {
 		checksums[sr.key] = sr.checksum
@@ -176,7 +260,7 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	for i, cmr := range conn.Spec.ConfigMapRefs {
 		cmNames[i] = cmr.Name
 	}
-	cmResults, requeueResult, err := r.computeRefChecksums(ctx, &conn, "ConfigMap", cmNames, func(name string) (string, error) {
+	cmResults, requeueResult, err := r.computeRefChecksums(ctx, conn, "ConfigMap", cmNames, func(name string) (string, error) {
 		var cm corev1.ConfigMap
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: conn.Namespace}, &cm); err != nil {
 			return "", err
@@ -184,33 +268,64 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return checksum.ComputeConfigMapChecksum(&cm), nil
 	}, monitoring.ReasonMissingConfigMap)
 	if requeueResult != nil {
-		return *requeueResult, nil
+		return "", requeueResult, nil
 	}
 	if err != nil {
-		return ctrl.Result{}, err
+		return "", nil, err
 	}
 	for _, cr := range cmResults {
 		checksums[cr.key] = cr.checksum
 	}
 
-	combinedChecksum := checksum.CombineChecksums(checksums)
+	_ = req // used by caller for metrics labels
+	return checksum.CombineChecksums(checksums), nil, nil
+}
 
-	// ---------- Step 5: Reconcile child resources ----------
+// reconcileChildResources reconciles the five child resources (SA, Deployment,
+// Service, PDB, ServiceMonitor) for the given Connector.
+func (r *ConnectorReconciler) reconcileChildResources(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector, combinedChecksum string) error {
+	if err := r.reconcileServiceAccount(ctx, conn); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	if err := r.reconcileDeployment(ctx, conn, combinedChecksum); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	if err := r.reconcileService(ctx, conn); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	if err := r.reconcilePDB(ctx, conn); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	if err := r.reconcileServiceMonitor(ctx, conn); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	return nil
+}
 
-	// 5a. ServiceAccount
-	desiredSA := builder.BuildServiceAccount(&conn)
+// reconcileServiceAccount creates or updates the ServiceAccount for the Connector.
+func (r *ConnectorReconciler) reconcileServiceAccount(ctx context.Context, conn *otilmv1alpha1.Connector) error {
+	logger := log.FromContext(ctx)
+	desiredSA := builder.BuildServiceAccount(conn)
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: desiredSA.Name, Namespace: desiredSA.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
 		sa.Labels = desiredSA.Labels
-		return ctrl.SetControllerReference(&conn, sa, r.Scheme)
+		return ctrl.SetControllerReference(conn, sa, r.Scheme)
 	}); err != nil {
 		logger.Error(err, "failed to reconcile ServiceAccount")
-		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-		return ctrl.Result{}, err
+		return err
 	}
+	return nil
+}
 
-	// 5b. Deployment
-	desiredDeploy := builder.BuildDeployment(&conn, combinedChecksum)
+// reconcileDeployment creates or updates the Deployment for the Connector.
+func (r *ConnectorReconciler) reconcileDeployment(ctx context.Context, conn *otilmv1alpha1.Connector, combinedChecksum string) error {
+	logger := log.FromContext(ctx)
+	desiredDeploy := builder.BuildDeployment(conn, combinedChecksum)
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		deploy.Labels = desiredDeploy.Labels
@@ -220,90 +335,105 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if deploy.Spec.Selector == nil {
 			deploy.Spec.Selector = desiredDeploy.Spec.Selector
 		}
-		return ctrl.SetControllerReference(&conn, deploy, r.Scheme)
+		return ctrl.SetControllerReference(conn, deploy, r.Scheme)
 	}); err != nil {
 		logger.Error(err, "failed to reconcile Deployment")
-		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-		return ctrl.Result{}, err
+		return err
 	}
+	return nil
+}
 
-	// 5c. Service
-	desiredSvc := builder.BuildService(&conn)
+// reconcileService creates or updates the Service for the Connector.
+func (r *ConnectorReconciler) reconcileService(ctx context.Context, conn *otilmv1alpha1.Connector) error {
+	logger := log.FromContext(ctx)
+	desiredSvc := builder.BuildService(conn)
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		svc.Labels = desiredSvc.Labels
 		svc.Spec.Type = desiredSvc.Spec.Type
 		svc.Spec.Selector = desiredSvc.Spec.Selector
 		svc.Spec.Ports = desiredSvc.Spec.Ports
-		return ctrl.SetControllerReference(&conn, svc, r.Scheme)
+		return ctrl.SetControllerReference(conn, svc, r.Scheme)
 	}); err != nil {
 		logger.Error(err, "failed to reconcile Service")
-		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-		return ctrl.Result{}, err
+		return err
 	}
+	return nil
+}
 
-	// 5d. PDB
-	desiredPDB := builder.BuildPDB(&conn)
+// reconcilePDB creates, updates, or deletes the PodDisruptionBudget for the Connector.
+func (r *ConnectorReconciler) reconcilePDB(ctx context.Context, conn *otilmv1alpha1.Connector) error {
+	logger := log.FromContext(ctx)
+	desiredPDB := builder.BuildPDB(conn)
 	if desiredPDB != nil {
 		pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: desiredPDB.Name, Namespace: desiredPDB.Namespace}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
 			pdb.Labels = desiredPDB.Labels
 			pdb.Spec.MinAvailable = desiredPDB.Spec.MinAvailable
 			pdb.Spec.Selector = desiredPDB.Spec.Selector
-			return ctrl.SetControllerReference(&conn, pdb, r.Scheme)
+			return ctrl.SetControllerReference(conn, pdb, r.Scheme)
 		}); err != nil {
 			logger.Error(err, "failed to reconcile PDB")
-			monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-			return ctrl.Result{}, err
+			return err
 		}
-	} else {
-		// Delete PDB if it exists and is no longer needed.
-		pdb := &policyv1.PodDisruptionBudget{}
-		pdbKey := types.NamespacedName{Name: builder.ChildResourceName(&conn), Namespace: conn.Namespace}
-		if err := r.Get(ctx, pdbKey, pdb); err == nil {
-			if err := r.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to delete PDB")
-				return ctrl.Result{}, err
-			}
-		}
+		return nil
 	}
 
-	// 5e. ServiceMonitor
-	desiredSM := builder.BuildServiceMonitor(&conn)
+	// Delete PDB if it exists and is no longer needed.
+	pdb := &policyv1.PodDisruptionBudget{}
+	pdbKey := types.NamespacedName{Name: builder.ChildResourceName(conn), Namespace: conn.Namespace}
+	if err := r.Get(ctx, pdbKey, pdb); err == nil {
+		if err := r.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete PDB")
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileServiceMonitor creates, updates, or deletes the ServiceMonitor for the Connector.
+func (r *ConnectorReconciler) reconcileServiceMonitor(ctx context.Context, conn *otilmv1alpha1.Connector) error {
+	logger := log.FromContext(ctx)
+	desiredSM := builder.BuildServiceMonitor(conn)
 	if desiredSM != nil {
 		sm := &monitoringv1.ServiceMonitor{ObjectMeta: metav1.ObjectMeta{Name: desiredSM.Name, Namespace: desiredSM.Namespace}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sm, func() error {
 			sm.Labels = desiredSM.Labels
 			sm.Spec = desiredSM.Spec
-			return ctrl.SetControllerReference(&conn, sm, r.Scheme)
+			return ctrl.SetControllerReference(conn, sm, r.Scheme)
 		}); err != nil {
 			// If ServiceMonitor CRD is not installed, log a warning and continue.
 			if meta.IsNoMatchError(err) {
 				logger.Info("ServiceMonitor CRD not installed, skipping ServiceMonitor creation")
-			} else {
-				logger.Error(err, "failed to reconcile ServiceMonitor")
-				monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-				return ctrl.Result{}, err
+				return nil
 			}
+			logger.Error(err, "failed to reconcile ServiceMonitor")
+			return err
 		}
-	} else {
-		// Delete ServiceMonitor if it exists and is no longer needed.
-		sm := &monitoringv1.ServiceMonitor{}
-		smKey := types.NamespacedName{Name: builder.ChildResourceName(&conn), Namespace: conn.Namespace}
-		if err := r.Get(ctx, smKey, sm); err == nil {
-			if err := r.Delete(ctx, sm); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to delete ServiceMonitor")
-				// Non-fatal: don't return error for optional resource.
-			}
-		}
+		return nil
 	}
 
-	// ---------- Step 6: Check Deployment status ----------
+	// Delete ServiceMonitor if it exists and is no longer needed.
+	sm := &monitoringv1.ServiceMonitor{}
+	smKey := types.NamespacedName{Name: builder.ChildResourceName(conn), Namespace: conn.Namespace}
+	if err := r.Get(ctx, smKey, sm); err == nil {
+		if err := r.Delete(ctx, sm); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "failed to delete ServiceMonitor")
+			// Non-fatal: don't return error for optional resource.
+		}
+	}
+	return nil
+}
+
+// updateDeploymentStatus checks the Deployment status and sets the appropriate
+// phase and conditions on the Connector. Returns the current Deployment.
+func (r *ConnectorReconciler) updateDeploymentStatus(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector) (*appsv1.Deployment, error) {
+	logger := log.FromContext(ctx)
 	var currentDeploy appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: builder.ChildResourceName(&conn), Namespace: conn.Namespace}, &currentDeploy); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: builder.ChildResourceName(conn), Namespace: conn.Namespace}, &currentDeploy); err != nil {
 		logger.Error(err, "failed to get Deployment status")
 		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-		return ctrl.Result{}, err
+		return nil, err
 	}
 
 	var desiredReplicas int32 = 1
@@ -312,34 +442,18 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	readyReplicas := currentDeploy.Status.ReadyReplicas
 
+	r.setDeploymentPhase(conn, desiredReplicas, readyReplicas, &currentDeploy)
+
+	return &currentDeploy, nil
+}
+
+// setDeploymentPhase updates phase and conditions based on replica counts.
+func (r *ConnectorReconciler) setDeploymentPhase(conn *otilmv1alpha1.Connector, desiredReplicas, readyReplicas int32, deploy *appsv1.Deployment) {
 	switch {
 	case readyReplicas == desiredReplicas && desiredReplicas > 0:
-		// All replicas ready.
-		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseRunning
-		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condAvailable,
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: conn.Generation,
-			Reason:             "AllReplicasReady",
-			Message:            fmt.Sprintf("%d/%d replicas ready", readyReplicas, desiredReplicas),
-		})
-		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condProgressing,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: conn.Generation,
-			Reason:             "DeploymentComplete",
-			Message:            "Deployment rollout complete",
-		})
-		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-			Type:               condDegraded,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: conn.Generation,
-			Reason:             "Running",
-			Message:            "Connector is running normally",
-		})
+		r.setPhaseRunning(conn, readyReplicas, desiredReplicas)
 
 	case readyReplicas < desiredReplicas && readyReplicas > 0:
-		// Partially ready -- still updating.
 		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseUpdating
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
 			Type:               condProgressing,
@@ -350,132 +464,164 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		})
 
 	case readyReplicas == 0 && desiredReplicas > 0:
-		// Check for failure conditions in the deployment.
-		failed := false
-		for _, cond := range currentDeploy.Status.Conditions {
-			if cond.Type == appsv1.DeploymentReplicaFailure && cond.Status == corev1.ConditionTrue {
-				failed = true
-				break
-			}
-		}
-		if failed {
-			conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
-			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-				Type:               condDegraded,
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: conn.Generation,
-				Reason:             "ReplicaFailure",
-				Message:            "Deployment pods are failing",
-			})
-		} else {
-			// Not yet ready, but not explicitly failed -- still deploying.
-			conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
-			meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-				Type:               condProgressing,
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: conn.Generation,
-				Reason:             "WaitingForReplicas",
-				Message:            fmt.Sprintf("0/%d replicas ready", desiredReplicas),
-			})
-		}
+		r.setPhaseForZeroReady(conn, desiredReplicas, deploy)
 	}
+}
 
-	// ---------- Step 7: Platform registration ----------
-	if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning && conn.Spec.Registration != nil {
-		needsRegistration := conn.Status.Registration == nil || conn.Status.Registration.UUID == ""
-		if needsRegistration {
-			endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
-			regReq := platform.BuildRegistrationRequest(endpoint, conn.Spec.Registration)
-			platformClient := platform.NewClient(conn.Spec.Registration.PlatformURL)
+// setPhaseRunning sets the phase to Running with all associated conditions.
+func (r *ConnectorReconciler) setPhaseRunning(conn *otilmv1alpha1.Connector, readyReplicas, desiredReplicas int32) {
+	conn.Status.Phase = otilmv1alpha1.ConnectorPhaseRunning
+	meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+		Type:               condAvailable,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: conn.Generation,
+		Reason:             "AllReplicasReady",
+		Message:            fmt.Sprintf("%d/%d replicas ready", readyReplicas, desiredReplicas),
+	})
+	meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+		Type:               condProgressing,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: conn.Generation,
+		Reason:             "DeploymentComplete",
+		Message:            "Deployment rollout complete",
+	})
+	meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+		Type:               condDegraded,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: conn.Generation,
+		Reason:             "Running",
+		Message:            "Connector is running normally",
+	})
+}
 
-			regResp, err := platform.Register(ctx, platformClient, regReq)
-			if err != nil {
-				var platformErr *platform.Error
-				if errors.As(err, &platformErr) {
-					meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-						Type:               condDegraded,
-						Status:             metav1.ConditionTrue,
-						ObservedGeneration: conn.Generation,
-						Reason:             monitoring.ReasonRegistrationFailed,
-						Message:            fmt.Sprintf("Registration failed: %s", platformErr.Message),
-					})
-					r.Recorder.Eventf(&conn, corev1.EventTypeWarning, monitoring.ReasonRegistrationFailed, "Registration failed: %s", platformErr.Message)
-					if platformErr.Retryable {
-						// 5xx / network error: requeue with exponential backoff (5s → 5m).
-						logger.Info("registration failed (retryable), will retry", "error", err)
-						if err := r.Status().Update(ctx, &conn); err != nil {
-							logger.Error(err, "failed to update status after registration failure")
-						}
-						monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "requeue").Inc()
-						backoff := registrationBackoff(&conn)
-						return ctrl.Result{RequeueAfter: backoff}, nil
-					}
-					// 4xx: don't requeue, manual intervention needed.
-					logger.Info("registration failed (non-retryable), manual intervention needed", "error", err)
-				} else {
-					logger.Error(err, "registration failed with unexpected error")
-					meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-						Type:               condDegraded,
-						Status:             metav1.ConditionTrue,
-						ObservedGeneration: conn.Generation,
-						Reason:             monitoring.ReasonRegistrationFailed,
-						Message:            fmt.Sprintf("Registration failed: %v", err),
-					})
-				}
-			} else {
-				now := metav1.Now()
-				conn.Status.Registration = &otilmv1alpha1.RegistrationStatus{
-					UUID:         regResp.UUID,
-					Status:       otilmv1alpha1.RegistrationStatusValue(regResp.Status),
-					RegisteredAt: &now,
-				}
-				r.Recorder.Eventf(&conn, corev1.EventTypeNormal, monitoring.ReasonRegistered,
-					"Connector registered with platform, UUID: %s", regResp.UUID)
-				logger.Info("connector registered with platform", "uuid", regResp.UUID)
-			}
+// setPhaseForZeroReady sets phase when no replicas are ready — either Failed
+// (when ReplicaFailure detected) or Deploying (still starting up).
+func (r *ConnectorReconciler) setPhaseForZeroReady(conn *otilmv1alpha1.Connector, desiredReplicas int32, deploy *appsv1.Deployment) {
+	failed := false
+	for _, cond := range deploy.Status.Conditions {
+		if cond.Type == appsv1.DeploymentReplicaFailure && cond.Status == corev1.ConditionTrue {
+			failed = true
+			break
 		}
 	}
+	if failed {
+		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
+		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+			Type:               condDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: conn.Generation,
+			Reason:             "ReplicaFailure",
+			Message:            "Deployment pods are failing",
+		})
+	} else {
+		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
+		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+			Type:               condProgressing,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: conn.Generation,
+			Reason:             "WaitingForReplicas",
+			Message:            fmt.Sprintf("0/%d replicas ready", desiredReplicas),
+		})
+	}
+}
 
-	// ---------- Step 8: Update CR status ----------
-	conn.Status.ObservedGeneration = conn.Generation
-	conn.Status.Replicas = currentDeploy.Status.Replicas
-	conn.Status.ReadyReplicas = readyReplicas
-	conn.Status.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
-	conn.Status.CurrentImage = fmt.Sprintf("%s:%s", conn.Spec.Image.Repository, conn.Spec.Image.Tag)
-	conn.Status.ConfigChecksum = combinedChecksum
+// handleRegistration performs platform registration when the Connector is
+// Running and has a registration spec.
+func (r *ConnectorReconciler) handleRegistration(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 
-	if err := r.Status().Update(ctx, &conn); err != nil {
-		logger.Error(err, "failed to update Connector status")
-		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-		return ctrl.Result{}, err
+	if conn.Status.Phase != otilmv1alpha1.ConnectorPhaseRunning || conn.Spec.Registration == nil {
+		return ctrl.Result{}, nil
 	}
 
-	// ---------- Step 9: Emit events ----------
+	needsRegistration := conn.Status.Registration == nil || conn.Status.Registration.UUID == ""
+	if !needsRegistration {
+		return ctrl.Result{}, nil
+	}
+
+	endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
+	regReq := platform.BuildRegistrationRequest(endpoint, conn.Spec.Registration)
+	platformClient := platform.NewClient(conn.Spec.Registration.PlatformURL)
+
+	regResp, err := platform.Register(ctx, platformClient, regReq)
+	if err != nil {
+		return r.handleRegistrationError(ctx, req, conn, err)
+	}
+
+	now := metav1.Now()
+	conn.Status.Registration = &otilmv1alpha1.RegistrationStatus{
+		UUID:         regResp.UUID,
+		Status:       otilmv1alpha1.RegistrationStatusValue(regResp.Status),
+		RegisteredAt: &now,
+	}
+	r.Recorder.Eventf(conn, corev1.EventTypeNormal, monitoring.ReasonRegistered,
+		"Connector registered with platform, UUID: %s", regResp.UUID)
+	logger.Info("connector registered with platform", "uuid", regResp.UUID)
+
+	return ctrl.Result{}, nil
+}
+
+// handleRegistrationError processes registration errors, setting conditions
+// and determining whether to requeue.
+func (r *ConnectorReconciler) handleRegistrationError(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector, err error) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	var platformErr *platform.Error
+	if !errors.As(err, &platformErr) {
+		logger.Error(err, "registration failed with unexpected error")
+		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+			Type:               condDegraded,
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: conn.Generation,
+			Reason:             monitoring.ReasonRegistrationFailed,
+			Message:            fmt.Sprintf("Registration failed: %v", err),
+		})
+		return ctrl.Result{}, nil
+	}
+
+	meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+		Type:               condDegraded,
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: conn.Generation,
+		Reason:             monitoring.ReasonRegistrationFailed,
+		Message:            fmt.Sprintf("Registration failed: %s", platformErr.Message),
+	})
+	r.Recorder.Eventf(conn, corev1.EventTypeWarning, monitoring.ReasonRegistrationFailed, "Registration failed: %s", platformErr.Message)
+
+	if platformErr.Retryable {
+		// 5xx / network error: requeue with exponential backoff (5s -> 5m).
+		logger.Info("registration failed (retryable), will retry", "error", err)
+		if statusErr := r.Status().Update(ctx, conn); statusErr != nil {
+			logger.Error(statusErr, "failed to update status after registration failure")
+		}
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "requeue").Inc()
+		backoff := registrationBackoff(conn)
+		return ctrl.Result{RequeueAfter: backoff}, nil
+	}
+
+	// 4xx: don't requeue, manual intervention needed.
+	logger.Info("registration failed (non-retryable), manual intervention needed", "error", err)
+	return ctrl.Result{}, nil
+}
+
+// emitPhaseTransitionEvents emits Kubernetes events for notable phase transitions.
+func (r *ConnectorReconciler) emitPhaseTransitionEvents(conn *otilmv1alpha1.Connector, previousPhase otilmv1alpha1.ConnectorPhase) {
 	switch previousPhase {
 	case "", otilmv1alpha1.ConnectorPhasePending:
 		if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning {
-			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonDeployed, "Connector deployed successfully")
+			r.Recorder.Event(conn, corev1.EventTypeNormal, monitoring.ReasonDeployed, "Connector deployed successfully")
 		}
 	case otilmv1alpha1.ConnectorPhaseFailed, otilmv1alpha1.ConnectorPhaseUpdating, otilmv1alpha1.ConnectorPhaseDeploying:
 		if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning {
-			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonRecovered, "Connector recovered and is now running")
+			r.Recorder.Event(conn, corev1.EventTypeNormal, monitoring.ReasonRecovered, "Connector recovered and is now running")
 		}
 	}
 	if previousPhase != "" && previousPhase != conn.Status.Phase && conn.Status.Phase == otilmv1alpha1.ConnectorPhaseUpdating {
-		r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonUpdated, "Connector spec changed, updating")
+		r.Recorder.Event(conn, corev1.EventTypeNormal, monitoring.ReasonUpdated, "Connector spec changed, updating")
 	}
 	if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseFailed {
-		r.Recorder.Event(&conn, corev1.EventTypeWarning, monitoring.ReasonDegraded, "Connector is in a degraded state")
+		r.Recorder.Event(conn, corev1.EventTypeWarning, monitoring.ReasonDegraded, "Connector is in a degraded state")
 	}
-
-	// ---------- Step 10: Determine requeue ----------
-	monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "success").Inc()
-
-	if conn.Status.Phase != otilmv1alpha1.ConnectorPhaseRunning {
-		return ctrl.Result{RequeueAfter: requeueDelay}, nil
-	}
-
-	return ctrl.Result{}, nil
 }
 
 // checksumResult holds the outcome of a single ref checksum computation.

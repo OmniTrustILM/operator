@@ -18,6 +18,9 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 	labels := Labels(conn)
 	port := conn.Spec.Service.Port
 
+	envVars, envFrom := buildEnvVarsAndSources(conn)
+	volumes, volumeMounts := buildVolumes(conn)
+
 	container := corev1.Container{
 		Name:            "connector",
 		Image:           fmt.Sprintf("%s:%s", conn.Spec.Image.Repository, conn.Spec.Image.Tag),
@@ -28,100 +31,25 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
+		Env:             envVars,
+		EnvFrom:         envFrom,
+		VolumeMounts:    volumeMounts,
+		LivenessProbe:   buildProbe(conn, livenessProbe, port),
+		ReadinessProbe:  buildProbe(conn, readinessProbe, port),
+		StartupProbe:    buildProbe(conn, startupProbe, port),
+		SecurityContext: buildSecurityContext(conn),
 	}
-
-	var envVars []corev1.EnvVar
-	var envFrom []corev1.EnvFromSource
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
-
-	// Inline env vars
-	for _, e := range conn.Spec.Env {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  e.Name,
-			Value: e.Value,
-		})
-	}
-
-	// SecretRefs
-	for i := range conn.Spec.SecretRefs {
-		sr := &conn.Spec.SecretRefs[i]
-		e, ef, v, vm := buildSecretRef(sr)
-		envVars = append(envVars, e...)
-		envFrom = append(envFrom, ef...)
-		volumes = append(volumes, v...)
-		volumeMounts = append(volumeMounts, vm...)
-	}
-
-	// ConfigMapRefs
-	for i := range conn.Spec.ConfigMapRefs {
-		cmr := &conn.Spec.ConfigMapRefs[i]
-		e, ef, v, vm := buildConfigMapRef(cmr)
-		envVars = append(envVars, e...)
-		envFrom = append(envFrom, ef...)
-		volumes = append(volumes, v...)
-		volumeMounts = append(volumeMounts, vm...)
-	}
-
-	// Ephemeral volumes
-	for _, v := range conn.Spec.Volumes {
-		vol := corev1.Volume{
-			Name: v.Name,
-		}
-		if v.EmptyDir != nil {
-			emptyDir := &corev1.EmptyDirVolumeSource{}
-			if v.EmptyDir.Medium != nil {
-				emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
-			}
-			if v.EmptyDir.SizeLimit != nil {
-				qty, err := resource.ParseQuantity(*v.EmptyDir.SizeLimit)
-				if err != nil {
-					log.Log.Info("invalid sizeLimit value, skipping", "volume", v.Name, "sizeLimit", *v.EmptyDir.SizeLimit, "error", err)
-				} else {
-					emptyDir.SizeLimit = &qty
-				}
-			}
-			vol.VolumeSource = corev1.VolumeSource{
-				EmptyDir: emptyDir,
-			}
-		}
-		volumes = append(volumes, vol)
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      v.Name,
-			MountPath: v.MountPath,
-		})
-	}
-
-	container.Env = envVars
-	container.EnvFrom = envFrom
-	container.VolumeMounts = volumeMounts
-
-	// Probes
-	container.LivenessProbe = buildProbe(conn, livenessProbe, port)
-	container.ReadinessProbe = buildProbe(conn, readinessProbe, port)
-	container.StartupProbe = buildProbe(conn, startupProbe, port)
-
-	// Security context
-	container.SecurityContext = buildSecurityContext(conn)
 
 	// Resources
 	if conn.Spec.Resources != nil {
 		container.Resources = *conn.Spec.Resources
 	}
 
-	// Image pull secrets
-	var imagePullSecrets []corev1.LocalObjectReference
-	for _, s := range conn.Spec.Image.PullSecrets {
-		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
-			Name: s,
-		})
-	}
-
 	podSpec := corev1.PodSpec{
 		ServiceAccountName: name,
 		Containers:         []corev1.Container{container},
 		Volumes:            volumes,
-		ImagePullSecrets:   imagePullSecrets,
+		ImagePullSecrets:   buildImagePullSecrets(conn),
 	}
 
 	// Termination grace period
@@ -153,6 +81,141 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 	}
 }
 
+// buildEnvVarsAndSources assembles inline env vars and EnvFrom sources from
+// the Connector spec, including inline env, SecretRefs, and ConfigMapRefs.
+func buildEnvVarsAndSources(conn *otilmv1alpha1.Connector) ([]corev1.EnvVar, []corev1.EnvFromSource) {
+	var envVars []corev1.EnvVar
+	var envFrom []corev1.EnvFromSource
+
+	for _, e := range conn.Spec.Env {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  e.Name,
+			Value: e.Value,
+		})
+	}
+
+	for i := range conn.Spec.SecretRefs {
+		sr := &conn.Spec.SecretRefs[i]
+		e, ef, _, _ := buildSecretRef(sr)
+		envVars = append(envVars, e...)
+		envFrom = append(envFrom, ef...)
+	}
+
+	for i := range conn.Spec.ConfigMapRefs {
+		cmr := &conn.Spec.ConfigMapRefs[i]
+		e, ef, _, _ := buildConfigMapRef(cmr)
+		envVars = append(envVars, e...)
+		envFrom = append(envFrom, ef...)
+	}
+
+	return envVars, envFrom
+}
+
+// buildVolumes assembles all volumes and volume mounts from SecretRefs,
+// ConfigMapRefs, and ephemeral volumes.
+func buildVolumes(conn *otilmv1alpha1.Connector) ([]corev1.Volume, []corev1.VolumeMount) {
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+
+	for i := range conn.Spec.SecretRefs {
+		sr := &conn.Spec.SecretRefs[i]
+		_, _, v, vm := buildSecretRef(sr)
+		volumes = append(volumes, v...)
+		volumeMounts = append(volumeMounts, vm...)
+	}
+
+	for i := range conn.Spec.ConfigMapRefs {
+		cmr := &conn.Spec.ConfigMapRefs[i]
+		_, _, v, vm := buildConfigMapRef(cmr)
+		volumes = append(volumes, v...)
+		volumeMounts = append(volumeMounts, vm...)
+	}
+
+	for _, v := range conn.Spec.Volumes {
+		vol, vm := buildEphemeralVolume(v)
+		volumes = append(volumes, vol)
+		volumeMounts = append(volumeMounts, vm)
+	}
+
+	return volumes, volumeMounts
+}
+
+// buildEphemeralVolume constructs a single ephemeral Volume and its VolumeMount.
+func buildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
+	vol := corev1.Volume{Name: v.Name}
+	if v.EmptyDir != nil {
+		emptyDir := &corev1.EmptyDirVolumeSource{}
+		if v.EmptyDir.Medium != nil {
+			emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
+		}
+		if v.EmptyDir.SizeLimit != nil {
+			qty, err := resource.ParseQuantity(*v.EmptyDir.SizeLimit)
+			if err != nil {
+				log.Log.Info("invalid sizeLimit value, skipping", "volume", v.Name, "sizeLimit", *v.EmptyDir.SizeLimit, "error", err)
+			} else {
+				emptyDir.SizeLimit = &qty
+			}
+		}
+		vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
+	}
+	vm := corev1.VolumeMount{
+		Name:      v.Name,
+		MountPath: v.MountPath,
+	}
+	return vol, vm
+}
+
+// buildImagePullSecrets converts the image pull secret names into LocalObjectReferences.
+func buildImagePullSecrets(conn *otilmv1alpha1.Connector) []corev1.LocalObjectReference {
+	var secrets []corev1.LocalObjectReference
+	for _, s := range conn.Spec.Image.PullSecrets {
+		secrets = append(secrets, corev1.LocalObjectReference{Name: s})
+	}
+	return secrets
+}
+
+// buildSecretEnvVars builds env vars for a SecretRef with explicit keys.
+func buildSecretEnvVars(sr *otilmv1alpha1.SecretRef) []corev1.EnvVar {
+	var envVars []corev1.EnvVar
+	for _, k := range sr.Keys {
+		envName := k.SecretKey
+		if k.EnvVar != nil {
+			envName = *k.EnvVar
+		}
+		envVars = append(envVars, corev1.EnvVar{
+			Name: envName,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: sr.Name},
+					Key:                  k.SecretKey,
+				},
+			},
+		})
+	}
+	return envVars
+}
+
+// buildConfigMapEnvVars builds env vars for a ConfigMapRef with explicit keys.
+func buildConfigMapEnvVars(cmr *otilmv1alpha1.ConfigMapRef) []corev1.EnvVar {
+	var envVars []corev1.EnvVar
+	for _, k := range cmr.Keys {
+		envName := k.ConfigMapKey
+		if k.EnvVar != nil {
+			envName = *k.EnvVar
+		}
+		envVars = append(envVars, corev1.EnvVar{
+			Name: envName,
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cmr.Name},
+					Key:                  k.ConfigMapKey,
+				},
+			},
+		})
+	}
+	return envVars
+}
+
 //nolint:dupl // SecretRef and ConfigMapRef handle different K8s types; deduplication would hurt clarity.
 func buildSecretRef(sr *otilmv1alpha1.SecretRef) (
 	envVars []corev1.EnvVar,
@@ -169,21 +232,7 @@ func buildSecretRef(sr *otilmv1alpha1.SecretRef) (
 				},
 			})
 		} else {
-			for _, k := range sr.Keys {
-				envName := k.SecretKey
-				if k.EnvVar != nil {
-					envName = *k.EnvVar
-				}
-				envVars = append(envVars, corev1.EnvVar{
-					Name: envName,
-					ValueFrom: &corev1.EnvVarSource{
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: sr.Name},
-							Key:                  k.SecretKey,
-						},
-					},
-				})
-			}
+			envVars = buildSecretEnvVars(sr)
 		}
 	case otilmv1alpha1.RefTypeVolume:
 		volName := fmt.Sprintf("secret-%s", sr.Name)
@@ -224,21 +273,7 @@ func buildConfigMapRef(cmr *otilmv1alpha1.ConfigMapRef) (
 				},
 			})
 		} else {
-			for _, k := range cmr.Keys {
-				envName := k.ConfigMapKey
-				if k.EnvVar != nil {
-					envName = *k.EnvVar
-				}
-				envVars = append(envVars, corev1.EnvVar{
-					Name: envName,
-					ValueFrom: &corev1.EnvVarSource{
-						ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: cmr.Name},
-							Key:                  k.ConfigMapKey,
-						},
-					},
-				})
-			}
+			envVars = buildConfigMapEnvVars(cmr)
 		}
 	case otilmv1alpha1.RefTypeVolume:
 		volName := fmt.Sprintf("configmap-%s", cmr.Name)

@@ -22,7 +22,7 @@ func TestBuildPDB(t *testing.T) {
 	pdb := builder.BuildPDB(conn)
 
 	assert.NotNil(t, pdb)
-	assert.Equal(t, "test-connector", pdb.Name)
+	assert.Equal(t, testConnectorName, pdb.Name)
 	assert.Equal(t, "default", pdb.Namespace)
 	assert.Equal(t, builder.Labels(conn), pdb.Labels)
 	assert.Equal(t, builder.SelectorLabels(conn), pdb.Spec.Selector.MatchLabels)

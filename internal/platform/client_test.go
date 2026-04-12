@@ -12,6 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testEndpoint    = "/test"
+	contentTypeJSON = "application/json"
+	contentTypeKey  = "Content-Type"
+)
+
 func TestPostSuccess(t *testing.T) {
 	type response struct {
 		Message string `json:"message"`
@@ -19,14 +25,14 @@ func TestPostSuccess(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, http.MethodPost, r.Method)
-		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		assert.Equal(t, contentTypeJSON, r.Header.Get(contentTypeKey))
 
 		var body map[string]string
 		err := json.NewDecoder(r.Body).Decode(&body)
 		require.NoError(t, err)
 		assert.Equal(t, "hello", body["key"])
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		require.NoError(t, json.NewEncoder(w).Encode(response{Message: "ok"}))
 	}))
@@ -34,7 +40,7 @@ func TestPostSuccess(t *testing.T) {
 
 	client := NewClient(server.URL)
 	var result response
-	err := client.Post(context.Background(), "/test", map[string]string{"key": "hello"}, &result)
+	err := client.Post(context.Background(), testEndpoint, map[string]string{"key": "hello"}, &result)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", result.Message)
 }
@@ -81,7 +87,7 @@ func TestPostHTTPErrors(t *testing.T) {
 			defer server.Close()
 
 			client := NewClient(server.URL)
-			err := client.Post(context.Background(), "/test", map[string]string{}, nil)
+			err := client.Post(context.Background(), testEndpoint, map[string]string{}, nil)
 			require.Error(t, err)
 
 			var pErr *Error
@@ -95,7 +101,7 @@ func TestPostHTTPErrors(t *testing.T) {
 
 func TestPostNetworkError(t *testing.T) {
 	client := NewClient("http://127.0.0.1:1") // port 1 — nothing listening
-	err := client.Post(context.Background(), "/test", map[string]string{}, nil)
+	err := client.Post(context.Background(), testEndpoint, map[string]string{}, nil)
 	require.Error(t, err)
 
 	var pErr *Error
@@ -113,7 +119,7 @@ func TestPostTimeout(t *testing.T) {
 	client := NewClient(server.URL)
 	client.httpClient.Timeout = 50 * time.Millisecond
 
-	err := client.Post(context.Background(), "/test", map[string]string{}, nil)
+	err := client.Post(context.Background(), testEndpoint, map[string]string{}, nil)
 	require.Error(t, err)
 
 	var pErr *Error
@@ -136,21 +142,21 @@ func TestErrorString(t *testing.T) {
 func TestPostMarshalError(t *testing.T) {
 	client := NewClient("http://localhost")
 	// channels cannot be marshalled to JSON
-	err := client.Post(context.Background(), "/test", make(chan int), nil)
+	err := client.Post(context.Background(), testEndpoint, make(chan int), nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "marshalling request body")
 }
 
 func TestPostInvalidURL(t *testing.T) {
 	client := NewClient("://invalid-url")
-	err := client.Post(context.Background(), "/test", map[string]string{}, nil)
+	err := client.Post(context.Background(), testEndpoint, map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creating request")
 }
 
 func TestPostInvalidResponseJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(contentTypeKey, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("not-valid-json"))
 	}))
@@ -158,7 +164,7 @@ func TestPostInvalidResponseJSON(t *testing.T) {
 
 	client := NewClient(server.URL)
 	var result map[string]string
-	err := client.Post(context.Background(), "/test", map[string]string{}, &result)
+	err := client.Post(context.Background(), testEndpoint, map[string]string{}, &result)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding response body")
 }
