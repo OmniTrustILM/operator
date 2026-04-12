@@ -31,8 +31,8 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
+	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	"github.com/OmniTrustILM/operator/test/utils"
 )
@@ -52,9 +52,6 @@ const metricsRoleBindingName = "ilm-operator-metrics-binding"
 // testNamespace is the namespace used for test Connector CRs to keep them isolated from the
 // operator namespace.
 const testNamespace = "ilm-e2e-test"
-
-// x509Image is a lightweight connector image that requires no database and starts quickly.
-const x509Image = "docker.io/czertainly/czertainly-x509-compliance-provider:2.13.0"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -331,7 +328,7 @@ spec:
 `, connName, testNamespace)
 
 			tmpFile := writeTempYAML(connectorYAML)
-			defer os.Remove(tmpFile)
+			defer func() { _ = os.Remove(tmpFile) }()
 
 			cmd := exec.Command("kubectl", "apply", "-f", tmpFile)
 			_, err := utils.Run(cmd)
@@ -339,7 +336,7 @@ spec:
 
 			By("waiting for Connector to reach Running phase (up to 5 minutes)")
 			Eventually(func(g Gomega) {
-				phase := getConnectorPhase(connName, testNamespace)
+				phase := getConnectorPhase(connName)
 				g.Expect(phase).To(Equal("Running"),
 					"Connector phase should be Running, got: %s", phase)
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
@@ -416,7 +413,7 @@ spec:
 
 			By("waiting for Connector to return to Running phase after the update")
 			Eventually(func(g Gomega) {
-				phase := getConnectorPhase(connName, testNamespace)
+				phase := getConnectorPhase(connName)
 				g.Expect(phase).To(Equal("Running"),
 					"Connector phase should return to Running after update, got: %s", phase)
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
@@ -490,7 +487,7 @@ stringData:
 `, secretName, testNamespace)
 
 			tmpSecret := writeTempYAML(secretYAML)
-			defer os.Remove(tmpSecret)
+			defer func() { _ = os.Remove(tmpSecret) }()
 
 			cmd := exec.Command("kubectl", "apply", "-f", tmpSecret)
 			_, err := utils.Run(cmd)
@@ -525,7 +522,7 @@ spec:
 `, connName, testNamespace, secretName)
 
 			tmpConn := writeTempYAML(connectorYAML)
-			defer os.Remove(tmpConn)
+			defer func() { _ = os.Remove(tmpConn) }()
 
 			cmd = exec.Command("kubectl", "apply", "-f", tmpConn)
 			_, err = utils.Run(cmd)
@@ -533,7 +530,7 @@ spec:
 
 			By("waiting for Connector to reach Running phase (up to 5 minutes)")
 			Eventually(func(g Gomega) {
-				phase := getConnectorPhase(connName, testNamespace)
+				phase := getConnectorPhase(connName)
 				g.Expect(phase).To(Equal("Running"),
 					"Connector phase should be Running, got: %s", phase)
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
@@ -557,7 +554,7 @@ spec:
 			Expect(err).NotTo(HaveOccurred())
 
 			tmpPatch := writeTempYAML(string(patchYAML))
-			defer os.Remove(tmpPatch)
+			defer func() { _ = os.Remove(tmpPatch) }()
 
 			cmd = exec.Command("kubectl", "apply", "-f", tmpPatch)
 			_, err = utils.Run(cmd)
@@ -594,7 +591,7 @@ spec:
 
 			By("waiting for Connector to return to Running phase after the rolling restart")
 			Eventually(func(g Gomega) {
-				phase := getConnectorPhase(connName, testNamespace)
+				phase := getConnectorPhase(connName)
 				g.Expect(phase).To(Equal("Running"),
 					"Connector should be Running after Secret rotation, got: %s", phase)
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
@@ -621,9 +618,9 @@ spec:
 // -------------------------------------------------------------------------
 
 // getConnectorPhase returns the current phase of a Connector CR.
-func getConnectorPhase(name, ns string) string {
+func getConnectorPhase(name string) string {
 	cmd := exec.Command("kubectl", "get", "connector", name,
-		"-n", ns,
+		"-n", testNamespace,
 		"-o", "jsonpath={.status.phase}",
 	)
 	output, err := utils.Run(cmd)

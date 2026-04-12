@@ -32,6 +32,7 @@ import (
 // ConnectorPhase represents the current phase of the Connector.
 type ConnectorPhase string
 
+// Connector lifecycle phase constants.
 const (
 	ConnectorPhasePending   ConnectorPhase = "Pending"
 	ConnectorPhaseDeploying ConnectorPhase = "Deploying"
@@ -44,6 +45,7 @@ const (
 // +kubebuilder:validation:Enum=env;volume
 type RefType string
 
+// Reference type constants for secrets and configmaps.
 const (
 	RefTypeEnv    RefType = "env"
 	RefTypeVolume RefType = "volume"
@@ -53,6 +55,7 @@ const (
 // +kubebuilder:validation:Enum=none;basic;certificate;apiKey;jwt
 type AuthType string
 
+// Authentication type constants for connector registration.
 const (
 	AuthTypeNone        AuthType = "none"
 	AuthTypeBasic       AuthType = "basic"
@@ -315,9 +318,9 @@ type RegistrationAttribute struct {
 
 // RegistrationSpec defines the platform registration configuration for the connector.
 type RegistrationSpec struct {
-	// PlatformUrl is the URL of the platform to register with.
+	// PlatformURL is the URL of the platform to register with.
 	// +kubebuilder:validation:Required
-	PlatformUrl string `json:"platformUrl"`
+	PlatformURL string `json:"platformUrl"`
 
 	// Name is the registration name of the connector.
 	// +kubebuilder:validation:Required
@@ -340,6 +343,7 @@ type RegistrationSpec struct {
 // RegistrationStatusValue represents the registration state with the platform.
 type RegistrationStatusValue string
 
+// Registration status constants.
 const (
 	RegistrationStatusWaitingForApproval RegistrationStatusValue = "waitingForApproval"
 	RegistrationStatusConnected          RegistrationStatusValue = "connected"

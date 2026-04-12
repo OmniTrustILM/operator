@@ -1,9 +1,11 @@
+// Package builder provides helper functions for constructing Kubernetes child resources.
 package builder
 
 import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
 
+// Label keys and operator constants used for child resource metadata.
 const (
 	ManagedByLabel     = "app.kubernetes.io/managed-by"
 	NameLabel          = "app.kubernetes.io/name"

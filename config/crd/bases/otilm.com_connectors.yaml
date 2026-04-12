@@ -335,7 +335,7 @@ spec:
                     description: Name is the registration name of the connector.
                     type: string
                   platformUrl:
-                    description: PlatformUrl is the URL of the platform to register
+                    description: PlatformURL is the URL of the platform to register
                       with.
                     type: string
                 required:

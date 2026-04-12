@@ -29,8 +29,8 @@ import (
 	"net/http/httptest"
 	"time"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
+	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -292,7 +292,7 @@ var _ = Describe("Connector Controller", func() {
 
 				var found bool
 				for _, cond := range c.Status.Conditions {
-					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+					if cond.Type == condDegraded && cond.Status == metav1.ConditionTrue {
 						g.Expect(cond.Reason).To(Equal("MissingSecret"))
 						g.Expect(cond.Message).To(ContainSubstring("nonexistent-secret"))
 						found = true
@@ -639,7 +639,7 @@ var _ = Describe("Connector Controller", func() {
 
 				var found bool
 				for _, cond := range c.Status.Conditions {
-					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+					if cond.Type == condDegraded && cond.Status == metav1.ConditionTrue {
 						g.Expect(cond.Reason).To(Equal("MissingConfigMap"))
 						g.Expect(cond.Message).To(ContainSubstring("nonexistent-configmap"))
 						found = true
@@ -673,7 +673,7 @@ var _ = Describe("Connector Controller", func() {
 				Status: otilmv1alpha1.ConnectorStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               "Degraded",
+							Type:               condDegraded,
 							Status:             metav1.ConditionTrue,
 							Reason:             monitoring.ReasonRegistrationFailed,
 							LastTransitionTime: metav1.Now(),
@@ -690,7 +690,7 @@ var _ = Describe("Connector Controller", func() {
 				Status: otilmv1alpha1.ConnectorStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               "Degraded",
+							Type:               condDegraded,
 							Status:             metav1.ConditionTrue,
 							Reason:             monitoring.ReasonRegistrationFailed,
 							LastTransitionTime: metav1.NewTime(time.Now().Add(-30 * time.Second)),
@@ -708,7 +708,7 @@ var _ = Describe("Connector Controller", func() {
 				Status: otilmv1alpha1.ConnectorStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               "Degraded",
+							Type:               condDegraded,
 							Status:             metav1.ConditionTrue,
 							Reason:             monitoring.ReasonRegistrationFailed,
 							LastTransitionTime: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
@@ -725,7 +725,7 @@ var _ = Describe("Connector Controller", func() {
 				Status: otilmv1alpha1.ConnectorStatus{
 					Conditions: []metav1.Condition{
 						{
-							Type:               "Degraded",
+							Type:               condDegraded,
 							Status:             metav1.ConditionTrue,
 							Reason:             "OtherReason",
 							LastTransitionTime: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
@@ -916,7 +916,7 @@ var _ = Describe("Connector Controller", func() {
 		It("should not attempt registration when connector is not in Running phase", func() {
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
-				PlatformUrl: "http://platform.example.com",
+				PlatformURL: "http://platform.example.com",
 				Name:        "test-connector",
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
@@ -1168,7 +1168,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
 				var found bool
 				for _, cond := range c.Status.Conditions {
-					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+					if cond.Type == condDegraded && cond.Status == metav1.ConditionTrue {
 						g.Expect(cond.Reason).To(Equal("ReplicaFailure"))
 						g.Expect(cond.Message).To(ContainSubstring("failing"))
 						found = true
@@ -1193,7 +1193,7 @@ var _ = Describe("Connector Controller", func() {
 
 		It("should store UUID in status when registration succeeds", func() {
 			By("starting an httptest server that returns a successful registration")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				resp := platform.RegistrationResponse{
 					UUID:   "test-uuid-12345",
 					Name:   connName,
@@ -1201,14 +1201,14 @@ var _ = Describe("Connector Controller", func() {
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				json.NewEncoder(w).Encode(resp)
+				_ = json.NewEncoder(w).Encode(resp)
 			}))
 			defer server.Close()
 
 			By("creating a Connector with registration pointing to the test server")
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
-				PlatformUrl: server.URL,
+				PlatformURL: server.URL,
 				Name:        "test-connector",
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
@@ -1274,16 +1274,16 @@ var _ = Describe("Connector Controller", func() {
 
 		It("should set Degraded condition with RegistrationFailed reason on 5xx", func() {
 			By("starting an httptest server that returns 500")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
-				w.Write([]byte("internal server error"))
+				_, _ = w.Write([]byte("internal server error"))
 			}))
 			defer server.Close()
 
 			By("creating a Connector with registration")
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
-				PlatformUrl: server.URL,
+				PlatformURL: server.URL,
 				Name:        "test-connector",
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
@@ -1324,7 +1324,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
 				var found bool
 				for _, cond := range c.Status.Conditions {
-					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+					if cond.Type == condDegraded && cond.Status == metav1.ConditionTrue {
 						g.Expect(cond.Reason).To(Equal(monitoring.ReasonRegistrationFailed))
 						found = true
 						break
@@ -1348,16 +1348,16 @@ var _ = Describe("Connector Controller", func() {
 
 		It("should set Degraded condition with RegistrationFailed reason on 4xx", func() {
 			By("starting an httptest server that returns 400")
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
-				w.Write([]byte("bad request"))
+				_, _ = w.Write([]byte("bad request"))
 			}))
 			defer server.Close()
 
 			By("creating a Connector with registration")
 			conn := newConnector(connName, ns)
 			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
-				PlatformUrl: server.URL,
+				PlatformURL: server.URL,
 				Name:        "test-connector",
 				AuthType:    otilmv1alpha1.AuthTypeNone,
 			}
@@ -1398,7 +1398,7 @@ var _ = Describe("Connector Controller", func() {
 				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
 				var found bool
 				for _, cond := range c.Status.Conditions {
-					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+					if cond.Type == condDegraded && cond.Status == metav1.ConditionTrue {
 						g.Expect(cond.Reason).To(Equal(monitoring.ReasonRegistrationFailed))
 						g.Expect(cond.Message).To(ContainSubstring("bad request"))
 						found = true

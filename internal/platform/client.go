@@ -1,3 +1,4 @@
+// Package platform provides an HTTP client for the ILM Core platform API.
 package platform
 
 import (
@@ -18,15 +19,15 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// PlatformError represents an error returned by the platform API.
-type PlatformError struct {
+// Error represents an error returned by the platform API.
+type Error struct {
 	StatusCode int
 	Message    string
 	Retryable  bool
 }
 
 // Error implements the error interface.
-func (e *PlatformError) Error() string {
+func (e *Error) Error() string {
 	retryable := ""
 	if e.Retryable {
 		retryable = " (retryable)"
@@ -46,7 +47,7 @@ func NewClient(baseURL string) *Client {
 
 // Post sends a JSON POST request to the given path. The body is JSON-encoded
 // and the result (if non-nil) is decoded from the response body.
-// Returns a *PlatformError for HTTP errors. 5xx and network errors are retryable; 4xx are not.
+// Returns a *Error for HTTP errors. 5xx and network errors are retryable; 4xx are not.
 func (c *Client) Post(ctx context.Context, path string, body any, result any) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
@@ -61,7 +62,7 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return &PlatformError{
+		return &Error{
 			StatusCode: 0,
 			Message:    err.Error(),
 			Retryable:  true,
@@ -71,7 +72,7 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return &PlatformError{
+		return &Error{
 			StatusCode: resp.StatusCode,
 			Message:    fmt.Sprintf("reading response body: %v", err),
 			Retryable:  true,
@@ -79,7 +80,7 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 	}
 
 	if resp.StatusCode >= 400 {
-		return &PlatformError{
+		return &Error{
 			StatusCode: resp.StatusCode,
 			Message:    string(respBody),
 			Retryable:  resp.StatusCode >= 500,

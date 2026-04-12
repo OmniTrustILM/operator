@@ -1,3 +1,4 @@
+// Package monitoring provides Prometheus metrics and Kubernetes event reason constants.
 package monitoring
 
 // Event reason constants for Kubernetes events emitted by the ILM operator.

@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+// Package main is the entrypoint for the ILM Connector Operator manager.
 package main
 
 import (
@@ -43,11 +44,13 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+
 	otilmcomv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/controller"
+
 	// Import monitoring package for Prometheus metrics registration side effects.
 	_ "github.com/OmniTrustILM/operator/internal/monitoring"
-	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	// +kubebuilder:scaffold:imports
 )
 

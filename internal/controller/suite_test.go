@@ -28,8 +28,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
+	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
+	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"

@@ -73,7 +73,7 @@ func TestRegisterErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tt.statusCode)
 				_, _ = w.Write([]byte(tt.body))
 			}))
@@ -87,7 +87,7 @@ func TestRegisterErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, resp)
 
-			var pErr *PlatformError
+			var pErr *Error
 			require.ErrorAs(t, err, &pErr)
 			assert.Equal(t, tt.statusCode, pErr.StatusCode)
 			assert.Equal(t, tt.retryable, pErr.Retryable)

@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+// Package controller implements the Kubernetes reconciler for Connector custom resources.
 package controller
 
 import (
@@ -379,11 +380,11 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if needsRegistration {
 			endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
 			regReq := platform.BuildRegistrationRequest(endpoint, conn.Spec.Registration)
-			platformClient := platform.NewClient(conn.Spec.Registration.PlatformUrl)
+			platformClient := platform.NewClient(conn.Spec.Registration.PlatformURL)
 
 			regResp, err := platform.Register(ctx, platformClient, regReq)
 			if err != nil {
-				var platformErr *platform.PlatformError
+				var platformErr *platform.Error
 				if errors.As(err, &platformErr) {
 					meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
 						Type:               condDegraded,
@@ -444,12 +445,12 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// ---------- Step 9: Emit events ----------
-	switch {
-	case previousPhase == "" || previousPhase == otilmv1alpha1.ConnectorPhasePending:
+	switch previousPhase {
+	case "", otilmv1alpha1.ConnectorPhasePending:
 		if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning {
 			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonDeployed, "Connector deployed successfully")
 		}
-	case previousPhase == otilmv1alpha1.ConnectorPhaseFailed || previousPhase == otilmv1alpha1.ConnectorPhaseUpdating || previousPhase == otilmv1alpha1.ConnectorPhaseDeploying:
+	case otilmv1alpha1.ConnectorPhaseFailed, otilmv1alpha1.ConnectorPhaseUpdating, otilmv1alpha1.ConnectorPhaseDeploying:
 		if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning {
 			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonRecovered, "Connector recovered and is now running")
 		}
