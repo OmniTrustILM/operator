@@ -390,6 +390,11 @@ kind-export-logs: kind ## Export logs from the Kind cluster.
 ##@ Quality
 
 COVERAGE_THRESHOLD ?= 80
+
+.PHONY: sonar
+sonar: test ## Run SonarQube analysis locally via ephemeral Docker container.
+	@./hack/sonar-local.sh
+
 .PHONY: coverage
 coverage: test ## Run tests and verify coverage meets threshold.
 	@echo "Checking coverage threshold ($(COVERAGE_THRESHOLD)%)..."
