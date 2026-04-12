@@ -229,7 +229,7 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
-KIND ?= kind
+KIND ?= $(LOCALBIN)/kind
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
@@ -243,6 +243,7 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v2.1.0
+KIND_VERSION ?= v0.29.0
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -271,6 +272,11 @@ $(ENVTEST): $(LOCALBIN)
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+
+.PHONY: kind
+kind: $(KIND) ## Download kind locally if necessary.
+$(KIND): $(LOCALBIN)
+	$(call go-install-tool,$(KIND),sigs.k8s.io/kind,$(KIND_VERSION))
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
@@ -360,3 +366,37 @@ catalog-build: opm ## Build a catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+##@ Kind Cluster Management
+
+KIND_CLUSTER_NAME ?= ilm-operator-e2e
+
+.PHONY: kind-cluster
+kind-cluster: kind ## Create a Kind cluster for development/testing.
+	$(KIND) create cluster --name $(KIND_CLUSTER_NAME)
+
+.PHONY: prune-kind-cluster
+prune-kind-cluster: kind ## Delete the Kind cluster.
+	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
+
+.PHONY: kind-load
+kind-load: kind ## Load the operator Docker image into the Kind cluster.
+	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER_NAME)
+
+.PHONY: kind-export-logs
+kind-export-logs: kind ## Export logs from the Kind cluster.
+	$(KIND) export logs /tmp/$(KIND_CLUSTER_NAME)-logs --name $(KIND_CLUSTER_NAME)
+
+##@ Quality
+
+COVERAGE_THRESHOLD ?= 80
+.PHONY: coverage
+coverage: test ## Run tests and verify coverage meets threshold.
+	@echo "Checking coverage threshold ($(COVERAGE_THRESHOLD)%)..."
+	@total=$$(go tool cover -func=cover.out | grep total | awk '{print $$3}' | sed 's/%//'); \
+	if [ $$(echo "$$total < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
+		echo "Coverage $$total% is below threshold $(COVERAGE_THRESHOLD)%"; \
+		exit 1; \
+	else \
+		echo "Coverage $$total% meets threshold $(COVERAGE_THRESHOLD)%"; \
+	fi
