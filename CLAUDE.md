@@ -52,6 +52,12 @@ make kind-load
 # Delete Kind cluster
 make prune-kind-cluster
 
+# Run local SonarQube analysis
+make sonar
+
+# Generate and validate OLM bundle
+make bundle
+
 # Export Kind cluster logs for debugging
 make kind-export-logs
 ```

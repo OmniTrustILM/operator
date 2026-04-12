@@ -30,6 +30,22 @@ helm install ilm-operator deploy/charts/ilm-operator \
   --namespace ilm-system --create-namespace
 ```
 
+### Install via OLM (alternative)
+
+```bash
+# Install OLM on the cluster (if not already installed)
+operator-sdk olm install
+
+# Build and push the bundle image
+make bundle-build bundle-push BUNDLE_IMG=<registry>/ilm-operator-bundle:v0.0.1
+
+# Deploy via OLM
+operator-sdk run bundle <registry>/ilm-operator-bundle:v0.0.1
+
+# Cleanup
+operator-sdk cleanup ilm-operator
+```
+
 ### Create a Connector
 
 ```yaml
@@ -104,6 +120,11 @@ kubectl describe connector x509-compliance-provider
 | `make kind-load` | Load operator image into Kind cluster |
 | `make test-e2e` | Run end-to-end tests |
 | `make sonar` | Run local SonarQube analysis |
+| `make bundle` | Generate OLM bundle manifests and validate |
+| `make bundle-build` | Build the OLM bundle image |
+| `make bundle-push` | Push the OLM bundle image |
+| `make catalog-build` | Build the OLM catalog image |
+| `make catalog-push` | Push the OLM catalog image |
 
 ### Run locally (outside cluster)
 
