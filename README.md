@@ -105,12 +105,53 @@ kubectl describe connector x509-compliance-provider
 | `make test-e2e` | Run end-to-end tests |
 | `make sonar` | Run local SonarQube analysis |
 
-### Run locally
+### Run locally (outside cluster)
 
 ```bash
 make install      # Install CRDs into the cluster
 make run          # Run the operator outside the cluster
 ```
+
+### Test on a local Kind cluster
+
+```bash
+# 1. Create a Kind cluster
+make kind-cluster
+
+# 2. Build the operator Docker image
+make docker-build IMG=ilm-operator:dev
+
+# 3. Load the image into Kind
+make kind-load IMG=ilm-operator:dev
+
+# 4. Deploy the operator (CRDs, RBAC, Deployment)
+make deploy IMG=ilm-operator:dev
+
+# 5. Verify the operator is running
+kubectl get pods -n ilm-operator-system
+
+# 6. Deploy a sample connector
+kubectl apply -f config/samples/connector_minimal.yaml
+
+# 7. Watch the connector status
+kubectl get connectors -w
+
+# 8. Verify the created resources
+kubectl get deploy,svc,sa -l otilm.com/connector=x509-compliance-provider
+
+# 9. Test drift correction (operator should revert the change)
+kubectl patch svc x509-compliance-provider --type='json' \
+  -p='[{"op":"replace","path":"/spec/ports/0/port","value":9999}]'
+kubectl get svc x509-compliance-provider -o jsonpath='{.spec.ports[0].port}'
+
+# 10. Clean up
+kubectl delete -f config/samples/connector_minimal.yaml
+make prune-kind-cluster
+```
+
+> **Note:** The x509-compliance-provider is a legacy connector that uses `/v1/health` instead of
+> the default `/v2/health/*` probes. See the sample YAML for probe override configuration.
+> Newer (NG) connectors use the default `/v2/health/liveness` and `/v2/health/readiness` paths.
 
 ## Architecture
 
