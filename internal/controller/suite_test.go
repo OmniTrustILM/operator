@@ -55,6 +55,7 @@ var (
 	testEnv   *envtest.Environment
 	cfg       *rest.Config
 	k8sClient client.Client
+	mgr       ctrl.Manager
 )
 
 func TestControllers(t *testing.T) {
@@ -99,7 +100,7 @@ var _ = BeforeSuite(func() {
 
 	// Start a controller manager with the ConnectorReconciler so watches and
 	// reconciliation loops run automatically during tests.
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	mgr, err = ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
 		Metrics: metricsserver.Options{
 			BindAddress: "0", // disable metrics listener in tests

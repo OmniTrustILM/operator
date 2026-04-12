@@ -23,7 +23,10 @@ SOFTWARE.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -36,10 +39,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/builder"
 	"github.com/OmniTrustILM/operator/internal/monitoring"
+	"github.com/OmniTrustILM/operator/internal/platform"
 )
 
 const (
@@ -934,6 +939,688 @@ var _ = Describe("Connector Controller", func() {
 			if c.Status.Registration != nil {
 				Expect(c.Status.Registration.UUID).To(BeEmpty())
 			}
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 16: Connector not found returns cleanly
+	// ---------------------------------------------------------------
+	Context("TestConnectorNotFound", func() {
+		It("should return without error for a non-existent Connector", func() {
+			By("reconciling a Connector that does not exist")
+			reconciler := &ConnectorReconciler{
+				Client:   k8sClient,
+				Scheme:   k8sClient.Scheme(),
+				Recorder: mgr.GetEventRecorderFor("connector-controller"),
+			}
+			result, err := reconciler.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      "does-not-exist",
+					Namespace: "default",
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).To(Equal(ctrl.Result{}))
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 17: Deployment all replicas ready → phase=Running
+	// ---------------------------------------------------------------
+	Context("TestDeploymentAllReplicasReady", func() {
+		var ns string
+		const connName = "replicas-ready-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-replicas-ready")
+		})
+
+		It("should set phase to Running and Available=True when all replicas are ready", func() {
+			conn := newConnector(connName, ns)
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready via status subresource")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "replicas-ready"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Running")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseRunning))
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying Available=True condition")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Available" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal("AllReplicasReady"))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have Available=True condition")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 18: Deployment partial replicas → phase=Updating
+	// ---------------------------------------------------------------
+	Context("TestDeploymentPartialReplicas", func() {
+		var ns string
+		const connName = "partial-replicas-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-partial-replicas")
+		})
+
+		It("should set phase to Updating when readyReplicas < desiredReplicas", func() {
+			replicas := int32(3)
+			conn := newConnector(connName, ns)
+			conn.Spec.Replicas = &replicas
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating partial replicas ready (1 of 3)")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 3
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "partial-replicas"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Updating")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseUpdating))
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying Progressing=True with RolloutInProgress reason")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Progressing" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal("RolloutInProgress"))
+						g.Expect(cond.Message).To(ContainSubstring("1/3"))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have Progressing=True with RolloutInProgress")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 19: Deployment ReplicaFailure → phase=Failed, Degraded=True
+	// ---------------------------------------------------------------
+	Context("TestDeploymentReplicaFailure", func() {
+		var ns string
+		const connName = "replica-fail-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-replica-failure")
+		})
+
+		It("should set phase to Failed and Degraded=True when ReplicaFailure condition is set", func() {
+			conn := newConnector(connName, ns)
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating ReplicaFailure on Deployment")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 0
+				dep.Status.AvailableReplicas = 0
+				dep.Status.Conditions = []appsv1.DeploymentCondition{
+					{
+						Type:    appsv1.DeploymentReplicaFailure,
+						Status:  corev1.ConditionTrue,
+						Reason:  "FailedCreate",
+						Message: "pods failing",
+					},
+				}
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "replica-failure"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Failed")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseFailed))
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying Degraded=True with ReplicaFailure reason")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal("ReplicaFailure"))
+						g.Expect(cond.Message).To(ContainSubstring("failing"))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have Degraded=True with ReplicaFailure reason")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 20: Registration success with httptest server
+	// ---------------------------------------------------------------
+	Context("TestRegistrationSuccess", func() {
+		var ns string
+		const connName = "reg-success-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-reg-success")
+		})
+
+		It("should store UUID in status when registration succeeds", func() {
+			By("starting an httptest server that returns a successful registration")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := platform.RegistrationResponse{
+					UUID:   "test-uuid-12345",
+					Name:   connName,
+					Status: "waitingForApproval",
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(resp)
+			}))
+			defer server.Close()
+
+			By("creating a Connector with registration pointing to the test server")
+			conn := newConnector(connName, ns)
+			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
+				PlatformUrl: server.URL,
+				Name:        "test-connector",
+				AuthType:    otilmv1alpha1.AuthTypeNone,
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready to trigger Running phase")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "reg-success"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying registration UUID is stored in status")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Registration).NotTo(BeNil())
+				g.Expect(c.Status.Registration.UUID).To(Equal("test-uuid-12345"))
+				g.Expect(c.Status.Registration.RegisteredAt).NotTo(BeNil())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Running")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseRunning))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 21: Registration 5xx retryable failure
+	// ---------------------------------------------------------------
+	Context("TestRegistration5xxRetryable", func() {
+		var ns string
+		const connName = "reg-5xx-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-reg-5xx")
+		})
+
+		It("should set Degraded condition with RegistrationFailed reason on 5xx", func() {
+			By("starting an httptest server that returns 500")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte("internal server error"))
+			}))
+			defer server.Close()
+
+			By("creating a Connector with registration")
+			conn := newConnector(connName, ns)
+			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
+				PlatformUrl: server.URL,
+				Name:        "test-connector",
+				AuthType:    otilmv1alpha1.AuthTypeNone,
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "reg-5xx"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying Degraded condition with RegistrationFailed reason")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal(monitoring.ReasonRegistrationFailed))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have Degraded=True with RegistrationFailed reason")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 22: Registration 4xx non-retryable failure
+	// ---------------------------------------------------------------
+	Context("TestRegistration4xxNonRetryable", func() {
+		var ns string
+		const connName = "reg-4xx-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-reg-4xx")
+		})
+
+		It("should set Degraded condition with RegistrationFailed reason on 4xx", func() {
+			By("starting an httptest server that returns 400")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte("bad request"))
+			}))
+			defer server.Close()
+
+			By("creating a Connector with registration")
+			conn := newConnector(connName, ns)
+			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
+				PlatformUrl: server.URL,
+				Name:        "test-connector",
+				AuthType:    otilmv1alpha1.AuthTypeNone,
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "reg-4xx"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying Degraded condition with RegistrationFailed reason")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal(monitoring.ReasonRegistrationFailed))
+						g.Expect(cond.Message).To(ContainSubstring("bad request"))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have Degraded=True with RegistrationFailed reason")
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying no registration UUID is set")
+			var c otilmv1alpha1.Connector
+			Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+			if c.Status.Registration != nil {
+				Expect(c.Status.Registration.UUID).To(BeEmpty())
+			}
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 23: Event transitions (Deployed, Recovered, Updated)
+	// ---------------------------------------------------------------
+	Context("TestEventDeployedOnFirstRunning", func() {
+		var ns string
+		const connName = "event-deploy-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-event-deployed")
+		})
+
+		It("should transition through phases and emit correct events", func() {
+			conn := newConnector(connName, ns)
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying initial phase is Deploying")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseDeploying))
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready for first deploy → Deployed event")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "event-deployed"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase transitions to Running")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseRunning))
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating ReplicaFailure to put connector in Failed state")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 0
+				dep.Status.AvailableReplicas = 0
+				dep.Status.Conditions = []appsv1.DeploymentCondition{
+					{
+						Type:   appsv1.DeploymentReplicaFailure,
+						Status: corev1.ConditionTrue,
+						Reason: "FailedCreate",
+					},
+				}
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation to detect failure")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "event-failed"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Failed")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseFailed))
+			}, timeout, interval).Should(Succeed())
+
+			By("recovering: setting replicas back to ready → Recovered event")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				dep.Status.Conditions = nil
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation for recovery")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "event-recovered"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Running again (recovered)")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseRunning))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 24: Phase transition to Updating emits Updated event
+	// ---------------------------------------------------------------
+	Context("TestUpdatingPhaseEvent", func() {
+		var ns string
+		const connName = "updating-event-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-updating-event")
+		})
+
+		It("should set phase to Updating and then recover back to Running", func() {
+			replicas := int32(2)
+			conn := newConnector(connName, ns)
+			conn.Spec.Replicas = &replicas
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment to be created")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating all replicas ready first")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 2
+				dep.Status.ReadyReplicas = 2
+				dep.Status.AvailableReplicas = 2
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation to set Running")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "set-running"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Running")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseRunning))
+			}, timeout, interval).Should(Succeed())
+
+			By("simulating partial replicas to trigger Updating phase")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				dep.Status.Replicas = 2
+				dep.Status.ReadyReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				g.Expect(k8sClient.Status().Update(ctx, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation for Updating")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "set-updating"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Updating")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseUpdating))
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 
