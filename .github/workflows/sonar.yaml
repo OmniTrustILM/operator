@@ -79,6 +79,14 @@ jobs:
           run-id: ${{ inputs.run_id }}
           path: .
 
+      - name: Download golangci-lint report artifact from upstream run
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8
+        with:
+          name: golangci-lint-report
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.run_id }}
+          path: .
+
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@299e4b793aaa83bf2aba7c9c14bedbb485688ec4 # v7.1.0
         env:
