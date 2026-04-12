@@ -44,7 +44,7 @@ metrics:
   serviceMonitor:
     enabled: false
 
-watchNamespaces: []                # Empty = all namespaces
+# TODO: watchNamespaces will be added when namespace-scoped watching is implemented.
 
 nodeSelector: {}
 tolerations: []

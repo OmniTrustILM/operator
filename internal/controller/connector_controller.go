@@ -108,9 +108,11 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if conn.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(&conn, finalizerName) {
 			r.Recorder.Event(&conn, corev1.EventTypeNormal, monitoring.ReasonDeleting, "Connector is being deleted")
+			monitoring.ConnectorsManaged.Dec()
 			controllerutil.RemoveFinalizer(&conn, finalizerName)
 			if err := r.Update(ctx, &conn); err != nil {
 				logger.Error(err, "failed to remove finalizer")
+				monitoring.ConnectorsManaged.Inc() // restore on failure
 				return ctrl.Result{}, err
 			}
 		}
@@ -131,6 +133,10 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// ---------- Step 3: Set phase Deploying / Progressing ----------
 	previousPhase := conn.Status.Phase
+	if conn.Status.Phase == "" {
+		// First time we've seen this Connector — count it.
+		monitoring.ConnectorsManaged.Inc()
+	}
 	if conn.Status.Phase == "" || conn.Status.ObservedGeneration != conn.Generation {
 		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{

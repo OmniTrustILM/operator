@@ -376,6 +376,13 @@ func TestBuildDeploymentSecurityContext(t *testing.T) {
 	require.NotNil(t, c.SecurityContext)
 	assert.Equal(t, false, *c.SecurityContext.RunAsNonRoot)
 	assert.Equal(t, false, *c.SecurityContext.ReadOnlyRootFilesystem)
+	// Hardened fields are always set regardless of spec overrides.
+	require.NotNil(t, c.SecurityContext.AllowPrivilegeEscalation)
+	assert.Equal(t, false, *c.SecurityContext.AllowPrivilegeEscalation)
+	require.NotNil(t, c.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"ALL"}, c.SecurityContext.Capabilities.Drop)
+	require.NotNil(t, c.SecurityContext.SeccompProfile)
+	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, c.SecurityContext.SeccompProfile.Type)
 }
 
 func TestBuildDeploymentDefaultSecurityContext(t *testing.T) {
@@ -388,6 +395,12 @@ func TestBuildDeploymentDefaultSecurityContext(t *testing.T) {
 	require.NotNil(t, c.SecurityContext)
 	assert.Equal(t, true, *c.SecurityContext.RunAsNonRoot)
 	assert.Equal(t, true, *c.SecurityContext.ReadOnlyRootFilesystem)
+	require.NotNil(t, c.SecurityContext.AllowPrivilegeEscalation)
+	assert.Equal(t, false, *c.SecurityContext.AllowPrivilegeEscalation)
+	require.NotNil(t, c.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"ALL"}, c.SecurityContext.Capabilities.Drop)
+	require.NotNil(t, c.SecurityContext.SeccompProfile)
+	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, c.SecurityContext.SeccompProfile.Type)
 }
 
 func TestBuildDeploymentResources(t *testing.T) {

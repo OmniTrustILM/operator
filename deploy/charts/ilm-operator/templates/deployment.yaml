@@ -34,11 +34,6 @@ spec:
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
             {{- end }}
-            {{- if .Values.watchNamespaces }}
-            {{- range .Values.watchNamespaces }}
-            - --watch-namespace={{ . }}
-            {{- end }}
-            {{- end }}
           ports:
             - name: health
               containerPort: 8081

@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // BuildDeployment constructs a Deployment for the given Connector.
@@ -73,8 +74,12 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 				emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
 			}
 			if v.EmptyDir.SizeLimit != nil {
-				qty := resource.MustParse(*v.EmptyDir.SizeLimit)
-				emptyDir.SizeLimit = &qty
+				qty, err := resource.ParseQuantity(*v.EmptyDir.SizeLimit)
+				if err != nil {
+					log.Log.Info("invalid sizeLimit value, skipping", "volume", v.Name, "sizeLimit", *v.EmptyDir.SizeLimit, "error", err)
+				} else {
+					emptyDir.SizeLimit = &qty
+				}
 			}
 			vol.VolumeSource = corev1.VolumeSource{
 				EmptyDir: emptyDir,
@@ -337,6 +342,7 @@ func defaultProbeConfig(pt probeType) *otilmv1alpha1.ProbeConfig {
 func buildSecurityContext(conn *otilmv1alpha1.Connector) *corev1.SecurityContext {
 	runAsNonRoot := true
 	readOnlyRoot := true
+	allowPrivilegeEscalation := false
 
 	if conn.Spec.SecurityContext != nil {
 		if conn.Spec.SecurityContext.RunAsNonRoot != nil {
@@ -348,7 +354,14 @@ func buildSecurityContext(conn *otilmv1alpha1.Connector) *corev1.SecurityContext
 	}
 
 	return &corev1.SecurityContext{
-		RunAsNonRoot:           &runAsNonRoot,
-		ReadOnlyRootFilesystem: &readOnlyRoot,
+		RunAsNonRoot:             &runAsNonRoot,
+		ReadOnlyRootFilesystem:   &readOnlyRoot,
+		AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
 	}
 }
