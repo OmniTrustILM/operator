@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -142,54 +143,47 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// ---------- Step 4: Compute checksums ----------
 	checksums := make(map[string]string)
-	for _, sr := range conn.Spec.SecretRefs {
+
+	secretNames := make([]string, len(conn.Spec.SecretRefs))
+	for i, sr := range conn.Spec.SecretRefs {
+		secretNames[i] = sr.Name
+	}
+	secretResults, requeueResult, err := r.computeRefChecksums(ctx, &conn, "Secret", secretNames, func(name string) (string, error) {
 		var secret corev1.Secret
-		if err := r.Get(ctx, types.NamespacedName{Name: sr.Name, Namespace: conn.Namespace}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("referenced Secret not found", "secret", sr.Name)
-				meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-					Type:               condDegraded,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: conn.Generation,
-					Reason:             monitoring.ReasonMissingSecret,
-					Message:            fmt.Sprintf("Secret %q not found", sr.Name),
-				})
-				conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
-				r.Recorder.Eventf(&conn, corev1.EventTypeWarning, monitoring.ReasonMissingSecret, "Secret %q not found", sr.Name)
-				if err := r.Status().Update(ctx, &conn); err != nil {
-					logger.Error(err, "failed to update status for missing secret")
-				}
-				monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "requeue").Inc()
-				return ctrl.Result{RequeueAfter: requeueDelay}, nil
-			}
-			return ctrl.Result{}, err
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: conn.Namespace}, &secret); err != nil {
+			return "", err
 		}
-		checksums["secret/"+sr.Name] = checksum.ComputeSecretChecksum(&secret)
+		return checksum.ComputeSecretChecksum(&secret), nil
+	}, monitoring.ReasonMissingSecret)
+	if requeueResult != nil {
+		return *requeueResult, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	for _, sr := range secretResults {
+		checksums[sr.key] = sr.checksum
 	}
 
-	for _, cmr := range conn.Spec.ConfigMapRefs {
+	cmNames := make([]string, len(conn.Spec.ConfigMapRefs))
+	for i, cmr := range conn.Spec.ConfigMapRefs {
+		cmNames[i] = cmr.Name
+	}
+	cmResults, requeueResult, err := r.computeRefChecksums(ctx, &conn, "ConfigMap", cmNames, func(name string) (string, error) {
 		var cm corev1.ConfigMap
-		if err := r.Get(ctx, types.NamespacedName{Name: cmr.Name, Namespace: conn.Namespace}, &cm); err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.Info("referenced ConfigMap not found", "configmap", cmr.Name)
-				meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
-					Type:               condDegraded,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: conn.Generation,
-					Reason:             monitoring.ReasonMissingConfigMap,
-					Message:            fmt.Sprintf("ConfigMap %q not found", cmr.Name),
-				})
-				conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
-				r.Recorder.Eventf(&conn, corev1.EventTypeWarning, monitoring.ReasonMissingConfigMap, "ConfigMap %q not found", cmr.Name)
-				if err := r.Status().Update(ctx, &conn); err != nil {
-					logger.Error(err, "failed to update status for missing configmap")
-				}
-				monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "requeue").Inc()
-				return ctrl.Result{RequeueAfter: requeueDelay}, nil
-			}
-			return ctrl.Result{}, err
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: conn.Namespace}, &cm); err != nil {
+			return "", err
 		}
-		checksums["configmap/"+cmr.Name] = checksum.ComputeConfigMapChecksum(&cm)
+		return checksum.ComputeConfigMapChecksum(&cm), nil
+	}, monitoring.ReasonMissingConfigMap)
+	if requeueResult != nil {
+		return *requeueResult, nil
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	for _, cr := range cmResults {
+		checksums[cr.key] = cr.checksum
 	}
 
 	combinedChecksum := checksum.CombineChecksums(checksums)
@@ -475,6 +469,53 @@ func (r *ConnectorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// checksumResult holds the outcome of a single ref checksum computation.
+type checksumResult struct {
+	key      string
+	checksum string
+}
+
+// computeRefChecksums fetches each referenced object and computes its checksum.
+// refKind is "Secret" or "ConfigMap" (used for log messages and status).
+// names are the ref names, fetchAndChecksum fetches the object and returns its checksum.
+func (r *ConnectorReconciler) computeRefChecksums(
+	ctx context.Context,
+	conn *otilmv1alpha1.Connector,
+	refKind string,
+	names []string,
+	fetchAndChecksum func(name string) (string, error),
+	missingReason string,
+) ([]checksumResult, *ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	var results []checksumResult
+
+	for _, name := range names {
+		cs, err := fetchAndChecksum(name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.Info("referenced "+refKind+" not found", strings.ToLower(refKind), name)
+				meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+					Type:               condDegraded,
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: conn.Generation,
+					Reason:             missingReason,
+					Message:            fmt.Sprintf("%s %q not found", refKind, name),
+				})
+				conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
+				r.Recorder.Eventf(conn, corev1.EventTypeWarning, missingReason, "%s %q not found", refKind, name)
+				if statusErr := r.Status().Update(ctx, conn); statusErr != nil {
+					logger.Error(statusErr, "failed to update status for missing "+strings.ToLower(refKind))
+				}
+				monitoring.ReconciliationsTotal.WithLabelValues(conn.Name, conn.Namespace, "requeue").Inc()
+				return nil, &ctrl.Result{RequeueAfter: requeueDelay}, nil
+			}
+			return nil, nil, err
+		}
+		results = append(results, checksumResult{key: strings.ToLower(refKind) + "/" + name, checksum: cs})
+	}
+	return results, nil, nil
 }
 
 // registrationBackoff computes exponential backoff for registration retries.

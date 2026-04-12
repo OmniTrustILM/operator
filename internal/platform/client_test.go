@@ -120,3 +120,45 @@ func TestPostTimeout(t *testing.T) {
 	require.ErrorAs(t, err, &pErr)
 	assert.True(t, pErr.Retryable)
 }
+
+func TestPlatformErrorString(t *testing.T) {
+	t.Run("retryable error", func(t *testing.T) {
+		err := &PlatformError{StatusCode: 500, Message: "internal error", Retryable: true}
+		assert.Equal(t, "platform error 500: internal error (retryable)", err.Error())
+	})
+
+	t.Run("non-retryable error", func(t *testing.T) {
+		err := &PlatformError{StatusCode: 400, Message: "bad request", Retryable: false}
+		assert.Equal(t, "platform error 400: bad request", err.Error())
+	})
+}
+
+func TestPostMarshalError(t *testing.T) {
+	client := NewClient("http://localhost")
+	// channels cannot be marshalled to JSON
+	err := client.Post(context.Background(), "/test", make(chan int), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "marshalling request body")
+}
+
+func TestPostInvalidURL(t *testing.T) {
+	client := NewClient("://invalid-url")
+	err := client.Post(context.Background(), "/test", map[string]string{}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "creating request")
+}
+
+func TestPostInvalidResponseJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not-valid-json"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL)
+	var result map[string]string
+	err := client.Post(context.Background(), "/test", map[string]string{}, &result)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding response body")
+}

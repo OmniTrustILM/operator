@@ -39,6 +39,7 @@ import (
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/builder"
+	"github.com/OmniTrustILM/operator/internal/monitoring"
 )
 
 const (
@@ -524,4 +525,416 @@ var _ = Describe("Connector Controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 	})
+
+	// ---------------------------------------------------------------
+	// Test 9: ConfigMap checksum change triggers annotation update
+	// ---------------------------------------------------------------
+	Context("TestConfigMapChecksumChange", func() {
+		var ns string
+		const connName = "cm-checksum-conn"
+		const cmName = "my-configmap"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-cm-checksum")
+		})
+
+		It("should update the Deployment checksum annotation when a referenced ConfigMap changes", func() {
+			By("creating the ConfigMap")
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      cmName,
+					Namespace: ns,
+				},
+				Data: map[string]string{
+					"config.yaml": "version: v1",
+				},
+			}
+			Expect(k8sClient.Create(ctx, cm)).To(Succeed())
+
+			By("creating the Connector that references the ConfigMap")
+			conn := newConnector(connName, ns)
+			conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
+				{
+					Name: cmName,
+					Type: otilmv1alpha1.RefTypeEnv,
+				},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for Deployment and capturing initial checksum")
+			var initialChecksum string
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				cs, ok := dep.Spec.Template.Annotations[builder.ChecksumAnnotation]
+				g.Expect(ok).To(BeTrue(), "checksum annotation should exist")
+				g.Expect(cs).NotTo(BeEmpty())
+				initialChecksum = cs
+			}, timeout, interval).Should(Succeed())
+
+			By("updating the ConfigMap data")
+			Eventually(func(g Gomega) {
+				var c corev1.ConfigMap
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: cmName, Namespace: ns}, &c)).To(Succeed())
+				c.Data["config.yaml"] = "version: v2"
+				g.Expect(k8sClient.Update(ctx, &c)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("triggering reconciliation by touching the Connector")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				if latest.Annotations == nil {
+					latest.Annotations = map[string]string{}
+				}
+				latest.Annotations["test/trigger"] = "reconcile-cm"
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying the checksum annotation has changed")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				cs := dep.Spec.Template.Annotations[builder.ChecksumAnnotation]
+				g.Expect(cs).NotTo(Equal(initialChecksum), "checksum should change after configmap update")
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 10: Missing ConfigMap sets Degraded condition
+	// ---------------------------------------------------------------
+	Context("TestMissingConfigMapDegraded", func() {
+		var ns string
+		const connName = "missing-cm-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-missing-cm")
+		})
+
+		It("should set the Degraded condition when a referenced ConfigMap does not exist", func() {
+			conn := newConnector(connName, ns)
+			conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
+				{
+					Name: "nonexistent-configmap",
+					Type: otilmv1alpha1.RefTypeEnv,
+				},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("verifying Degraded condition is True with MissingConfigMap reason")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Conditions).NotTo(BeEmpty())
+
+				var found bool
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue {
+						g.Expect(cond.Reason).To(Equal("MissingConfigMap"))
+						g.Expect(cond.Message).To(ContainSubstring("nonexistent-configmap"))
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "should have a Degraded=True condition")
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying phase is Failed")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.Phase).To(Equal(otilmv1alpha1.ConnectorPhaseFailed))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 11: registrationBackoff function
+	// ---------------------------------------------------------------
+	Context("TestRegistrationBackoff", func() {
+		It("should return initial backoff when no Degraded condition exists", func() {
+			conn := &otilmv1alpha1.Connector{}
+			backoff := registrationBackoff(conn)
+			Expect(backoff).To(Equal(registrationInitial))
+		})
+
+		It("should return initial backoff when Degraded condition just transitioned", func() {
+			conn := &otilmv1alpha1.Connector{
+				Status: otilmv1alpha1.ConnectorStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Degraded",
+							Status:             metav1.ConditionTrue,
+							Reason:             monitoring.ReasonRegistrationFailed,
+							LastTransitionTime: metav1.Now(),
+						},
+					},
+				},
+			}
+			backoff := registrationBackoff(conn)
+			Expect(backoff).To(Equal(registrationInitial))
+		})
+
+		It("should return larger backoff after being degraded for a while", func() {
+			conn := &otilmv1alpha1.Connector{
+				Status: otilmv1alpha1.ConnectorStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Degraded",
+							Status:             metav1.ConditionTrue,
+							Reason:             monitoring.ReasonRegistrationFailed,
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-30 * time.Second)),
+						},
+					},
+				},
+			}
+			backoff := registrationBackoff(conn)
+			// Should be > initial since we've been degraded for 30s
+			Expect(backoff).To(BeNumerically(">", registrationInitial))
+		})
+
+		It("should cap backoff at registrationMax", func() {
+			conn := &otilmv1alpha1.Connector{
+				Status: otilmv1alpha1.ConnectorStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Degraded",
+							Status:             metav1.ConditionTrue,
+							Reason:             monitoring.ReasonRegistrationFailed,
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+						},
+					},
+				},
+			}
+			backoff := registrationBackoff(conn)
+			Expect(backoff).To(Equal(registrationMax))
+		})
+
+		It("should ignore Degraded conditions with other reasons", func() {
+			conn := &otilmv1alpha1.Connector{
+				Status: otilmv1alpha1.ConnectorStatus{
+					Conditions: []metav1.Condition{
+						{
+							Type:               "Degraded",
+							Status:             metav1.ConditionTrue,
+							Reason:             "OtherReason",
+							LastTransitionTime: metav1.NewTime(time.Now().Add(-1 * time.Hour)),
+						},
+					},
+				},
+			}
+			backoff := registrationBackoff(conn)
+			Expect(backoff).To(Equal(registrationInitial))
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 12: findConnectorsForConfigMap watch handler (match)
+	// ---------------------------------------------------------------
+	Context("TestFindConnectorsForConfigMapMatch", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-find-cm-match")
+		})
+
+		It("should return reconcile requests for Connectors that reference the ConfigMap", func() {
+			By("creating a Connector that references a ConfigMap")
+			conn := newConnector("watch-cm-conn", ns)
+			conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
+				{Name: "watched-cm", Type: otilmv1alpha1.RefTypeEnv},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			By("waiting for Connector to be created")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-cm-conn", Namespace: ns}, &c)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("creating a ConfigMap and verifying the watch handler returns requests")
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "watched-cm",
+					Namespace: ns,
+				},
+				Data: map[string]string{"key": "value"},
+			}
+
+			reconciler := &ConnectorReconciler{
+				Client: k8sClient,
+			}
+			requests := reconciler.findConnectorsForConfigMap(ctx, cm)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal("watch-cm-conn"))
+			Expect(requests[0].Namespace).To(Equal(ns))
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 12b: findConnectorsForConfigMap watch handler (no match)
+	// ---------------------------------------------------------------
+	Context("TestFindConnectorsForConfigMapNoMatch", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-find-cm-nomatch")
+		})
+
+		It("should return empty requests for ConfigMaps not referenced by any Connector", func() {
+			By("creating a Connector that references a different ConfigMap")
+			conn := newConnector("watch-cm-conn2", ns)
+			conn.Spec.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{
+				{Name: "other-cm", Type: otilmv1alpha1.RefTypeEnv},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			By("waiting for Connector to be created")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-cm-conn2", Namespace: ns}, &c)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "unrelated-cm",
+					Namespace: ns,
+				},
+			}
+
+			reconciler := &ConnectorReconciler{
+				Client: k8sClient,
+			}
+			requests := reconciler.findConnectorsForConfigMap(ctx, cm)
+			Expect(requests).To(BeEmpty())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 13: findConnectorsForSecret watch handler
+	// ---------------------------------------------------------------
+	Context("TestFindConnectorsForSecret", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-find-secret-watch")
+		})
+
+		It("should return reconcile requests for Connectors that reference the Secret", func() {
+			By("creating a Connector that references a Secret")
+			conn := newConnector("watch-secret-conn", ns)
+			conn.Spec.SecretRefs = []otilmv1alpha1.SecretRef{
+				{Name: "watched-secret", Type: otilmv1alpha1.RefTypeEnv},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			By("waiting for Connector to be created")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "watch-secret-conn", Namespace: ns}, &c)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "watched-secret",
+					Namespace: ns,
+				},
+			}
+
+			reconciler := &ConnectorReconciler{
+				Client: k8sClient,
+			}
+			requests := reconciler.findConnectorsForSecret(ctx, secret)
+			Expect(requests).To(HaveLen(1))
+			Expect(requests[0].Name).To(Equal("watch-secret-conn"))
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 14: ServiceMonitor CRD not installed - graceful handling
+	// ---------------------------------------------------------------
+	Context("TestServiceMonitorCRDNotInstalled", func() {
+		var ns string
+		const connName = "sm-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-sm-not-installed")
+		})
+
+		It("should reconcile successfully even when ServiceMonitor CRD is not installed", func() {
+			metricsPath := "/v1/metrics"
+			metricsPort := int32(8080)
+			conn := newConnector(connName, ns)
+			conn.Spec.Metrics = &otilmv1alpha1.MetricsSpec{
+				Enabled: true,
+				Path:    &metricsPath,
+				Port:    &metricsPort,
+				ServiceMonitor: &otilmv1alpha1.ServiceMonitorSpec{
+					Enabled: true,
+				},
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("verifying Deployment is created despite ServiceMonitor CRD being absent")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying status is updated")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.ObservedGeneration).To(BeNumerically(">", 0))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
+	// Test 15: Connector with registration spec but not running
+	// ---------------------------------------------------------------
+	Context("TestRegistrationNotTriggeredWhenNotRunning", func() {
+		var ns string
+		const connName = "reg-not-running-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-reg-not-running")
+		})
+
+		It("should not attempt registration when connector is not in Running phase", func() {
+			conn := newConnector(connName, ns)
+			conn.Spec.Registration = &otilmv1alpha1.RegistrationSpec{
+				PlatformUrl: "http://platform.example.com",
+				Name:        "test-connector",
+				AuthType:    otilmv1alpha1.AuthTypeNone,
+			}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for the Connector status to be updated")
+			Eventually(func(g Gomega) {
+				var c otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+				g.Expect(c.Status.ObservedGeneration).To(BeNumerically(">", 0))
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying registration was not attempted (no UUID in status)")
+			var c otilmv1alpha1.Connector
+			Expect(k8sClient.Get(ctx, key, &c)).To(Succeed())
+			// Phase should be Deploying (pods not ready in envtest), not Running
+			// so registration should not have been attempted
+			if c.Status.Registration != nil {
+				Expect(c.Status.Registration.UUID).To(BeEmpty())
+			}
+		})
+	})
+
 })
