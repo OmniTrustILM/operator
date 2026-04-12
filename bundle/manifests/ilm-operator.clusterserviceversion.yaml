@@ -1,0 +1,543 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: |-
+      [
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "name": "x509-compliance-provider",
+            "namespace": "default"
+          },
+          "spec": {
+            "env": [
+              {
+                "name": "SERVER_PORT",
+                "value": "8080"
+              },
+              {
+                "name": "LOG_LEVEL",
+                "value": "INFO"
+              }
+            ],
+            "image": {
+              "repository": "docker.io/czertainly/czertainly-x509-compliance-provider",
+              "tag": "1.3.1"
+            },
+            "probes": {
+              "liveness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 15,
+                "path": "/v1/health",
+                "periodSeconds": 10
+              },
+              "readiness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 5,
+                "path": "/v1/health",
+                "periodSeconds": 10
+              },
+              "startup": {
+                "failureThreshold": 45,
+                "path": "/v1/health",
+                "periodSeconds": 10
+              }
+            },
+            "service": {
+              "port": 8080
+            }
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "name": "x509-compliance-provider-registered",
+            "namespace": "default"
+          },
+          "spec": {
+            "env": [
+              {
+                "name": "SERVER_PORT",
+                "value": "8080"
+              },
+              {
+                "name": "LOG_LEVEL",
+                "value": "INFO"
+              }
+            ],
+            "image": {
+              "repository": "docker.io/czertainly/czertainly-x509-compliance-provider",
+              "tag": "2.13.0"
+            },
+            "registration": {
+              "authType": "none",
+              "customAttributes": [
+                {
+                  "content": "X.509 certificate compliance provider for policy validation",
+                  "name": "description"
+                },
+                {
+                  "content": "complianceProvider",
+                  "name": "connectorType"
+                }
+              ],
+              "name": "X.509 Compliance Provider",
+              "platformUrl": "https://ilm-core.ilm-system.svc.cluster.local:8443"
+            },
+            "service": {
+              "port": 8080
+            }
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/part-of": "ilm-platform"
+            },
+            "name": "ejbca-ng-connector",
+            "namespace": "ilm-system"
+          },
+          "spec": {
+            "configMapRefs": [
+              {
+                "keys": [
+                  {
+                    "configMapKey": "ejbca.url",
+                    "envVar": "EJBCA_URL"
+                  },
+                  {
+                    "configMapKey": "ejbca.profile",
+                    "envVar": "EJBCA_PROFILE"
+                  }
+                ],
+                "name": "ejbca-connector-config",
+                "type": "env"
+              }
+            ],
+            "env": [
+              {
+                "name": "SERVER_PORT",
+                "value": "8443"
+              },
+              {
+                "name": "LOG_LEVEL",
+                "value": "INFO"
+              },
+              {
+                "name": "JAVA_OPTS",
+                "value": "-Xms128m -Xmx384m"
+              }
+            ],
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "pullSecrets": [
+                "registry-credentials"
+              ],
+              "repository": "docker.io/czertainly/czertainly-ejbca-ng-connector",
+              "tag": "2.13.0"
+            },
+            "lifecycle": {
+              "podDisruptionBudget": {
+                "enabled": true,
+                "minAvailable": 2
+              },
+              "terminationGracePeriodSeconds": 60
+            },
+            "metrics": {
+              "enabled": true,
+              "path": "/v1/metrics",
+              "port": 8080,
+              "serviceMonitor": {
+                "enabled": true,
+                "interval": "30s",
+                "labels": {
+                  "release": "prometheus"
+                }
+              }
+            },
+            "podAnnotations": {
+              "vault.hashicorp.com/agent-inject": "true",
+              "vault.hashicorp.com/role": "connector"
+            },
+            "probes": {
+              "liveness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 30,
+                "path": "/health/liveness",
+                "periodSeconds": 15
+              },
+              "readiness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 10,
+                "path": "/health/readiness",
+                "periodSeconds": 10
+              },
+              "startup": {
+                "failureThreshold": 30,
+                "initialDelaySeconds": 5,
+                "path": "/health/liveness",
+                "periodSeconds": 5
+              }
+            },
+            "replicas": 3,
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "512Mi"
+              },
+              "requests": {
+                "cpu": "200m",
+                "memory": "256Mi"
+              }
+            },
+            "secretRefs": [
+              {
+                "keys": [
+                  {
+                    "envVar": "JDBC_USERNAME",
+                    "secretKey": "username"
+                  },
+                  {
+                    "envVar": "JDBC_PASSWORD",
+                    "secretKey": "password"
+                  },
+                  {
+                    "envVar": "JDBC_URL",
+                    "secretKey": "url"
+                  }
+                ],
+                "name": "ejbca-db-credentials",
+                "type": "env"
+              },
+              {
+                "keys": [
+                  {
+                    "path": "tls.crt",
+                    "secretKey": "tls.crt"
+                  },
+                  {
+                    "path": "tls.key",
+                    "secretKey": "tls.key"
+                  },
+                  {
+                    "path": "ca.crt",
+                    "secretKey": "ca.crt"
+                  }
+                ],
+                "mountPath": "/etc/ssl/connector",
+                "name": "ejbca-tls-certs",
+                "type": "volume"
+              }
+            ],
+            "securityContext": {
+              "readOnlyRootFilesystem": true,
+              "runAsNonRoot": true
+            },
+            "service": {
+              "port": 8443,
+              "type": "ClusterIP"
+            },
+            "volumes": [
+              {
+                "emptyDir": {
+                  "medium": "Memory",
+                  "sizeLimit": "64Mi"
+                },
+                "mountPath": "/tmp",
+                "name": "tmp"
+              },
+              {
+                "emptyDir": {
+                  "sizeLimit": "128Mi"
+                },
+                "mountPath": "/var/cache/connector",
+                "name": "cache"
+              }
+            ]
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "ilm-operator"
+            },
+            "name": "connector-sample"
+          },
+          "spec": null
+        }
+      ]
+    capabilities: Basic Install
+    createdAt: "2026-04-12T15:42:13Z"
+    operators.operatorframework.io/builder: operator-sdk-v1.42.2
+    operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
+  name: ilm-operator.v0.0.1
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: Connector is the Schema for the connectors API.
+      displayName: Connector
+      kind: Connector
+      name: connectors.otilm.com
+      resources:
+      - kind: Deployments
+        name: ""
+        version: apps/v1
+      - kind: PodDisruptionBudgets
+        name: ""
+        version: policy/v1
+      - kind: ServiceAccounts
+        name: ""
+        version: v1
+      - kind: Services
+        name: ""
+        version: v1
+      version: v1alpha1
+  description: |
+    The ILM Operator manages ILM platform connectors via Kubernetes Custom
+    Resource Definitions. It automates the deployment, configuration, and
+    lifecycle management of connector workloads, including service creation,
+    health probes, metrics integration, and platform registration.
+  displayName: ILM Operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      clusterPermissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          - secrets
+          verbs:
+          - get
+          - list
+          - watch
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        - apiGroups:
+          - ""
+          resources:
+          - serviceaccounts
+          - services
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - apps
+          resources:
+          - deployments
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - monitoring.coreos.com
+          resources:
+          - servicemonitors
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - otilm.com
+          resources:
+          - connectors
+          verbs:
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - otilm.com
+          resources:
+          - connectors/finalizers
+          verbs:
+          - update
+        - apiGroups:
+          - otilm.com
+          resources:
+          - connectors/status
+          verbs:
+          - get
+          - patch
+          - update
+        - apiGroups:
+          - policy
+          resources:
+          - poddisruptionbudgets
+          verbs:
+          - create
+          - delete
+          - get
+          - list
+          - patch
+          - update
+          - watch
+        - apiGroups:
+          - authentication.k8s.io
+          resources:
+          - tokenreviews
+          verbs:
+          - create
+        - apiGroups:
+          - authorization.k8s.io
+          resources:
+          - subjectaccessreviews
+          verbs:
+          - create
+        serviceAccountName: ilm-operator-controller-manager
+      deployments:
+      - label:
+          app.kubernetes.io/managed-by: kustomize
+          app.kubernetes.io/name: ilm-operator
+          control-plane: controller-manager
+        name: ilm-operator-controller-manager
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: ilm-operator
+              control-plane: controller-manager
+          strategy: {}
+          template:
+            metadata:
+              annotations:
+                kubectl.kubernetes.io/default-container: manager
+              labels:
+                app.kubernetes.io/name: ilm-operator
+                control-plane: controller-manager
+            spec:
+              containers:
+              - args:
+                - --metrics-bind-address=:8443
+                - --leader-elect
+                - --health-probe-bind-address=:8081
+                command:
+                - /manager
+                image: controller:latest
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                name: manager
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                resources:
+                  limits:
+                    cpu: 500m
+                    memory: 128Mi
+                  requests:
+                    cpu: 10m
+                    memory: 64Mi
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  capabilities:
+                    drop:
+                    - ALL
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              serviceAccountName: ilm-operator-controller-manager
+              terminationGracePeriodSeconds: 10
+      permissions:
+      - rules:
+        - apiGroups:
+          - ""
+          resources:
+          - configmaps
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - coordination.k8s.io
+          resources:
+          - leases
+          verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+        - apiGroups:
+          - ""
+          resources:
+          - events
+          verbs:
+          - create
+          - patch
+        serviceAccountName: ilm-operator-controller-manager
+    strategy: deployment
+  installModes:
+  - supported: true
+    type: OwnNamespace
+  - supported: true
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - ilm
+  - operator
+  - connector
+  - kubernetes
+  - certificate
+  - identity
+  links:
+  - name: Documentation
+    url: https://docs.otilm.com
+  - name: Source Code
+    url: https://github.com/OmniTrustILM/operator
+  maintainers:
+  - email: support@otilm.com
+    name: OmniTrust ILM
+  maturity: alpha
+  provider:
+    name: OmniTrust ILM
+    url: https://otilm.com
+  version: 0.0.1

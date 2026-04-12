@@ -477,6 +477,8 @@ type ConnectorStatus struct {
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=conn
+// +operator-sdk:csv:customresourcedefinitions:displayName="Connector"
+// +operator-sdk:csv:customresourcedefinitions:resources={{Deployments,apps/v1},{Services,v1},{ServiceAccounts,v1},{PodDisruptionBudgets,policy/v1}}
 
 // Connector is the Schema for the connectors API.
 type Connector struct {
