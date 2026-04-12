@@ -112,10 +112,10 @@ jobs:
         if: env.changed == 'true'
         env:
           changed_charts: ${{ env.changed_charts }}
-          HELM_OCI_REGISTRY: ${{ secrets.HELM_OCI_REGISTRY }}
-          HELM_OCI_REPOSITORY: ${{ secrets.HELM_OCI_REPOSITORY }}
-          HELM_USERNAME: ${{ secrets.HARBOR_3KEY_USERNAME }}
-          HELM_PASSWORD: ${{ secrets.HARBOR_3KEY_PASSWORD }}
+          HELM_OCI_REGISTRY: ${{ secrets.HELM_REGISTRY }}
+          HELM_OCI_REPOSITORY: ${{ secrets.HELM_REPOSITORY }}
+          HELM_USERNAME: ${{ secrets.HELM_REGISTRY_USERNAME }}
+          HELM_PASSWORD: ${{ secrets.HELM_REGISTRY_PASSWORD }}
           COSIGN_PRIVATE_KEY: ${{secrets.COSIGN_PRIVATE_KEY}}
           COSIGN_PASSWORD: ${{secrets.COSIGN_PASSWORD}}
         run: |
