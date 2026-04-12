@@ -133,6 +133,5 @@ See `config/samples/` for example CRs:
 ## Links
 
 - [Design Specification](docs/design/connector-operator.md)
-- [Implementation Plan](docs/design/implementation-plan.md)
 - [Helm Chart](deploy/charts/ilm-operator/)
 - [CLAUDE.md Development Guide](CLAUDE.md)
