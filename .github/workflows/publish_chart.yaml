@@ -12,6 +12,8 @@ jobs:
   publish:
     name: Publish charts
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -33,36 +35,36 @@ jobs:
         id: detect-changes
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "Detected tag push: $GITHUB_REF"
+            echo "🔍 Detected tag push: $GITHUB_REF"
 
             # Get previous tag
             last_tag=$(git for-each-ref --sort=-creatordate --count=2 --format="%(refname:short)" "refs/tags/*" | sed -n '2p')
-            echo "Last tag: $last_tag"
+            echo "ℹ️ Last tag: $last_tag"
             echo "last_tag=$last_tag" >> $GITHUB_ENV
 
             changed=$(ct list-changed --target-branch main --since "$last_tag" --chart-dirs deploy/charts)
           else
-            echo "Detected branch push (likely a merge)"
+            echo "🔀 Detected branch push (likely a merge)"
             changed=$(ct list-changed --target-branch main --since HEAD^1 --chart-dirs deploy/charts)
           fi
 
           echo "${changed}"
 
           if [[ -n "$changed" ]]; then
-            echo "Charts changed"
+            echo "✅ Charts changed"
             echo "changed=true" >> $GITHUB_ENV
 
             echo "changed_charts<<EOF" >> $GITHUB_ENV
             echo "$changed" >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
           else
-            echo "No chart changes detected"
+            echo "ℹ️ No chart changes detected"
             echo "changed=false" >> $GITHUB_ENV
           fi
 
       - name: Skip checking when no charts changed
         if: env.changed != 'true'
-        run: echo "No chart changes detected — skipping checks." && exit 0
+        run: echo "ℹ️ No chart changes detected — skipping checks." && exit 0
 
       - name: Check for Development Versions
         if: env.changed == 'true' && github.ref_type == 'branch'
@@ -70,10 +72,10 @@ jobs:
           changed_charts: ${{ env.changed_charts }}
         run: |
           for CHART in $changed_charts; do
-            echo "Checking chart $CHART for development version"
+            echo "🔍 Checking chart $CHART for development version"
             version=$(yq ".version" < "${CHART}/Chart.yaml")
             if [[ $version != *-develop ]]; then
-              echo "Chart $CHART has version '$version' but should be a development version (*-develop)"
+              echo "❌ Chart $CHART has version '$version' but should be a development version (*-develop)"
               exit 1
             fi
           done
@@ -84,10 +86,10 @@ jobs:
           changed_charts: ${{ env.changed_charts }}
         run: |
           for CHART in $changed_charts; do
-            echo "Checking chart $CHART for release-ready version"
+            echo "🔍 Checking chart $CHART for release-ready version"
             version=$(yq ".version" < "${CHART}/Chart.yaml")
             if [[ $version == *-develop ]]; then
-              echo "Chart $CHART has development version '$version' in a release branch"
+              echo "❌ Chart $CHART has development version '$version' in a release branch"
               exit 1
             fi
           done
@@ -117,7 +119,7 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{secrets.COSIGN_PRIVATE_KEY}}
           COSIGN_PASSWORD: ${{secrets.COSIGN_PASSWORD}}
         run: |
-          echo "Logging in to $HELM_OCI_REGISTRY"
+          echo "🔍 Logging in to $HELM_OCI_REGISTRY"
           helm registry login $HELM_OCI_REGISTRY --username $HELM_USERNAME --password $HELM_PASSWORD
 
           cosign login $HELM_OCI_REGISTRY --username $HELM_USERNAME --password $HELM_PASSWORD
@@ -128,7 +130,7 @@ jobs:
             name=$(yq ".name" < ${CHART}/Chart.yaml)
             version=$(yq ".version" < ${CHART}/Chart.yaml)
 
-            echo "Releasing chart $CHART with version $version"
+            echo "📦 Releasing chart $CHART with version $version"
 
             helm dependency update $CHART
             helm package $CHART
@@ -138,21 +140,21 @@ jobs:
 
             cosign sign --yes --key env://COSIGN_PRIVATE_KEY $HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name@$digest
 
-            echo "Chart $name-$version pushed"
+            echo "✅ Chart $name-$version pushed"
 
             # create develop tag 0.0.0 only in case of branch push
             if [[ "${{ github.ref_type }}" == "branch" ]]; then
               # SPECIFIC TO HARBOR
-              echo "Check if develop tag 0.0.0 exists and remove it"
+              echo "🔍 Check if develop tag 0.0.0 exists and remove it"
               pulled=$(helm pull oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name --version 0.0.0 2>&1)
               if [[ $pulled == *"Digest:"* ]]; then
                 removeFrom=$(echo "$pulled" | awk 'FNR == 2 {print $2}')
-                echo "Tag 0.0.0 exists, remove it from $removeFrom"
+                echo "🔀 Tag 0.0.0 exists, remove it from $removeFrom"
                 curl --user $HELM_USERNAME:$HELM_PASSWORD --request DELETE --silent --show-error \
                   https://$HELM_OCI_REGISTRY/api/v2.0/projects/$HELM_OCI_REPOSITORY/repositories/$name/artifacts/$removeFrom/tags/0.0.0
               fi
 
-              echo "Create new develop tag 0.0.0"
+              echo "📦 Create new develop tag 0.0.0"
               curl --user $HELM_USERNAME:$HELM_PASSWORD --request POST --header "Content-Type: application/json" \
                 --silent --show-error --data '{"name":"0.0.0"}' \
                 https://$HELM_OCI_REGISTRY/api/v2.0/projects/$HELM_OCI_REPOSITORY/repositories/$name/artifacts/$digest/tags
@@ -161,9 +163,9 @@ jobs:
 
           for CHART in $changed_charts
           do
-            echo "Releasing $CHART"
+            echo "📦 Releasing $CHART"
             release_chart $CHART
           done
 
-          echo "Logging out from $HELM_OCI_REGISTRY"
+          echo "✅ Logging out from $HELM_OCI_REGISTRY"
           helm registry logout $HELM_OCI_REGISTRY

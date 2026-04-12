@@ -10,6 +10,8 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -35,20 +37,20 @@ jobs:
           echo "${changed}"
 
           if [[ -n "$changed" ]]; then
-            echo "Charts changed"
+            echo "✅ Charts changed"
             echo "changed=true" >> $GITHUB_ENV
 
             echo "changed_charts<<EOF" >> $GITHUB_ENV
             echo "$changed" >> $GITHUB_ENV
             echo "EOF" >> $GITHUB_ENV
           else
-            echo "No chart changes detected"
+            echo "ℹ️ No chart changes detected"
             echo "changed=false" >> $GITHUB_ENV
           fi
 
       - name: Skip testing when no charts changed
         if: env.changed != 'true'
-        run: echo "No chart changes detected — skipping install tests." && exit 0
+        run: echo "ℹ️ No chart changes detected — skipping install tests." && exit 0
 
       - name: Check for Development Versions (Non-release PRs)
         if: env.changed == 'true' && !startsWith(github.head_ref, 'release')
@@ -56,10 +58,10 @@ jobs:
           changed_charts: ${{ env.changed_charts }}
         run: |
           for CHART in $changed_charts; do
-            echo "Checking chart $CHART for development version"
+            echo "🔍 Checking chart $CHART for development version"
             version=$(yq ".version" < "${CHART}/Chart.yaml")
             if [[ $version != *-develop ]]; then
-              echo "Chart $CHART has version '$version' but should be a development version (*-develop)"
+              echo "❌ Chart $CHART has version '$version' but should be a development version (*-develop)"
               exit 1
             fi
           done
@@ -70,10 +72,10 @@ jobs:
           changed_charts: ${{ env.changed_charts }}
         run: |
           for CHART in $changed_charts; do
-            echo "Checking chart $CHART for release-ready version"
+            echo "🔍 Checking chart $CHART for release-ready version"
             version=$(yq ".version" < "${CHART}/Chart.yaml")
             if [[ $version == *-develop ]]; then
-              echo "Chart $CHART has development version '$version' in a release branch"
+              echo "❌ Chart $CHART has development version '$version' in a release branch"
               exit 1
             fi
           done

@@ -21,6 +21,8 @@ jobs:
   build_amd64:
     name: Build amd64
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       digest: ${{ steps.build.outputs.digest }}
 
@@ -70,6 +72,8 @@ jobs:
   build_arm64:
     name: Build arm64
     runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
