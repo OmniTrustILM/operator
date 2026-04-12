@@ -331,6 +331,16 @@ type RegistrationSpec struct {
 	CustomAttributes []RegistrationAttribute `json:"customAttributes,omitempty"`
 }
 
+// RegistrationStatusValue represents the registration state with the platform.
+type RegistrationStatusValue string
+
+const (
+	RegistrationStatusWaitingForApproval RegistrationStatusValue = "waitingForApproval"
+	RegistrationStatusConnected          RegistrationStatusValue = "connected"
+	RegistrationStatusFailed             RegistrationStatusValue = "failed"
+	RegistrationStatusOffline            RegistrationStatusValue = "offline"
+)
+
 // RegistrationStatus defines the observed registration state.
 type RegistrationStatus struct {
 	// UUID is the unique identifier assigned by the platform.
@@ -339,7 +349,7 @@ type RegistrationStatus struct {
 
 	// Status is the current registration status.
 	// +optional
-	Status string `json:"status,omitempty"`
+	Status RegistrationStatusValue `json:"status,omitempty"`
 
 	// RegisteredAt is the timestamp when the connector was registered.
 	// +optional
