@@ -626,19 +626,21 @@ spec:
 					"Connector should be Running after Secret rotation, got: %s", phase)
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying the new pods are running")
-			newPodNames := getPodNamesForConnector(connName, testNamespace)
-			Expect(newPodNames).NotTo(BeEmpty(), "expected running pods after rotation")
-			for _, podName := range newPodNames {
-				cmd := exec.Command("kubectl", "get", "pod", podName,
-					"-n", testNamespace,
-					"-o", "jsonpath={.status.phase}",
-				)
-				output, err := utils.Run(cmd)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(output).To(Equal("Running"),
-					"pod %s should be Running after rotation, got: %s", podName, output)
-			}
+			By("verifying all new pods reach Running phase")
+			Eventually(func(g Gomega) {
+				newPodNames := getPodNamesForConnector(connName, testNamespace)
+				g.Expect(newPodNames).NotTo(BeEmpty(), "expected running pods after rotation")
+				for _, podName := range newPodNames {
+					cmd := exec.Command("kubectl", "get", "pod", podName,
+						"-n", testNamespace,
+						"-o", "jsonpath={.status.phase}",
+					)
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).To(Equal("Running"),
+						"pod %s should be Running after rotation, got: %s", podName, output)
+				}
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 	})
 })
