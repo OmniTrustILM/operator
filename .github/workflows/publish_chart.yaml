@@ -146,7 +146,7 @@ jobs:
             if [[ "${{ github.ref_type }}" == "branch" ]]; then
               # SPECIFIC TO HARBOR
               echo "🔍 Check if develop tag 0.0.0 exists and remove it"
-              pulled=$(helm pull oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name --version 0.0.0 2>&1)
+              pulled=$(helm pull oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name --version 0.0.0 2>&1 || true)
               if [[ $pulled == *"Digest:"* ]]; then
                 removeFrom=$(echo "$pulled" | awk 'FNR == 2 {print $2}')
                 echo "🔀 Tag 0.0.0 exists, remove it from $removeFrom"
