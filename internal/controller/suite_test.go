@@ -111,7 +111,7 @@ var _ = BeforeSuite(func() {
 	err = (&ConnectorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("connector-controller"),
+		Recorder: mgr.GetEventRecorderFor("connector-controller"), //nolint:staticcheck
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

@@ -2,7 +2,7 @@ apiVersion: v2
 name: ilm-operator
 description: ILM Connector Operator - manages ILM platform connectors via CRDs
 type: application
-version: 0.1.0
+version: 0.1.0-develop
 appVersion: "0.1.0"
 keywords:
   - ilm

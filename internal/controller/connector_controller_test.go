@@ -961,7 +961,7 @@ var _ = Describe("Connector Controller", func() {
 			reconciler := &ConnectorReconciler{
 				Client:   k8sClient,
 				Scheme:   k8sClient.Scheme(),
-				Recorder: mgr.GetEventRecorderFor("connector-controller"),
+				Recorder: mgr.GetEventRecorderFor("connector-controller"), //nolint:staticcheck
 			}
 			result, err := reconciler.Reconcile(ctx, ctrl.Request{
 				NamespacedName: types.NamespacedName{
