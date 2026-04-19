@@ -219,7 +219,7 @@ See `config/samples/` for example CRs:
 ## Links
 
 - [Design Specification](docs/design/connector-operator.md)
-- [Helm Chart](deploy/charts/ilm-operator/)
+- [Helm Chart Documentation](deploy/charts/ilm-operator/README.md)
 - [CLAUDE.md Development Guide](CLAUDE.md)
 
 ## License

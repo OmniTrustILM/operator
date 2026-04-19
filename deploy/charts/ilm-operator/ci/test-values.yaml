@@ -1,0 +1,3 @@
+image:
+  tag: develop-latest
+  pullPolicy: Always

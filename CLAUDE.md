@@ -7,7 +7,7 @@ The ILM Connector Operator is a Kubernetes operator that manages ILM platform co
 - **API Group:** `otilm.com`
 - **Kind:** `Connector` (v1alpha1)
 - **Tooling:** Operator SDK, Kubebuilder, controller-runtime
-- **Language:** Go 1.25+
+- **Language:** Go 1.26+
 
 ## Quick Start Commands
 
