@@ -37,3 +37,6 @@ linters:
       - path: zz_generated
         linters:
           - all
+      - path: test/
+        linters:
+          - noctx
