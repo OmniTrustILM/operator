@@ -59,61 +59,61 @@ The following values may be configured:
 
 ### Global
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| replicaCount | `1` | Number of operator replicas |
-| nodeSelector | `{}` | Node selector for operator pods |
-| tolerations | `[]` | Tolerations for operator pods |
-| affinity | `{}` | Affinity rules for operator pods |
+| Parameter    | Default value | Description                      |
+|--------------|---------------|----------------------------------|
+| replicaCount | `1`           | Number of operator replicas      |
+| nodeSelector | `{}`          | Node selector for operator pods  |
+| tolerations  | `[]`          | Tolerations for operator pods    |
+| affinity     | `{}`          | Affinity rules for operator pods |
 
 ### Image
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| image.registry | `docker.io` | Docker registry for the operator image |
-| image.repository | `otilm` | Docker image repository |
-| image.name | `ilm-operator` | Docker image name |
-| image.tag | `""` | Docker image tag (defaults to appVersion) |
-| image.pullPolicy | `IfNotPresent` | Image pull policy |
-| image.pullSecrets | `[]` | Array of secret names for image pull |
+| Parameter         | Default value  | Description                               |
+|-------------------|----------------|-------------------------------------------|
+| image.registry    | `docker.io`    | Docker registry for the operator image    |
+| image.repository  | `otilm`        | Docker image repository                   |
+| image.name        | `ilm-operator` | Docker image name                         |
+| image.tag         | `""`           | Docker image tag (defaults to appVersion) |
+| image.pullPolicy  | `IfNotPresent` | Image pull policy                         |
+| image.pullSecrets | `[]`           | Array of secret names for image pull      |
 
 ### CRD
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| crd.install | `true` | Install/upgrade CRDs with the chart |
+| Parameter   | Default value | Description                         |
+|-------------|---------------|-------------------------------------|
+| crd.install | `true`        | Install/upgrade CRDs with the chart |
 
 ### Service Account & RBAC
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| serviceAccount.create | `true` | Create service account for the operator |
-| serviceAccount.name | `""` | Service account name (auto-generated if empty) |
-| serviceAccount.annotations | `{}` | Annotations for the service account |
-| rbac.create | `true` | Create RBAC resources (ClusterRole, ClusterRoleBinding) |
+| Parameter                  | Default value | Description                                             |
+|----------------------------|---------------|---------------------------------------------------------|
+| serviceAccount.create      | `true`        | Create service account for the operator                 |
+| serviceAccount.name        | `""`          | Service account name (auto-generated if empty)          |
+| serviceAccount.annotations | `{}`          | Annotations for the service account                     |
+| rbac.create                | `true`        | Create RBAC resources (ClusterRole, ClusterRoleBinding) |
 
 ### Operator Configuration
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| leaderElection.enabled | `true` | Enable leader election for HA deployments |
-| resources.requests.cpu | `100m` | CPU request for operator pod |
-| resources.requests.memory | `128Mi` | Memory request for operator pod |
-| resources.limits.memory | `256Mi` | Memory limit for operator pod |
-| securityContext.runAsNonRoot | `true` | Run operator as non-root user |
-| securityContext.readOnlyRootFilesystem | `true` | Read-only root filesystem |
+| Parameter                              | Default value | Description                               |
+|----------------------------------------|---------------|-------------------------------------------|
+| leaderElection.enabled                 | `true`        | Enable leader election for HA deployments |
+| resources.requests.cpu                 | `100m`        | CPU request for operator pod              |
+| resources.requests.memory              | `128Mi`       | Memory request for operator pod           |
+| resources.limits.memory                | `256Mi`       | Memory limit for operator pod             |
+| securityContext.runAsNonRoot           | `true`        | Run operator as non-root user             |
+| securityContext.readOnlyRootFilesystem | `true`        | Read-only root filesystem                 |
 
 ### Pod Disruption Budget
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| podDisruptionBudget.enabled | `false` | Enable PDB for the operator |
-| podDisruptionBudget.minAvailable | `1` | Minimum available pods |
+| Parameter                        | Default value | Description                 |
+|----------------------------------|---------------|-----------------------------|
+| podDisruptionBudget.enabled      | `false`       | Enable PDB for the operator |
+| podDisruptionBudget.minAvailable | `1`           | Minimum available pods      |
 
 ### Metrics
 
-| Parameter | Default value | Description |
-|-----------|---------------|-------------|
-| metrics.enabled | `false` | Enable metrics endpoint |
-| metrics.service.port | `8080` | Metrics service port |
-| metrics.serviceMonitor.enabled | `false` | Create Prometheus ServiceMonitor |
+| Parameter                      | Default value | Description                      |
+|--------------------------------|---------------|----------------------------------|
+| metrics.enabled                | `false`       | Enable metrics endpoint          |
+| metrics.service.port           | `8080`        | Metrics service port             |
+| metrics.serviceMonitor.enabled | `false`       | Create Prometheus ServiceMonitor |
