@@ -1,0 +1,7 @@
+## Append samples of your project ##
+resources:
+- v1alpha1_connector.yaml
+- connector_minimal.yaml
+- connector_full.yaml
+- connector_with_registration.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

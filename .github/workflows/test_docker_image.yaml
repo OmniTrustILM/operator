@@ -1,0 +1,26 @@
+name: Test Docker image
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'deploy/charts/**'
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}-docker-test
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  test:
+    uses: OmniTrustILM/.github/.github/workflows/containers-test.yml@main
+    secrets: inherit
+    with:
+      image: ilm/operator
+      cache-scope: operator
+      build-args: |
+        VERSION=${{ github.ref_name }}

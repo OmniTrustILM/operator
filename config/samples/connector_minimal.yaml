@@ -1,0 +1,32 @@
+apiVersion: otilm.com/v1alpha1
+kind: Connector
+metadata:
+  name: x509-compliance-provider
+  namespace: default
+spec:
+  image:
+    repository: docker.io/czertainly/czertainly-x509-compliance-provider
+    tag: "1.3.1"
+  service:
+    port: 8080
+  # x509-compliance-provider uses legacy /v1/health endpoint
+  probes:
+    liveness:
+      path: /v1/health
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 3
+    readiness:
+      path: /v1/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /v1/health
+      periodSeconds: 10
+      failureThreshold: 45
+  env:
+    - name: SERVER_PORT
+      value: "8080"
+    - name: LOG_LEVEL
+      value: "INFO"

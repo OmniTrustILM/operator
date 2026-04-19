@@ -1,0 +1,120 @@
+apiVersion: otilm.com/v1alpha1
+kind: Connector
+metadata:
+  name: ejbca-ng-connector
+  namespace: ilm-system
+  labels:
+    app.kubernetes.io/part-of: ilm-platform
+spec:
+  replicas: 3
+
+  image:
+    repository: docker.io/czertainly/czertainly-ejbca-ng-connector
+    tag: "2.13.0"
+    pullPolicy: IfNotPresent
+    pullSecrets:
+      - registry-credentials
+
+  service:
+    port: 8443
+    type: ClusterIP
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  podAnnotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "connector"
+
+  securityContext:
+    runAsNonRoot: true
+    readOnlyRootFilesystem: true
+
+  probes:
+    liveness:
+      path: /health/liveness
+      initialDelaySeconds: 30
+      periodSeconds: 15
+      failureThreshold: 3
+    readiness:
+      path: /health/readiness
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /health/liveness
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      failureThreshold: 30
+
+  env:
+    - name: SERVER_PORT
+      value: "8443"
+    - name: LOG_LEVEL
+      value: "INFO"
+    - name: JAVA_OPTS
+      value: "-Xms128m -Xmx384m"
+
+  secretRefs:
+    # Database credentials injected as environment variables
+    - name: ejbca-db-credentials
+      type: env
+      keys:
+        - secretKey: username
+          envVar: JDBC_USERNAME
+        - secretKey: password
+          envVar: JDBC_PASSWORD
+        - secretKey: url
+          envVar: JDBC_URL
+    # TLS certificates mounted as files
+    - name: ejbca-tls-certs
+      type: volume
+      mountPath: /etc/ssl/connector
+      keys:
+        - secretKey: tls.crt
+          path: tls.crt
+        - secretKey: tls.key
+          path: tls.key
+        - secretKey: ca.crt
+          path: ca.crt
+
+  configMapRefs:
+    - name: ejbca-connector-config
+      type: env
+      keys:
+        - configMapKey: ejbca.url
+          envVar: EJBCA_URL
+        - configMapKey: ejbca.profile
+          envVar: EJBCA_PROFILE
+
+  volumes:
+    - name: tmp
+      mountPath: /tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: cache
+      mountPath: /var/cache/connector
+      emptyDir:
+        sizeLimit: 128Mi
+
+  lifecycle:
+    terminationGracePeriodSeconds: 60
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 2
+
+  metrics:
+    enabled: true
+    port: 8080
+    path: /v1/metrics
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels:
+        release: prometheus

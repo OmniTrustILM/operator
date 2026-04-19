@@ -1,0 +1,51 @@
+replicaCount: 1
+
+image:
+  registry: hub.omnitrustregistry.com
+  repository: ilm
+  name: operator
+  tag: ""                          # Defaults to appVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+crd:
+  install: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+leaderElection:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+securityContext:
+  runAsNonRoot: true
+  readOnlyRootFilesystem: true
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+metrics:
+  enabled: false
+  service:
+    port: 8080
+  serviceMonitor:
+    enabled: false
+
+# TODO: watchNamespaces will be added when namespace-scoped watching is implemented.
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,26 @@
+# Claude Code
+.claude/
+
+# Superpowers
+.superpowers/
+
+# Binaries and build artifacts
+bin/
+cover.out
+*.o
+*.exe
+*.test
+
+# IDE
+.idea/
+.vscode/
+
+# Qodana
+qodana.yaml
+qodana-results/
+
+# SonarQube
+.scannerwork/
+
+# OS
+.DS_Store
