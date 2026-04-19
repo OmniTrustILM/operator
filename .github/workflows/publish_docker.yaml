@@ -13,6 +13,11 @@ concurrency:
   group: publish-${{ github.ref }}-harbor
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
 jobs:
   publish:
     uses: OmniTrustILM/.github/.github/workflows/containers-build-and-push.yml@main

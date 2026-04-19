@@ -11,6 +11,10 @@ concurrency:
   group: pr-${{ github.event.pull_request.number || github.ref }}-docker-test
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   test:
     uses: OmniTrustILM/.github/.github/workflows/containers-test.yml@main
