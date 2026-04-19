@@ -313,11 +313,26 @@ metadata:
 spec:
   image:
     repository: docker.io/czertainly/czertainly-x509-compliance-provider
-    tag: "2.13.0"
+    tag: "1.3.1"
     pullPolicy: IfNotPresent
   service:
     port: 8080
     type: ClusterIP
+  probes:
+    liveness:
+      path: /v1/health
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 3
+    readiness:
+      path: /v1/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /v1/health
+      periodSeconds: 10
+      failureThreshold: 45
   env:
     - name: SERVER_PORT
       value: "8080"
@@ -503,11 +518,26 @@ metadata:
 spec:
   image:
     repository: docker.io/czertainly/czertainly-x509-compliance-provider
-    tag: "2.13.0"
+    tag: "1.3.1"
     pullPolicy: IfNotPresent
   service:
     port: 8080
     type: ClusterIP
+  probes:
+    liveness:
+      path: /v1/health
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      failureThreshold: 3
+    readiness:
+      path: /v1/health
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /v1/health
+      periodSeconds: 10
+      failureThreshold: 45
   env:
     - name: SERVER_PORT
       value: "8080"
