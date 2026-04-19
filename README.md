@@ -119,6 +119,8 @@ kubectl describe connector x509-compliance-provider
 | `make kind-cluster` | Create a Kind cluster for development |
 | `make kind-load` | Load operator image into Kind cluster |
 | `make test-e2e` | Run end-to-end tests |
+| `make trivy` | Run Trivy vulnerability scan on Docker image (config: config/trivy.yaml) |
+| `make trivy-fs` | Run Trivy filesystem scan on Go dependencies |
 | `make sonar` | Run local SonarQube analysis |
 | `make bundle` | Generate OLM bundle manifests and validate |
 | `make bundle-build` | Build the OLM bundle image |

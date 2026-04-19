@@ -57,7 +57,15 @@ make bundle
 # 6. Docker image — must build
 make docker-build
 
-# 7. SonarQube (optional, runs ephemeral Docker container)
+# 7. Trivy vulnerability scan — no HIGH/CRITICAL vulnerabilities
+#    Uses config/trivy.yaml for severity and scanner configuration.
+#    If vulnerabilities are found in Go dependencies, fix them with:
+#      go get <package>@latest && go mod tidy
+make trivy
+#    Or scan just the filesystem (faster, no Docker build needed):
+make trivy-fs
+
+# 8. SonarQube (optional, runs ephemeral Docker container)
 #    Checks: coverage, duplication (<3%), code smells, security hotspots
 make sonar
 ```

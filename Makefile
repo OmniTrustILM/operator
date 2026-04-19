@@ -391,6 +391,14 @@ kind-export-logs: kind ## Export logs from the Kind cluster.
 
 COVERAGE_THRESHOLD ?= 80
 
+.PHONY: trivy
+trivy: docker-build ## Run Trivy vulnerability scan on the operator Docker image.
+	trivy image --config config/trivy.yaml $(IMG)
+
+.PHONY: trivy-fs
+trivy-fs: ## Run Trivy filesystem scan on Go dependencies (no Docker build needed).
+	trivy fs --config config/trivy.yaml .
+
 .PHONY: sonar
 sonar: test ## Run SonarQube analysis locally via ephemeral Docker container.
 	@./hack/sonar-local.sh
