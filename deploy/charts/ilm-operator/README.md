@@ -68,14 +68,14 @@ The following values may be configured:
 
 ### Image
 
-| Parameter         | Default value  | Description                               |
-|-------------------|----------------|-------------------------------------------|
-| image.registry    | `docker.io`    | Docker registry for the operator image    |
-| image.repository  | `otilm`        | Docker image repository                   |
-| image.name        | `ilm-operator` | Docker image name                         |
-| image.tag         | `""`           | Docker image tag (defaults to appVersion) |
-| image.pullPolicy  | `IfNotPresent` | Image pull policy                         |
-| image.pullSecrets | `[]`           | Array of secret names for image pull      |
+| Parameter         | Default value               | Description                               |
+|-------------------|-----------------------------|-------------------------------------------|
+| image.registry    | `hub.omnitrustregistry.com` | Docker registry for the operator image    |
+| image.repository  | `ilm`                       | Docker image repository                   |
+| image.name        | `operator`                  | Docker image name                         |
+| image.tag         | `""`                        | Docker image tag (defaults to appVersion) |
+| image.pullPolicy  | `IfNotPresent`              | Image pull policy                         |
+| image.pullSecrets | `[]`                        | Array of secret names for image pull      |
 
 ### CRD
 
