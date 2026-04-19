@@ -113,7 +113,7 @@ jobs:
         env:
           changed_charts: ${{ env.changed_charts }}
           HELM_OCI_REGISTRY: hub.omnitrustregistry.com
-          HELM_OCI_REPOSITORY: ilm
+          HELM_OCI_REPOSITORY: ilm-helm
           HELM_USERNAME: ${{ secrets.CONTAINER_REGISTRY_USERNAME }}
           HELM_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
           COSIGN_PRIVATE_KEY: ${{secrets.COSIGN_PRIVATE_KEY}}
