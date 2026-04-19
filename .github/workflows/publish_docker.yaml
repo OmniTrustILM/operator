@@ -16,6 +16,7 @@ concurrency:
 jobs:
   publish:
     uses: OmniTrustILM/.github/.github/workflows/containers-build-and-push.yml@main
+    secrets: inherit
     with:
       image: ilm/operator
       cache-scope: operator
