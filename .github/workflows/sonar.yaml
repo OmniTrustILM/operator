@@ -36,7 +36,7 @@ jobs:
 
       - name: Generate token
         id: app_token
-        uses: actions/create-github-app-token@21cfef2c9c6a48ca77521f209bb18eb87fdd6746 # v2.0.0
+        uses: actions/create-github-app-token@064492a9a1762067169d50c792a7dc02bc3d1254 # v2.0.0
         with:
           app-id: ${{ secrets.SONAR_GH_APP_ID }}
           private-key: ${{ secrets.SONAR_GH_APP_PRIVATE_KEY }}
