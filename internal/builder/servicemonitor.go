@@ -11,13 +11,10 @@ const defaultMetricsPath = "/v1/metrics"
 // BuildServiceMonitor constructs a Prometheus ServiceMonitor for the given Connector.
 // Returns nil if metrics or ServiceMonitor are not configured and enabled.
 func BuildServiceMonitor(conn *otilmv1alpha1.Connector) *monitoringv1.ServiceMonitor {
-	if conn.Spec.Metrics == nil {
+	if conn.Spec.Metrics == nil || !conn.Spec.Metrics.Enabled {
 		return nil
 	}
-	if conn.Spec.Metrics.ServiceMonitor == nil {
-		return nil
-	}
-	if !conn.Spec.Metrics.ServiceMonitor.Enabled {
+	if conn.Spec.Metrics.ServiceMonitor == nil || !conn.Spec.Metrics.ServiceMonitor.Enabled {
 		return nil
 	}
 

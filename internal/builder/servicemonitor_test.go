@@ -91,6 +91,19 @@ func TestBuildServiceMonitorMetricsEnabledButSMDisabled(t *testing.T) {
 	assert.Nil(t, sm)
 }
 
+func TestBuildServiceMonitorMetricsDisabledSMEnabled(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.Metrics = &otilmv1alpha1.MetricsSpec{
+		Enabled: false,
+		ServiceMonitor: &otilmv1alpha1.ServiceMonitorSpec{
+			Enabled: true,
+		},
+	}
+
+	sm := builder.BuildServiceMonitor(conn)
+	assert.Nil(t, sm, "expected nil when Metrics.Enabled is false even if ServiceMonitor.Enabled is true")
+}
+
 func TestBuildServiceMonitorNilServiceMonitor(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.Metrics = &otilmv1alpha1.MetricsSpec{

@@ -137,6 +137,26 @@ func TestBuildDeploymentDefaultProbes(t *testing.T) {
 	assert.Equal(t, int32(45), c.StartupProbe.FailureThreshold)
 }
 
+func TestBuildDeploymentProbeEmptyPath(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.Probes = &otilmv1alpha1.ProbeSpec{
+		Liveness: &otilmv1alpha1.ProbeConfig{
+			Path:             "",
+			PeriodSeconds:    10,
+			FailureThreshold: 3,
+		},
+	}
+
+	dep := builder.BuildDeployment(conn, testChecksum)
+	c := dep.Spec.Template.Spec.Containers[0]
+
+	// Empty path should result in nil probe
+	assert.Nil(t, c.LivenessProbe, "expected nil liveness probe when path is empty")
+	// Readiness and startup should still get defaults
+	require.NotNil(t, c.ReadinessProbe)
+	require.NotNil(t, c.StartupProbe)
+}
+
 func TestBuildDeploymentEnvVars(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.Env = []otilmv1alpha1.EnvVar{

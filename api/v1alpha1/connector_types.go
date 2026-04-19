@@ -298,6 +298,8 @@ type MetricsSpec struct {
 	Path *string `json:"path,omitempty"`
 
 	// Port is the port for the metrics endpoint.
+	// Currently reserved for future use when metrics are served on a separate port.
+	// The ServiceMonitor uses the service port (spec.service.port) for scraping.
 	// +kubebuilder:default=8080
 	// +optional
 	Port *int32 `json:"port,omitempty"`

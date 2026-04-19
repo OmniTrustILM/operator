@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // RegistrationRequest represents a connector registration request to the platform.
@@ -63,7 +64,11 @@ func convertAttributes(attrs []otilmv1alpha1.RegistrationAttribute) []Registrati
 		var content any
 		// Unmarshal the raw JSON to get a native Go value
 		if a.Content.Raw != nil {
-			_ = json.Unmarshal(a.Content.Raw, &content)
+			if err := json.Unmarshal(a.Content.Raw, &content); err != nil {
+				log.Log.Info("failed to unmarshal registration attribute content, using raw value",
+					"name", a.Name, "error", err)
+				content = string(a.Content.Raw)
+			}
 		}
 		result = append(result, RegistrationAttr{
 			Name:    a.Name,

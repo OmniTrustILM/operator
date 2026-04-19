@@ -182,7 +182,10 @@ spec:
                     type: string
                   port:
                     default: 8080
-                    description: Port is the port for the metrics endpoint.
+                    description: |-
+                      Port is the port for the metrics endpoint.
+                      Currently reserved for future use when metrics are served on a separate port.
+                      The ServiceMonitor uses the service port (spec.service.port) for scraping.
                     format: int32
                     type: integer
                   serviceMonitor:

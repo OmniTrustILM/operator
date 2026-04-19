@@ -159,8 +159,8 @@ func buildVolumes(conn *otilmv1alpha1.Connector) ([]corev1.Volume, []corev1.Volu
 // buildEphemeralVolume constructs a single ephemeral Volume and its VolumeMount.
 func buildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
 	vol := corev1.Volume{Name: v.Name}
+	emptyDir := &corev1.EmptyDirVolumeSource{}
 	if v.EmptyDir != nil {
-		emptyDir := &corev1.EmptyDirVolumeSource{}
 		if v.EmptyDir.Medium != nil {
 			emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
 		}
@@ -172,8 +172,8 @@ func buildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.Vol
 				emptyDir.SizeLimit = &qty
 			}
 		}
-		vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
 	}
+	vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
 	vm := corev1.VolumeMount{
 		Name:      v.Name,
 		MountPath: v.MountPath,
@@ -348,6 +348,11 @@ func buildProbe(conn *otilmv1alpha1.Connector, pt probeType, port int32) *corev1
 	// Use defaults if no explicit config
 	if cfg == nil {
 		cfg = defaultProbeConfig(pt)
+	}
+
+	// Skip the probe if the path is empty
+	if cfg.Path == "" {
+		return nil
 	}
 
 	return &corev1.Probe{
