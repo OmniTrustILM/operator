@@ -9,7 +9,7 @@ spec:
   replicas: 3
 
   image:
-    repository: docker.io/czertainly/czertainly-ejbca-ng-connector
+    repository: hub.omnitrustregistry.com/ilm/ejbca-ng-connector
     tag: "2.13.0"
     pullPolicy: IfNotPresent
     pullSecrets:

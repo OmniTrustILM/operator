@@ -1,0 +1,43 @@
+# platform_2170.yaml — a Platform pinned to ILM 2.17.0 (the pre-rebrand CZERTAINLY release).
+#
+# Everything is MANAGED: the operator provisions CloudNativePG + RabbitMQ + Keycloak and wires
+# 2.17.0's contract automatically. You do NOT configure env-var names — the 2.17.0 bundle does:
+#   - Core receives RABBITMQ_* broker env (2.18.0 renamed these to BROKER_*),
+#   - the managed RabbitMQ is provisioned with a SINGLE broker user (2.17.0 used one credential,
+#     not the five-user 2.18.0 topology),
+#   - there is NO provisioning-rabbitmq service (it arrived in 2.18.0) — see the note at the end.
+#
+# Images resolve to hub.omnitrustregistry.com/ilm/* at the 2.17.0 tags
+# (core:2.17.0, frontend-administrator:2.17.0, scheduler:1.0.5; the rest are shared with 2.18.0).
+# No Secrets to pre-create — the upstream operators mint their own credentials and the operator
+# reads them back. To upgrade this platform to 2.18.0, see docs/upgrades.md.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.17.0"                   # pin the 2.17.0 bundle; downgrades below this are refused
+  common:
+    hostName: ilm.example.com         # the platform's canonical public FQDN
+  database:
+    mode: managed                     # CloudNativePG mints the app Secret
+    managed: { instances: 1, version: "16", storage: { size: 20Gi } }
+    pgBouncer: { managed: true }                  # pool connections (else Postgres's 100 exhaust)
+  messaging:
+    mode: managed                     # the Topology Operator mints the (single) user Secret
+    brokerType: rabbitmq
+    managed: { replicas: 1, storage: { size: 10Gi } }   # version omitted → operator's matched default
+  keycloak:
+    mode: managed                     # the Keycloak Operator mints the admin Secret; OIDC relayed
+    realm: ilm
+    managed: { instances: 1 }   # version omitted → Keycloak Operator's matched default
+  edge:                               # optional turnkey internal-CA TLS edge (needs cert-manager)
+    enabled: true                     # edge.host omitted → the edge uses common.hostName
+    type: ingress
+    className: nginx
+    tls: { source: internal }
+  # NOTE — provisioning-rabbitmq is a 2.18.0 component. There is intentionally NO
+  # spec.provisioning here: on 2.17.0 the operator would skip it (a no-op) even if set. Add it
+  # AFTER upgrading to 2.18.0 (set spec.version: "2.18.0" + spec.provisioning.mode: deploy);
+  # see docs/upgrades.md for the full upgrade procedure, implications, and limitations.

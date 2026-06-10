@@ -1,0 +1,75 @@
+# platform_registeradmin_both.yaml — first-admin bootstrap by BOTH methods at once:
+# a GENERATED admin client certificate (mTLS) AND a Keycloak password realm user.
+#
+# Enabling both certificate{} and password{} bootstraps a single admin identity reachable two
+# ways:
+#   - CERTIFICATE (mTLS): cert-manager issues the admin client certificate (source=generated);
+#     the operator wires Core's ADMIN_CERT from it. The admin presents the cert at the edge,
+#     which forwards it to Core via the client-cert header. Tracked by the AdminCertReady
+#     condition.
+#   - PASSWORD: the operator creates an idempotent Keycloak realm user (superadmin attribute)
+#     whose password comes from registerAdmin.password.secretRef — read-only, handed to
+#     Keycloak once, never minted or logged. The admin signs in with username + password via
+#     OIDC. Tracked by the AdminUserReady condition.
+# The two conditions are independent; neither blocks the other or drives the platform Degraded.
+#
+# MANAGED-KEYCLOAK ONLY (because password is enabled): keycloak.mode MUST be "managed" — a CRD
+# CEL rule rejects registerAdmin.password.enabled otherwise (the operator needs the Keycloak
+# admin API to create the user).
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - cert-manager installed — REQUIRED for the generated admin certificate. If absent,
+#     AdminCertReady=False (reason CertManagerNotInstalled), non-fatal; the rest converges.
+#   - The Keycloak Operator installed (k8s.keycloak.org CRDs) — see
+#     platform_managed_keycloak.yaml for the install manifests.
+#   - External PostgreSQL + AMQP broker (managed works too); managed Keycloak shares the DB.
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+#   # The admin PASSWORD (generic Secret, key "password"); the admin CERTIFICATE Secret is
+#   # created BY cert-manager (source=generated) — you do not create it:
+#   kubectl create secret generic ilm-admin-password -n ilm --from-literal=password=<admin-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    hostName: ilm.example.com
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilm
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  keycloak:
+    mode: managed                 # REQUIRED for the password method
+    realm: ilm
+    managed:
+      instances: 1
+      # version omitted → the Keycloak Operator uses its matched default server image.
+  registerAdmin:
+    enabled: true
+    username: admin
+    name: Platform Administrator
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: generated           # cert-manager issues the admin client cert (AdminCertReady)
+      # issuerRef is OPTIONAL for source=generated; omit to use the platform internal CA.
+    password:
+      enabled: true
+      secretRef: ilm-admin-password   # generic Secret (key "password"); never operator-minted

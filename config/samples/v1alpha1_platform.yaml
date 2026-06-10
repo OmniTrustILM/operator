@@ -1,0 +1,41 @@
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  labels:
+    app.kubernetes.io/name: ilm-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  # Edge (external entry, routed to the api-gateway). Optional — omit for no edge.
+  edge:
+    enabled: true
+    type: ingress
+    className: nginx
+    host: ilm.example.com
+    tls:
+      # PREREQUISITE: source "internal" (self-signed CA), "letsEncrypt" (ACME), and
+      # "issuerRef" (any existing cert-manager Issuer/ClusterIssuer) all require
+      # cert-manager (cert-manager.io) to be installed in the cluster; the operator
+      # detects it and, if absent, skips the edge and reports
+      # EdgeReady=False/CertManagerNotInstalled (the rest of the platform still
+      # converges). Use source "secret" to bring your own TLS Secret — that needs
+      # no cert-manager. The operator never installs cert-manager itself.
+      source: internal
+      # source: issuerRef            # any cert-manager Issuer/ClusterIssuer mints the leaf
+      # issuerRef: { name: vault-issuer, kind: ClusterIssuer }  # kind: Issuer (default) | ClusterIssuer

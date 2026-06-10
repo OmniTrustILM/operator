@@ -1,0 +1,52 @@
+# platform_edge_letsencrypt.yaml — external infra + Ingress edge with Let's Encrypt TLS.
+#
+# The edge is a Kubernetes Ingress whose serving certificate is obtained from the
+# ACME (Let's Encrypt) issuer that the operator provisions via cert-manager.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker (see platform_minimal_external.yaml).
+#   - cert-manager (cert-manager.io) installed — REQUIRED for tls.source=letsEncrypt.
+#     The operator NEVER installs cert-manager. If it is absent the edge is skipped
+#     and EdgeReady=False / reason CertManagerNotInstalled is reported; the rest of
+#     the platform still converges and the edge self-heals once cert-manager appears.
+#   - An ingress controller for the chosen class (here ingress-nginx for "nginx").
+#   - The Host DNS record must resolve to the ingress controller's address, and the
+#     ACME http01 challenge must be reachable, for Let's Encrypt to issue.
+#
+# SECRETS YOU MUST CREATE FIRST (same as minimal):
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+# The TLS Secret is created BY cert-manager (default name ilm-ingress-tls) — you do
+# not create it. Use environment: staging first to avoid Let's Encrypt rate limits.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  edge:
+    enabled: true
+    type: ingress
+    className: nginx
+    host: ilm.example.com
+    tls:
+      source: letsEncrypt
+      letsEncrypt:
+        email: ops@example.com
+        environment: staging        # switch to "production" once issuance works

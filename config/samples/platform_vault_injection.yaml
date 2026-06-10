@@ -1,0 +1,73 @@
+# platform_vault_injection.yaml — inject secrets with the HashiCorp Vault Agent Injector.
+#
+# Shows how to drive the Vault Agent Sidecar Injector via pod annotations so a component's
+# secrets are rendered into the pod by an injected Vault Agent (no secret VALUES in the CR).
+# The injector is a mutating webhook that watches for the vault.hashicorp.com/agent-inject
+# annotation on a pod template; the operator merges spec.<component>.podAnnotations onto that
+# component's pod, so these annotations reach the injector.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - HashiCorp Vault + the Vault Agent Injector (mutating webhook) installed and configured,
+#     with a Kubernetes auth role ("ilm-core" below) bound to the component's ServiceAccount
+#     and a policy granting read on the referenced secret paths. The ILM operator does NOT
+#     install or configure Vault.
+#   - External PostgreSQL + AMQP broker (this sample keeps infra external; see
+#     platform_minimal_external.yaml). When Vault injects the DB/MQ credentials as files, the
+#     app reads them from the injected path — wire those via env/args as your image expects.
+#
+# SECRETS: there are NO Kubernetes Secrets to pre-create for the injected material — Vault
+# Agent renders it into the pod at runtime from Vault. (DB/messaging credentials below still
+# reference Kubernetes Secrets in this sample; move them into Vault the same way if desired.)
+#
+# PLACEMENT: podAnnotations is a PER-COMPONENT field — there is no single fleet-wide pod-
+# annotation field on spec.common. To inject into MORE than one component, repeat the
+# podAnnotations block on each component (core/auth/scheduler/...) as shown.
+# For a fleet-wide Vault Agent that is identical on every pod, prefer an explicit
+# spec.common.sidecars Vault Agent container instead of annotation-driven injection.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    hostName: ilm.example.com
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+
+  # ── Vault Agent injection on Core (the secret-consuming component) ──
+  core:
+    podAnnotations:
+      vault.hashicorp.com/agent-inject: "true"
+      # The Kubernetes auth role bound to Core's ServiceAccount (configure in Vault):
+      vault.hashicorp.com/role: "ilm-core"
+      # Render the application DB credentials from a Vault KV path into a file the Agent
+      # writes into the pod; the template controls the on-disk format your image consumes:
+      vault.hashicorp.com/agent-inject-secret-db-credentials: "secret/data/ilm/database"
+      vault.hashicorp.com/agent-inject-template-db-credentials: |
+        {{- with secret "secret/data/ilm/database" -}}
+        username={{ .Data.data.username }}
+        password={{ .Data.data.password }}
+        {{- end -}}
+
+  # ── To inject into another component, repeat podAnnotations on its block. Example
+  #    (uncomment to enable on scheduler, with its own Vault role): ──
+  # scheduler:
+  #   podAnnotations:
+  #     vault.hashicorp.com/agent-inject: "true"
+  #     vault.hashicorp.com/role: "ilm-scheduler"
+  #     vault.hashicorp.com/agent-inject-secret-db-credentials: "secret/data/ilm/database"

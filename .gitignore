@@ -6,10 +6,14 @@
 
 # Binaries and build artifacts
 bin/
+# Generated install manifests (`make build-installer` / `build-installer-crds`); published as release assets
+dist/
 cover.out
 *.o
 *.exe
 *.test
+# go-built CLI binary if someone runs `go build ./cmd/values2platform` (use `go run` instead)
+/values2platform
 
 # IDE
 .idea/

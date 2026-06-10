@@ -53,22 +53,23 @@ const metricsRoleBindingName = "ilm-operator-metrics-binding"
 // operator namespace.
 const testNamespace = "ilm-e2e-test"
 
-var _ = Describe("Manager", Ordered, func() {
+// ContinueOnFailure: this suite is a pre-release GATE, not the development loop. A single
+// failing spec must NOT skip its siblings — when the gate runs (rarely), surface ALL failures
+// in one pass instead of one-bug-per-20-minute-run. Shared infra setup stays in BeforeAll.
+var _ = Describe("Manager", Ordered, ContinueOnFailure, func() {
 	var controllerPodName string
 
 	// Before running the tests, set up the environment by creating the namespace,
 	// enforce the restricted security policy to the namespace, installing CRDs,
 	// and deploying the controller.
 	BeforeAll(func() {
-		By("creating manager namespace")
-		cmd := exec.Command("kubectl", "create", "ns", namespace)
-		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		By("creating manager namespace (idempotent — tolerate a reused cluster)")
+		Expect(utils.CreateNamespaceIdempotent(namespace)).To(Succeed(), "Failed to create namespace")
 
 		By("labeling the namespace to enforce the restricted security policy")
-		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
+		cmd := exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
 			"pod-security.kubernetes.io/enforce=restricted")
-		_, err = utils.Run(cmd)
+		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
 
 		By("installing CRDs")
@@ -81,10 +82,8 @@ var _ = Describe("Manager", Ordered, func() {
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
 
-		By("creating test namespace for Connector CRs")
-		cmd = exec.Command("kubectl", "create", "ns", testNamespace)
-		_, err = utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create test namespace")
+		By("creating test namespace for Connector CRs (idempotent)")
+		Expect(utils.CreateNamespaceIdempotent(testNamespace)).To(Succeed(), "Failed to create test namespace")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -95,8 +94,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 
 		By("deleting test namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", testNamespace, "--ignore-not-found")
-		_, _ = utils.Run(cmd)
+		utils.DeleteNamespace(testNamespace)
 
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
@@ -107,8 +105,7 @@ var _ = Describe("Manager", Ordered, func() {
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
+		utils.DeleteNamespace(namespace)
 	})
 
 	// After each test, check for failures and collect logs, events,
@@ -201,15 +198,14 @@ var _ = Describe("Manager", Ordered, func() {
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
+			err := utils.ApplyResource("clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=ilm-operator-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
-			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
 
 			By("validating that the metrics service is available")
-			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
+			cmd := exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Metrics service should exist")
 
@@ -312,7 +308,7 @@ metadata:
   namespace: %s
 spec:
   image:
-    repository: docker.io/czertainly/czertainly-x509-compliance-provider
+    repository: hub.omnitrustregistry.com/ilm/x509-compliance-provider
     tag: "1.3.1"
     pullPolicy: IfNotPresent
   service:
@@ -517,7 +513,7 @@ metadata:
   namespace: %s
 spec:
   image:
-    repository: docker.io/czertainly/czertainly-x509-compliance-provider
+    repository: hub.omnitrustregistry.com/ilm/x509-compliance-provider
     tag: "1.3.1"
     pullPolicy: IfNotPresent
   service:
@@ -575,19 +571,13 @@ spec:
 			_, _ = fmt.Fprintf(GinkgoWriter, "Initial checksum: %s\n", initialChecksum)
 
 			By("updating the Secret data to trigger a rolling restart")
-			cmd = exec.Command("kubectl", "create", "secret", "generic", secretName,
+			// Idempotent apply (create→dry-run→apply): re-running on a reused cluster updates
+			// the existing Secret in place rather than failing AlreadyExists. The rotated value
+			// is what the assertion below keys off (the reconciler must detect the change).
+			err = utils.ApplyResource("secret", "generic", secretName,
 				"-n", testNamespace,
 				"--from-literal=api-key=rotated-api-key-value",
-				"--dry-run=client", "-o", "yaml",
 			)
-			patchYAML, err := cmd.Output()
-			Expect(err).NotTo(HaveOccurred())
-
-			tmpPatch := writeTempYAML(string(patchYAML))
-			defer func() { _ = os.Remove(tmpPatch) }()
-
-			cmd = exec.Command("kubectl", "apply", "-f", tmpPatch)
-			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to update Secret")
 
 			By("waiting for the Connector config checksum to change (reconciler detected Secret change)")
@@ -643,6 +633,48 @@ spec:
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 	})
+
+	// Platform external-mode reconcile specs (defined in platform_test.go). Registered
+	// here as a Context inside this Ordered Describe so they reuse the operator deployed
+	// in BeforeAll and run before it is undeployed in AfterAll.
+	platformExternalModeSpecs()
+
+	// Platform managed-database (real CloudNativePG) specs (defined in platform_test.go).
+	// Registered the same way so they reuse the deployed operator; they install the real
+	// CloudNativePG operator in their own BeforeAll and validate the operator's rendered
+	// CNPG Cluster end-to-end (the VERIFY-validation gate).
+	platformManagedDatabaseSpecs()
+
+	// Platform managed-messaging (real RabbitMQ Cluster + Messaging Topology operators)
+	// specs (defined in platform_test.go). Registered the same way; they install both real
+	// RabbitMQ operators in their own BeforeAll and validate the operator's rendered
+	// RabbitmqCluster + full topology end-to-end (the messaging VERIFY-validation gate).
+	platformManagedMessagingSpecs()
+
+	// Platform managed-Keycloak (real Keycloak Operator + CloudNativePG shared DB) specs
+	// (defined in platform_test.go). Registered the same way; they install the real Keycloak
+	// Operator (and CNPG for the shared database) in their own BeforeAll and validate the
+	// operator's rendered Keycloak CR + KeycloakRealmImport end-to-end (the OIDC/Keycloak
+	// VERIFY-validation gate), including OIDCConfigured=True via the in-pod relay (the operator
+	// fetches + relays the ilm client secret; Core self-registers the provider in-pod).
+	platformManagedKeycloakSpecs()
+
+	// FULL managed-platform specs (defined in platform_test.go): database + messaging +
+	// keycloak ALL managed, the edge enabled with cert-manager, AND the real PUBLIC ILM
+	// application images. Registered LAST so it runs after the managed-Keycloak spec drains
+	// its Platform from the shared "keycloak" namespace (the Keycloak Operator is namespace-
+	// scoped there). It brings up the whole system and closes the two image-gated residuals
+	// end-to-end: the in-pod OIDC registration (OIDCConfigured=True + an exec-curl proving Core's
+	// localhost settings API reports the ilm provider) and read-only-root on the JVM/.NET app
+	// containers, plus the runtime DB/messaging wiring the unit/builder tests cannot prove.
+	platformFullManagedSpecs()
+
+	// VERSION-MATRIX specs (defined in platform_test.go): a managed Platform pinned to 2.17.0
+	// reaches Available, UPGRADES in place to 2.18.0, then a downgrade is refused — proving the
+	// multi-version / upgrade story end-to-end. Labelled "matrix" so it can also run standalone
+	// (`--ginkgo.label-filter=matrix`); it installs its own upstream operators and, like the FULL
+	// block, runs in the namespace-scoped Keycloak Operator's namespace, draining the node first.
+	platformVersionMatrixSpecs()
 })
 
 // -------------------------------------------------------------------------

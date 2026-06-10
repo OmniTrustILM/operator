@@ -1,0 +1,97 @@
+# platform_managed_keycloak.yaml — operator-provisioned Keycloak via the Keycloak Operator.
+#
+# A Platform whose OIDC identity provider is MANAGED: instead of configuring OIDC providers
+# directly in the application database, the operator renders a Keycloak CR (Keycloak
+# Operator) that SHARES the platform database (the same PostgreSQL, in a dedicated "keycloak"
+# schema) and runs SCC-clean (OpenShift restricted-v2). An optional, create-only realm import
+# seeds the platform realm from a user-provided ConfigMap.
+#
+# NOTE: the operator now wires Core's OIDC client to the managed Keycloak automatically — it
+# reads back the generated "ilm" client secret and relays it into the operator-owned
+# "ilm-oidc-client" Secret, which Core consumes as INTERNAL_OAUTH_SECRET (the OIDCConfigured
+# condition tracks it). There is nothing to point Core at by hand.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - The Keycloak Operator installed (it serves the k8s.keycloak.org CRDs Keycloak +
+#     KeycloakRealmImport):
+#       kubectl apply -f \
+#         https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/main/kubernetes/keycloaks.k8s.keycloak.org-v1.yml
+#       kubectl apply -f \
+#         https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/main/kubernetes/keycloakrealmimports.k8s.keycloak.org-v1.yml
+#       kubectl apply -f \
+#         https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/main/kubernetes/kubernetes.yml
+#     Until the Keycloak Operator is installed, the Platform reports KeycloakReady=False with
+#     reason KeycloakOperatorNotInstalled. It waits (it never fails) — install the operator
+#     and it converges with no operator restart.
+#   - A database for Keycloak to share. This sample uses an EXTERNAL database; managed
+#     PostgreSQL (platform_managed_postgres.yaml) works too — Keycloak picks up whichever the
+#     platform database resolves to.
+#
+# SECRETS / CONFIGMAPS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   # Database credentials (Keycloak shares the platform DB and references this Secret —
+#   # username/password — via spec.db; the value is NEVER inlined into the Keycloak CR):
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>
+#   # Optional realm import ConfigMap (only if you set keycloak.managed.realmImport):
+#   kubectl create configmap ilm-realm -n ilm --from-file=ilm_realm.json=./ilm_realm.json
+#
+# WHAT THE OPERATOR CREATES
+#   - A Keycloak CR named "ilm-keycloak" (1 instance here) wired at the platform database
+#     (spec.db: vendor postgres, host/port/database from the resolved connection, the
+#     username/password by Secret reference, schema "keycloak"), serving plain HTTP behind the
+#     gateway, with an SCC-clean pod template (runAsNonRoot, drop ALL caps, seccomp
+#     RuntimeDefault, no hard-coded runAsUser). The Keycloak Operator generates the
+#     "<keycloak>-initial-admin" Secret, which backs the Keycloak admin API the operator uses
+#     to wire Core's OIDC client (read back the "ilm" client secret → relay it into
+#     "ilm-oidc-client").
+#   - When keycloak.managed.realmImport is set, a create-only KeycloakRealmImport
+#     "ilm-keycloak-realm" whose realm representation is read from your ConfigMap and imported
+#     ONCE (a realm you later edit in Keycloak is not clobbered on the next reconcile).
+#
+# DELETION (deletionPolicy)
+#   - Retain (the default): deleting this Platform LEAVES the Keycloak CR, its realm import,
+#     and the realm's data in the shared database intact. This is the safe default.
+#   - Delete: deleting the Platform also deletes the Keycloak CR + realm import (the Keycloak
+#     Operator then tears down the Keycloak deployment). Set spec.deletionPolicy: Delete.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    # The platform's canonical public FQDN. Managed Keycloak derives KC_HOSTNAME from it,
+    # and the ilm OIDC client's redirect/web-origin/post-logout URIs are built from it. Set
+    # it even without an operator-managed edge so Keycloak and the OIDC wiring know the
+    # public address. edge.host overrides it per-edge.
+    hostName: ilm.example.com
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilm
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: czertainly
+    credentials:
+      secretRef: ilm-mq
+  keycloak:
+    mode: managed
+    realm: ilm
+    managed:
+      instances: 1
+      # version omitted → the Keycloak Operator uses its matched default server image.
+      # logLevel: info               # optional KC_LOG_LEVEL: info (default) | debug | warn |
+      #                              #   a category form, e.g. "info,org.keycloak:debug"
+      # realmImport:                 # optional; create-only import from a user ConfigMap
+      #   configMapRef: ilm-realm
+      #   key: ilm_realm.json
+      # overrides: {}                # optional RFC-7396 JSON-merge patch onto the Keycloak CR spec
+      #                              #    (forbidden: metadata.name/namespace/ownerReferences,
+      #                              #    spec.db, spec.hostname — the database-sharing + edge-host wiring)

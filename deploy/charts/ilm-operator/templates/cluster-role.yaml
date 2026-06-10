@@ -12,8 +12,12 @@ rules:
       - configmaps
       - secrets
     verbs:
+      - create
+      - delete
       - get
       - list
+      - patch
+      - update
       - watch
   - apiGroups:
       - ""
@@ -39,6 +43,102 @@ rules:
       - apps
     resources:
       - deployments
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - cert-manager.io
+    resources:
+      - certificates
+      - issuers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+      - httproutes
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - postgresql.cnpg.io
+    resources:
+      - clusters
+      - poolers
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - rabbitmq.com
+    resources:
+      - rabbitmqclusters
+      - vhosts
+      - users
+      - permissions
+      - exchanges
+      - queues
+      - bindings
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - k8s.keycloak.org
+    resources:
+      - keycloaks
+      - keycloakrealmimports
     verbs:
       - create
       - delete
@@ -72,13 +172,27 @@ rules:
   - apiGroups:
       - otilm.com
     resources:
+      - platforms
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - otilm.com
+    resources:
       - connectors/finalizers
+      - platforms/finalizers
     verbs:
       - update
   - apiGroups:
       - otilm.com
     resources:
       - connectors/status
+      - platforms/status
     verbs:
       - get
       - patch

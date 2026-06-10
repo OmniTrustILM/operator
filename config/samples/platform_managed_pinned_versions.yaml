@@ -1,0 +1,72 @@
+# platform_managed_pinned_versions.yaml — pinning managed upstream engine versions.
+#
+# A fully-MANAGED Platform (PostgreSQL + RabbitMQ + Keycloak) that PINS the exact engine
+# version of each managed dependency. Use this when you want reproducible, explicitly-chosen
+# upstream versions (GitOps, change control) rather than the operator's defaults.
+#
+# HOW VERSION SELECTION WORKS
+#   Each managed block has its own `version` that selects the UPSTREAM operator's container
+#   image for that engine:
+#       database.managed.version   → the CloudNativePG PostgreSQL major (e.g. "18")
+#       messaging.managed.version  → the RabbitMQ server version (e.g. "4.3.1")
+#       keycloak.managed.version   → the Keycloak server version (e.g. "26.6.3")
+#   OMIT a `version` to let the operator use the DEFAULT pinned by the selected platform
+#   version bundle (spec.version) — that default is the latest version VALIDATED with this
+#   platform release. Pinning here lets you choose a different supported version, or simply
+#   record the exact one you run. The values below match the 2.18.0 bundle's validated
+#   defaults; see docs/versions.md for the supported matrix and docs/configuration.md
+#   (Managed engine versions) for the full explanation.
+#
+# MAJOR-VERSION UPGRADES ARE GUARDED
+#   Bumping a `version` is fine for a fresh deploy and for patch/minor changes. A MAJOR bump
+#   of an ALREADY-RUNNING managed instance (e.g. PostgreSQL 17→18, RabbitMQ 3.x→4.x,
+#   Keycloak 25→26) is a one-way, data-affecting operation with upstream prerequisites, so
+#   the operator BLOCKS it until you acknowledge it on that block:
+#       database.managed.upgradeAcknowledged: true   # (likewise messaging / keycloak)
+#   You then see DatabaseUpgradeBlocked / MessagingUpgradeBlocked / KeycloakUpgradeBlocked
+#   clear, and the upstream operator performs the upgrade. Reset the flag to false afterward.
+#   See docs/upgrades.md before acknowledging a major bump.
+#
+# PREREQUISITES (all three managed → all three upstream operators):
+#   - CloudNativePG (postgresql.cnpg.io CRDs)
+#   - RabbitMQ Cluster Operator + Messaging Topology Operator (rabbitmq.com CRDs)
+#   - Keycloak Operator (k8s.keycloak.org CRDs)
+#   Each missing operator surfaces a non-fatal <Dependency>Ready=False/...NotInstalled and
+#   the platform waits — install the operator and it self-heals. See docs/platform.md for
+#   the exact install commands.
+#
+# SECRETS: none for the managed dependencies — CloudNativePG and the Messaging Topology
+# Operator GENERATE the credentials; the operator reads them back by reference.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    # Managed Keycloak derives KC_HOSTNAME from this; set it even without an operator edge.
+    hostName: ilm.example.com
+  database:
+    mode: managed
+    managed:
+      instances: 3
+      version: "18"                  # pin the PostgreSQL major (omit → bundle default)
+      # upgradeAcknowledged: true    # set ONLY to perform a MAJOR upgrade of a running cluster
+      storage:
+        size: 100Gi
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 3
+      version: "4.3.1"               # pin the RabbitMQ server version (omit → bundle default)
+      # upgradeAcknowledged: true    # set ONLY for a MAJOR (3.x→4.x) upgrade of a running broker
+      storage:
+        size: 20Gi
+  keycloak:
+    mode: managed
+    realm: ilm
+    managed:
+      instances: 1
+      version: "26.6.3"              # pin the Keycloak server version (omit → bundle default)
+      # upgradeAcknowledged: true    # set ONLY for a MAJOR (25→26) upgrade of a running instance

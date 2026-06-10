@@ -1,0 +1,240 @@
+# platform_full.yaml — the kitchen-sink of fields that ACTUALLY EXIST today.
+#
+# ROLE: the DEPLOYABLE "what can I set" for the shipped otilm.com/v1alpha1 Platform.
+# Every field below is implemented, validated, and applies as-is. It is NOT a recommended
+# config — it just exercises the whole surface with example values. Companions:
+#   - docs/configuration.md ............... what each option MEANS + which sample fits a need
+#   - config/samples/platform_production.yaml  a RECOMMENDED production-tuned shape
+#   - docs/design/examples/platform-cr-reference.yaml  the annotated field-by-field reference
+#       (also marks the few design-target fields NOT yet in the shipped CRD)
+#   - config/samples/README.md ............ the index of all samples
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker.
+#   - cert-manager + ingress-nginx (this sample enables an Ingress edge with
+#     letsEncrypt TLS and a generated admin cert — both need cert-manager).
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform). Exact keys matter:
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>        # keys: username, password
+#   kubectl create secret generic ilm-messaging -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<broker-password>    # keys: username, password
+#   kubectl create secret generic ilm-trusted-ca -n ilm \
+#     --from-file=ca.crt=path/to/ca-bundle.pem                                 # key: ca.crt
+#   kubectl create secret generic ilm-provisioning -n ilm \
+#     --from-literal=provisioningApiKey=<api-key>                              # key: provisioningApiKey
+# (The edge TLS Secret and the generated admin cert Secret are created BY cert-manager.)
+#
+# PLACEMENT RULE: anything that applies to EVERY component (shared image, the public
+# hostName, outbound proxy, log level, the trusted-CA bundle, fleet-wide pod-template
+# passthrough) lives under spec.common. Per-component blocks (core/auth/…) override
+# what common sets. Provisioning is a platform-level concern at spec.provisioning; exposing
+# the broker management UI is a messaging property at spec.messaging.management.expose.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  # ── platform version bundle selection ──
+  # Selects the tested component images + env wiring + managed-RabbitMQ topology for a
+  # platform version. Empty (the default) = the operator's NEWEST shipped version, so an
+  # existing CR keeps today's behaviour. One operator build supports a RANGE of versions; an
+  # unknown version degrades with a supported-versions message. status.observedVersion reports
+  # the resolved version.
+  version: "2.18.0"                          # omit/"" pins the operator's newest at creation (no auto-upgrade)
+
+  # ── platform-wide knobs ──
+  deletionPolicy: Retain            # Retain (default) | Delete
+
+  # ── network isolation (default ON, opt-out) ──
+  # Renders a SAFE default-deny set (networking.k8s.io/v1): an ingress default-deny that
+  # allows only same-namespace traffic to the platform's pods (denying cross-namespace/
+  # external ingress), an edge->api-gateway allow from the ingress-controller namespace,
+  # and permissive egress. Set enabled=false to render none (e.g. on a CNI without
+  # NetworkPolicy support). Omit the block entirely to keep the default-on isolation.
+  networkPolicy:
+    enabled: true
+    ingressNamespace: ingress-nginx # ingress-controller / Gateway namespace (default shown)
+
+  # ── spec.common: applies to EVERY component (one placement rule) ──
+  # Shared image defaults, the canonical public hostName, outbound proxy, log level, the
+  # trusted-CA bundle, and the fleet-wide pod-template passthrough. Each component's own
+  # block overrides/augments what is set here. No secret VALUES here — references only.
+  common:
+    # Canonical public FQDN. Single source of truth for the external host: the edge uses
+    # it for its host/cert when edge.host is unset, and Keycloak (KC_HOSTNAME), the OIDC
+    # redirect/web-origin/post-logout URIs, and the gateway CORS origin all derive from it.
+    # Set it even with your own ingress (edge.enabled=false) so the platform knows its
+    # public address. edge.host overrides it per-edge.
+    hostName: ilm.example.com
+    # Shared image for all components (per-field defaults from the selected version bundle
+    # when omitted; each component's image overrides per field).
+    image:
+      registry: hub.omnitrustregistry.com
+      repository: ilm
+      pullPolicy: IfNotPresent
+      pullSecrets:
+        - regcred
+    logging:
+      level: INFO                   # com.czertainly logger level
+    trustedCertificates:
+      secretRef: ilm-trusted-ca     # Secret with the CA bundle (TRUSTED_CERTIFICATES)
+      caKey: ca.crt                 # optional in-Secret key override (default "ca.crt")
+    # ── outbound proxy (optional) ──
+    proxy:
+      enabled: true
+      http: http://proxy.example.com:3128
+      https: http://proxy.example.com:3128
+      noProxy: ".svc,.cluster.local,localhost"
+    # ── fleet-wide pod-template passthrough (optional): applied to EVERY component, merged
+    #    BEFORE each component's own override (a per-component override layers on top).
+    #    Restores the chart's global.initContainers/sidecarContainers/additionalVolumes/
+    #    additionalVolumeMounts/additionalPorts/additionalEnv.* surface. Use it for
+    #    fleet-wide injection (Vault Agent / Istio / custom-CA init / OTel sidecar). Init/
+    #    sidecar containers are SCC-hardened (restricted-v2) like every other container — a
+    #    common container can never weaken pod security. No secret VALUES here:
+    #    additionalEnvFrom references whole Secrets/ConfigMaps by NAME only. ──
+    initContainers:                 # run before every component's main container
+      - name: custom-ca-init
+        image: hub.omnitrustregistry.com/tools/ca-injector:1.0.0
+        volumeMounts:
+          - name: shared-ca
+            mountPath: /shared-ca
+    sidecars:                       # run alongside every component's main container
+      - name: vault-agent
+        image: hashicorp/vault:1.16
+        volumeMounts:
+          - name: shared-ca
+            mountPath: /shared-ca
+            readOnly: true
+    volumes:                        # pod-level volumes added to every component
+      - name: shared-ca
+        emptyDir: {}
+    volumeMounts:                   # extra mounts on every main container
+      - name: shared-ca
+        mountPath: /etc/extra-ca
+        readOnly: true
+    additionalPorts:                # extra named container ports on every main container
+      - name: agent-metrics
+        containerPort: 9102
+        protocol: TCP
+    additionalEnvFrom:              # whole-Secret / whole-ConfigMap envFrom (NAMES only)
+      secrets:
+        - platform-shared-env
+      configMaps:
+        - platform-shared-config
+
+  # ── remote-proxy provisioning API (optional, platform-level) ──
+  # mode=external (default) points Core at your own provisioner; mode=deploy renders the
+  # bundled provisioning-rabbitmq component. Core's PROVISIONING_API_URL/KEY are derived by
+  # the operator from this block.
+  provisioning:
+    apiURL: https://provisioning.example.com
+    apiKeySecretRef: ilm-provisioning   # Secret holding the provisioning API key
+    apiKey: provisioningApiKey          # optional in-Secret key override (default "provisioningApiKey")
+
+  # ── required connections ──
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+      # Optional in-Secret key overrides: point the operator at the keys a
+      # bring-your-own (External-Secrets / Vault / CNPG-shaped) Secret actually uses.
+      # Defaults are username/password, so omit these when your Secret already uses them.
+      usernameKey: username         # e.g. POSTGRES_USER for an ESO/Vault-shaped Secret
+      passwordKey: password         # e.g. POSTGRES_PASSWORD
+  messaging:
+    mode: external
+    brokerType: rabbitmq            # rabbitmq | servicebus
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+      # Optional in-Secret key overrides (default username/password).
+      usernameKey: username
+      passwordKey: password
+    # Expose the RabbitMQ management UI through the gateway on /mq. Honored only when
+    # messaging is operator-managed (mode=managed, brokerType=rabbitmq).
+    management:
+      expose: false
+
+  # ── Kong API gateway declarative config ──
+  gateway:
+    cors:
+      enabled: true
+      origins: ["https://ui.example.com"]
+      exposedHeaders: ["X-Auth-Token"]
+    logging:
+      request: true                 # Kong file-log plugin to /dev/stdout
+    trustedIps: ["0.0.0.0/0", "::/0"]   # KONG_TRUSTED_IPS for X-Forwarded-*
+
+  # ── auth (the .NET service); DB connection string is composed by the
+  #    operator from the database coordinates + ilm-db Secret — never set here ──
+  auth:
+    create:
+      createUnknownUsers: true      # AUTH_CREATE_UNKNOWN_USERS
+      createUnknownRoles: true      # AUTH_CREATE_UNKNOWN_ROLES
+    syncPolicy: sync-data           # create-only (default) | sync-data
+
+  # ── fe-administrator (static nginx front-end; runtime config.js URLs) ──
+  feAdministrator:
+    url:
+      api: /api
+      login: /login
+      logout: /logout
+
+  # ── optional utils ──
+  utils:
+    enabled: true
+
+  # ── ILM Core: component overrides plus the Core-only client-cert header. The
+  #    component-override shape (replicas/image/resources/env/...) is shared across all
+  #    components. JVM tuning is plain env now (the special-case spec.javaOpts is gone):
+  #    set JAVA_OPTS per JVM component (here Core), or fleet-wide via spec.common envFrom. ──
+  core:
+    clientCertHeader: ssl-client-cert   # client-cert forwarding header from edge to Core
+    replicas: 2
+    image:
+      tag: 2.18.0                   # per-field override of spec.common.image
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        memory: 2Gi
+    env:                            # non-sensitive inline env only
+      - name: JAVA_OPTS             # JVM tuning (was the removed spec.javaOpts)
+        value: "-XX:MaxRAMPercentage=75.0"
+      - name: EXTRA_FLAG
+        value: "true"
+
+  # ── external edge: Ingress + cert-manager Let's Encrypt TLS ──
+  edge:
+    enabled: true
+    type: ingress
+    className: nginx
+    host: ilm.example.com
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    tls:
+      source: letsEncrypt
+      letsEncrypt:
+        email: ops@example.com
+        environment: staging
+
+  # ── first-admin bootstrap: cert-manager-issued admin client cert ──
+  registerAdmin:
+    enabled: true
+    username: admin
+    name: Platform Administrator
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: generated

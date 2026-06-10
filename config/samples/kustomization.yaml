@@ -4,4 +4,12 @@ resources:
 - connector_minimal.yaml
 - connector_full.yaml
 - connector_with_registration.yaml
+- v1alpha1_platform.yaml
+# NOTE: only ONE Platform sample is listed here on purpose. The Platform is a
+# namespace-singleton, and every variant sample uses name "ilm" — listing them all
+# would give kustomize duplicate resource ids (Platform.../ilm.ilm) and break
+# `make bundle`/`kubectl apply -k`. The variant samples — every other platform_*.yaml in this
+# directory — live as standalone files and are applied individually with
+# `kubectl apply -f config/samples/<file>` (see config/samples/README.md and docs/platform.md);
+# the sample-validation test exercises every file directly.
 # +kubebuilder:scaffold:manifestskustomizesamples

@@ -1,0 +1,58 @@
+# platform_registeradmin_generated.yaml — external infra + first-admin bootstrap with
+# an admin client certificate ISSUED BY cert-manager.
+#
+# With source=generated the operator provisions the admin client certificate
+# DECLARATIVELY via a cert-manager Certificate and wires Core's ADMIN_CERT from the
+# resulting Secret. The operator NEVER mints credentials imperatively (no openssl,
+# no operator-minted keys) — cert-manager is the only thing that signs the cert.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker (see platform_minimal_external.yaml).
+#   - cert-manager (cert-manager.io) installed — REQUIRED for source=generated. If
+#     absent, the admin cert is not issued and AdminCertReady=False / reason
+#     CertManagerNotInstalled is reported (non-fatal; self-heals when cert-manager
+#     appears). The rest of the platform still converges.
+#   - The issuer: when issuerRef is omitted, the operator defaults to the platform
+#     internal CA — it reuses the edge's internal CA when edge.tls.source=internal,
+#     otherwise it provisions a dedicated self-signed admin CA so generated works
+#     standalone. Set issuerRef to sign from your own Issuer/ClusterIssuer instead.
+#
+# SECRETS YOU MUST CREATE FIRST (only DB + messaging; the admin cert Secret is
+# created BY cert-manager — you do not create it):
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  registerAdmin:
+    enabled: true
+    username: admin
+    name: Platform Administrator
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: generated
+      # issuerRef is OPTIONAL for source=generated; omit to use the platform internal CA:
+      # issuerRef:
+      #   name: corp-ca
+      #   kind: ClusterIssuer

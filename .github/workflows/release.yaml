@@ -1,0 +1,155 @@
+name: Publish release manifests
+
+# Publishes the `kubectl apply -f <URL>` install manifests as GitHub release assets,
+# mirroring how cert-manager / CNPG / RabbitMQ ship a flat installer per release:
+#
+#   ilm-operator.yaml       — self-contained install (Namespace + CRDs + RBAC + manager),
+#                             image pinned to this release tag. No cert-manager required.
+#   ilm-operator.crds.yaml  — CRDs only (Connector + Platform), for CRD-first / GitOps installs.
+#   checksums.txt           — sha256 of both manifests.
+#   *.sig                   — cosign signatures of each manifest and of checksums.txt.
+#
+# Both manifests are generated from config/ (the same source as `make deploy`), so they never
+# drift from the operator code. The Helm chart (deploy/charts/ilm-operator) remains the
+# configurable install path; these flat manifests are the quick, opinionated one.
+#
+# Gating: this workflow runs AFTER "Publish Docker image" succeeds for a tag (via workflow_run),
+# so the manifest is only published once the operator image it pins actually exists in the
+# registry — never shipping a release asset pinned to a missing image. A manual workflow_dispatch
+# path is kept for re-generating assets for an already-pushed tag.
+
+on:
+  workflow_run:
+    workflows: ["Publish Docker image"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to (re)generate manifests for (e.g. v0.1.0). The tag must already be pushed.'
+        required: true
+
+concurrency:
+  group: release-manifests-${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish-manifests:
+    name: Build, sign and upload install manifests
+    runs-on: ubuntu-latest
+    # Run on manual dispatch, or after a SUCCESSFUL image publish that was triggered by a tag
+    # (publish_docker.yaml builds on branch `main` and on tags; head_branch != 'main' ⇒ a tag).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch != 'main')
+    steps:
+      - name: Resolve release version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_TAG"
+            ref="$INPUT_TAG"
+          else
+            version="$RUN_BRANCH"
+            ref="$RUN_SHA"
+          fi
+          # Validate shape defensively (the value flows into an image tag and an asset name).
+          case "$version" in
+            v[0-9]*) : ;;
+            *) echo "::error::Unexpected release tag '$version' (expected a vX.Y.Z tag)"; exit 1 ;;
+          esac
+          {
+            echo "version=$version"
+            echo "ref=$ref"
+            # Mark recognised pre-release suffixes as GitHub pre-releases; plain vX.Y.Z is a full release.
+            if printf '%s' "$version" | grep -Eq -- '-(rc|alpha|beta|preview|develop|dev|pre)([.-]|$)'; then
+              echo "prerelease=true"
+            else
+              echo "prerelease=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ steps.version.outputs.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify the release tag exists
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            echo "::error::Tag '${VERSION}' does not exist. Push the tag before releasing manifests."
+            exit 1
+          fi
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Generate install manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          make build-installer build-installer-crds \
+            IMG="hub.omnitrustregistry.com/ilm/operator:${VERSION}"
+          # Name the assets cert-manager style.
+          cp dist/install.yaml      dist/ilm-operator.yaml
+          cp dist/install-crds.yaml dist/ilm-operator.crds.yaml
+
+      - name: Verify the pinned operator image is pullable
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          image="hub.omnitrustregistry.com/ilm/operator:${VERSION}"
+          # workflow_run already gates on a successful image push; this tolerates registry propagation lag.
+          for attempt in 1 2 3 4 5 6; do
+            if docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "Image $image is available."; exit 0
+            fi
+            echo "Image $image not visible yet (attempt $attempt); retrying in 15s…"; sleep 15
+          done
+          echo "::error::Operator image $image is not pullable; refusing to publish a broken install manifest."
+          exit 1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+
+      - name: Checksum and sign manifests
+        working-directory: dist
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          sha256sum ilm-operator.yaml ilm-operator.crds.yaml > checksums.txt
+          for f in ilm-operator.yaml ilm-operator.crds.yaml checksums.txt; do
+            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY "$f" > "$f.sig"
+          done
+
+      - name: Create release and upload manifests
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/ilm-operator.yaml
+            dist/ilm-operator.yaml.sig
+            dist/ilm-operator.crds.yaml
+            dist/ilm-operator.crds.yaml.sig
+            dist/checksums.txt
+            dist/checksums.txt.sig

@@ -1,18 +1,24 @@
 # ILM Connector Operator — Design Specification
 
+> This document describes the design of the **`Connector`** side of the ILM operator. For the
+> platform side see [`platform-operator.md`](platform-operator.md); for the end-user
+> walkthrough see the [project README](../../README.md).
+
 ## Overview
 
-Kubernetes Operator for managing ILM platform connectors via Custom Resource Definitions (CRDs). Replaces Helm sub-chart based connector management with a modular, operator-driven approach that enables connector installation and lifecycle management directly from the ILM platform UI.
+The ILM operator manages ILM platform connectors via the `Connector` Custom Resource
+(`otilm.com/v1alpha1`): a modular, operator-driven approach that enables connector
+installation and lifecycle management directly from the ILM platform UI.
 
 **Capability Level:** Level III (Full Lifecycle), with Level IV (Deep Insights) foundation in place.
 
 **Tooling:** Go 1.26, Operator SDK v1.42.2, Kubebuilder v4, controller-runtime.
 
-**Motivation:** See [OmniTrustILM Discussion #57](https://github.com/orgs/OmniTrustILM/discussions/57). Key drivers:
-- Helm sub-charts hit Kubernetes manifest size limits as connectors grow
-- Connectors cannot be installed from the platform UI with Helm
-- Configuration changes to Secrets/ConfigMaps don't trigger redeployment with Helm
-- Separation of cluster admin (infrastructure) and platform admin (connectors) concerns
+**Motivation:** managing connectors declaratively as Kubernetes resources gives the platform:
+- installation and reconfiguration of connectors from the platform UI;
+- automatic redeployment when a referenced Secret/ConfigMap changes (config-drift detection);
+- a clean separation of cluster-admin (infrastructure) and platform-admin (connector) concerns;
+- per-connector lifecycle, health, metrics, and optional platform registration.
 
 ## Scope
 
@@ -21,17 +27,18 @@ Kubernetes Operator for managing ILM platform connectors via Custom Resource Def
 - Operator that reconciles Connector CRs into Kubernetes resources (Deployment, Service, ServiceAccount, PDB, ServiceMonitor)
 - Secret/ConfigMap watching with automatic rolling updates on change
 - Optional connector registration with ILM platform Core API
-- Helm chart for deploying the operator itself
-- Comprehensive test suite (87% overall coverage, <3% duplication)
+- Helm chart and OLM bundle for deploying the operator itself
+- Comprehensive test suite (≥80% coverage, <3% duplication)
 - CI/CD with SonarCloud quality gates, golangci-lint, Copilot reviews
+
+> The same operator also manages the ILM **platform** itself via the `Platform` CRD —
+> see [`platform-operator.md`](platform-operator.md).
 
 ### Future Work
 - Multi-cluster / remote deployment (proxy integration)
-- Horizontal Pod Autoscaler (HPA) management
 - ILM Core changes for CR creation
 - Connector deregistration on CR deletion
 - Level IV alert rules, dashboards, and runbooks (foundation only)
-- Non-connector ILM components (platform, core, etc.)
 
 ## CRD Design
 
@@ -54,7 +61,7 @@ spec:
 
   # Container image
   image:
-    repository: docker.io/czertainly/czertainly-common-credential-provider
+    repository: hub.omnitrustregistry.com/ilm/common-credential-provider
     tag: "2.0.0"
     pullPolicy: IfNotPresent       # default
     pullSecrets: []                 # optional
@@ -182,7 +189,7 @@ status:
   replicas: 1
   readyReplicas: 1
   endpoint: "http://my-connector.ilm.svc.cluster.local:8080"
-  currentImage: "docker.io/czertainly/czertainly-common-credential-provider:2.0.0"
+  currentImage: "hub.omnitrustregistry.com/ilm/common-credential-provider:2.0.0"
   configChecksum: "sha256:abc123..."
   conditions:
     - type: Available
@@ -342,6 +349,8 @@ operator/
 ├── api/
 │   └── v1alpha1/
 │       ├── connector_types.go          # Connector CRD spec/status Go types
+│       ├── platform_types.go           # Platform CRD spec/status Go types
+│       ├── common_types.go             # Shared building-block specs (ImageSpec, EnvVar, refs, …)
 │       ├── groupversion_info.go        # API group registration
 │       └── zz_generated.deepcopy.go    # Auto-generated DeepCopy methods
 │
@@ -350,41 +359,27 @@ operator/
 │
 ├── internal/
 │   ├── controller/
-│   │   ├── connector_controller.go     # Main reconciler
-│   │   ├── connector_controller_test.go
-│   │   ├── suite_test.go               # envtest suite setup
-│   │   └── watches.go                  # Secret/ConfigMap watch handlers
+│   │   ├── connector/                  # Connector reconciler (+ watches, envtest suite)
+│   │   └── platform/                   # Platform reconciler (gates, prune, OIDC, lifecycle)
 │   │
 │   ├── builder/
-│   │   ├── common.go                   # Shared builder helpers (labels, annotations)
-│   │   ├── common_test.go
-│   │   ├── deployment.go               # Builds Deployment from CR spec
-│   │   ├── deployment_test.go
-│   │   ├── service.go                  # Builds Service
-│   │   ├── service_test.go
-│   │   ├── serviceaccount.go           # Builds ServiceAccount
-│   │   ├── serviceaccount_test.go
-│   │   ├── pdb.go                      # Builds PodDisruptionBudget
-│   │   ├── pdb_test.go
-│   │   ├── servicemonitor.go           # Builds ServiceMonitor
-│   │   └── servicemonitor_test.go
+│   │   ├── common/                     # CRD-agnostic builders: Component render model,
+│   │   │                               #   ResolveImage, Deployment/StatefulSet/Service/
+│   │   │                               #   ServiceAccount/PDB/HPA/ServiceMonitor, SCC-clean security
+│   │   ├── connector/                  # Connector-specific builders
+│   │   └── platform/                   # Platform-specific builders (component resolution, edge, infra CRs)
 │   │
-│   ├── checksum/
-│   │   ├── checksum.go                 # Computes checksums for Secrets/ConfigMaps
-│   │   └── checksum_test.go
+│   ├── bom/                            # Versioned bill-of-materials: per-component image
+│   │                                   #   coordinates + wiring profile + managed topology, as data
 │   │
-│   ├── platform/
-│   │   ├── client.go                   # HTTP client for ILM Core API
-│   │   ├── client_test.go
-│   │   ├── registration.go             # Registration request/response logic
-│   │   └── registration_test.go
+│   ├── checksum/                       # Computes checksums for Secrets/ConfigMaps (drift)
 │   │
-│   ├── monitoring/
-│   │   ├── metrics.go                  # Custom Prometheus metrics registration
-│   │   └── events.go                   # Kubernetes event recorder helpers
+│   ├── platform/                       # ILM Core registration client (connector → platform)
+│   │   └── capabilities/               # Generic RESTMapper-based CRD/capability detector
 │   │
-│   └── version/
-│       └── version.go                  # Build-time version injection via ldflags
+│   ├── monitoring/                     # Prometheus metrics + Kubernetes event recorder helpers
+│   │
+│   └── version/                        # Build-time version injection via ldflags
 │
 ├── config/
 │   ├── crd/bases/                      # Generated CRD YAML
@@ -577,7 +572,7 @@ The Helm chart creates: operator Deployment, ServiceAccount, ClusterRole, Cluste
 The operator includes an OLM bundle for deployment via OLM or OperatorHub. The bundle is generated with `make bundle` and includes:
 
 - **ClusterServiceVersion (CSV)** — operator metadata, RBAC, install strategy
-- **CRD** — the Connector CRD
+- **CRDs** — the Connector and Platform CRDs
 - **Bundle metadata** — annotations for OLM catalog integration
 - **Scorecard configuration** — for OLM validation testing
 
@@ -616,4 +611,4 @@ The operator is cluster-local. It watches Connector CRs in its own cluster and r
 - **Remote/SaaS via proxy:** ILM Core → AMQP/WSS → Proxy (on-prem) → Kubernetes API → creates Connector CR → operator reconciles
 - **Multi-cluster HA:** Each cluster runs its own operator instance. CRs are created in each cluster independently.
 
-Multi-cluster CR distribution is out of MVP scope. The proxy and ILM Core handle routing; the operator is topology-agnostic.
+Multi-cluster CR distribution is future work. The proxy and ILM Core handle routing; the operator is topology-agnostic.

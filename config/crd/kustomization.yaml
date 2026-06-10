@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/otilm.com_connectors.yaml
+- bases/otilm.com_platforms.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

@@ -1,0 +1,55 @@
+# platform_managed_postgres_no_pooler.yaml — managed PostgreSQL with the pooler OFF.
+#
+# A Platform whose database is MANAGED (CloudNativePG), with the PgBouncer connection
+# pooler EXPLICITLY DISABLED — the platform connects DIRECTLY to the cluster's read-write
+# Service ("<cluster>-rw") instead of through a pooler.
+#
+# WHEN TO USE THIS
+#   For a MANAGED database the pooler is ON BY DEFAULT (see platform_managed_postgres.yaml),
+#   and that is the right choice for almost everyone: the ILM fleet (core + auth + keycloak +
+#   scheduler) opens enough connection pools to exhaust PostgreSQL's default max_connections,
+#   so PgBouncer (transaction mode) fronts the database. Disable it ONLY when you have a
+#   specific reason, e.g.:
+#     - you raised the cluster's own max_connections high enough via database.managed.overrides
+#       (spec.postgresql.parameters.max_connections) and want one less moving part, or
+#     - you front the database with your OWN external pooler.
+#   If you are unsure, KEEP THE DEFAULT (omit the pgBouncer block). Running the ILM fleet
+#   against a managed cluster's default max_connections WITHOUT a pooler can exhaust
+#   connection slots (auth 500s, Core crash-loops on its boot-time resource sync).
+#
+# THE SWITCH IS pgBouncer.managed (not pgBouncer.enabled):
+#     pgBouncer omitted            → pooler ON   (the default; recommended)
+#     pgBouncer: { managed: true } → pooler ON   (explicit; same as omitting)
+#     pgBouncer: { managed: false} → pooler OFF  (this sample; direct -rw connection)
+#   NOTE: an EMPTY block (pgBouncer: {}) leaves managed at its false default and turns the
+#   pooler OFF — so to keep the pooler while customizing it, set managed: true explicitly.
+#   See docs/configuration.md (Connection pooling) for the full explanation.
+#
+# PREREQUISITES & SECRETS: identical to platform_managed_postgres.yaml — the CloudNativePG
+# operator installed, and the messaging credentials Secret (the DB credentials are generated
+# by CloudNativePG; you create none for the DB):
+#   kubectl create secret generic ilm-messaging -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<broker-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: managed
+    managed:
+      instances: 3
+      version: "18"
+      storage:
+        size: 100Gi
+    pgBouncer:
+      managed: false   # ← opt OUT of the default-on pooler: connect directly to ilm-db-rw
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging

@@ -1,12 +1,13 @@
 apiVersion: v2
 name: ilm-operator
-description: ILM Connector Operator - manages ILM platform connectors via CRDs
+description: ILM Operator - manages the ILM platform and its connectors via CRDs (Platform and Connector)
 type: application
 version: 0.1.0-develop
 appVersion: "0.1.0"
 keywords:
   - ilm
   - operator
+  - platform
   - connector
   - kubernetes
 home: https://github.com/OmniTrustILM/operator

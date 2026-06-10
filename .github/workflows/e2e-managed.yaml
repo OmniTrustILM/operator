@@ -1,0 +1,71 @@
+name: E2E Managed
+
+# GATED managed e2e tier. The managed Ginkgo specs (CNPG/RabbitMQ/Keycloak + the full ILM
+# platform) install the REAL upstream operators and bring up real stateful infra, so a single run
+# takes ~45-60min. To keep PRs cheap, this expensive validation is NOT run on every PR by the
+# default Test workflow (which runs only the fast `make test-e2e` tier). Instead it runs:
+#   - nightly on a schedule (catch drift against the real operators),
+#   - on manual workflow_dispatch (run it on demand), and
+#   - on PRs/pushes that touch the managed-infra code paths (where it actually matters).
+on:
+  schedule:
+    # 02:30 UTC nightly.
+    - cron: '30 2 * * *'
+  workflow_dispatch: {}
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'internal/builder/platform/managed_*.go'
+      - 'internal/controller/platform/gate_*.go'
+      - 'internal/bom/bom.go'
+      - 'test/e2e/**'
+      - '.github/workflows/e2e-managed.yaml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'internal/builder/platform/managed_*.go'
+      - 'internal/controller/platform/gate_*.go'
+      - 'internal/bom/bom.go'
+      - 'test/e2e/**'
+      - '.github/workflows/e2e-managed.yaml'
+
+concurrency:
+  group: e2e-managed-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-managed:
+    name: e2e-managed (${{ matrix.block }})
+    runs-on: ubuntu-latest
+    # Each managed block runs in its OWN job on its OWN fresh Kind cluster (matrix below), so the
+    # blocks no longer share a cluster: no install/uninstall collisions, and they run in PARALLEL
+    # (wall-clock ≈ the slowest block, not the sum). fail-fast: false so one block's failure still
+    # lets the others report. The per-job ceiling stays generous for a cold image cache.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per managed Ginkgo Context label (see test/e2e/platform_test.go).
+        block: [managed-postgres, managed-rabbitmq, managed-keycloak, full, matrix]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+      - name: Run E2E tests (${{ matrix.block }})
+        run: make -j1 kind-cluster docker-build kind-load deploy test-e2e-managed E2E_MANAGED_LABEL=${{ matrix.block }}
+      - name: Export logs on failure
+        if: failure()
+        run: make kind-export-logs
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-managed-logs-${{ matrix.block }}
+          path: /tmp/ilm-operator-e2e-logs/
+      - name: Cleanup
+        if: always()
+        run: make prune-kind-cluster

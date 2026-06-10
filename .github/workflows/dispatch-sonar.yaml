@@ -35,19 +35,29 @@ jobs:
 
       - name: Dispatch Sonar workflow with inputs
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        # Pass the (PR-derived, untrusted) context through env vars and read them via
+        # process.env, never interpolating ${{ }} into the script body — env values are
+        # treated as data, so a crafted head_branch/head_repo cannot inject code.
+        env:
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
+          HEAD_REPO: ${{ steps.ctx.outputs.head_repo }}
+          HEAD_BRANCH: ${{ steps.ctx.outputs.head_branch }}
+          BASE_REF: ${{ steps.ctx.outputs.base_ref }}
+          RUN_ID: ${{ steps.ctx.outputs.run_id }}
         with:
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'sonar.yaml',
-              ref: '${{ steps.ctx.outputs.base_ref }}',
+              ref: process.env.BASE_REF,
               inputs: {
-                pr_number:  '${{ steps.ctx.outputs.pr_number }}',
-                head_sha:   '${{ steps.ctx.outputs.head_sha }}',
-                head_repo:  '${{ steps.ctx.outputs.head_repo }}',
-                head_branch:'${{ steps.ctx.outputs.head_branch }}',
-                base_ref:   '${{ steps.ctx.outputs.base_ref }}',
-                run_id:     '${{ steps.ctx.outputs.run_id }}'
+                pr_number:   process.env.PR_NUMBER,
+                head_sha:    process.env.HEAD_SHA,
+                head_repo:   process.env.HEAD_REPO,
+                head_branch: process.env.HEAD_BRANCH,
+                base_ref:    process.env.BASE_REF,
+                run_id:      process.env.RUN_ID
               }
             });

@@ -1,0 +1,418 @@
+# =============================================================================
+#  Platform CR — annotated field reference.
+#
+#  This file is the field reference for docs/design/platform-operator.md. SECTION 1
+#  shows the FULL SHIPPED otilm.com/v1alpha1 surface (every field below is implemented
+#  and validated by the apiserver today). SECTION 2 lists the few blocks that are still
+#  DESIGN TARGETS — not in the shipped CRD; the apiserver rejects them today.
+#
+#  This is a reference (it exercises the whole surface), NOT a recommended config. For
+#  WORKING, copy-pasteable examples that pass validation, see ../../../config/samples/ —
+#  in particular:
+#    • platform_minimal_external.yaml   (the smoke test)
+#    • platform_full.yaml               (the kitchen-sink of shipped fields)
+#    • platform_high_availability.yaml  (HA profile + per-component HPA/PDB)
+#    • platform_managed_postgres.yaml   (managed PostgreSQL via CloudNativePG)
+#    • platform_managed_rabbitmq.yaml   (managed RabbitMQ via the RabbitMQ operators)
+#    • platform_managed_keycloak.yaml   (managed Keycloak via the Keycloak Operator)
+#  the getting-started guide at  ../../platform.md , and — for what every option MEANS plus a
+#  scenario-to-sample cookbook — the configuration reference at  ../../configuration.md .
+#
+#  Below, every block is tagged:
+#    [IMPLEMENTED]      — shipped today; safe to use (see the matching sample).
+#    [NOT IMPLEMENTED]  — design target; the apiserver rejects it today.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SECTION 1 — IMPLEMENTED (the full shipped surface). Field names/values here match
+# the live otilm.com/v1alpha1 schema (verified against api/v1alpha1/platform_types.go
+# and api/v1alpha1/common_types.go).
+# -----------------------------------------------------------------------------
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  # [IMPLEMENTED] version — selects the platform version bundle (tested component images +
+  # env wiring + managed-RabbitMQ topology) the operator reconciles this Platform against.
+  # Empty (the default) = the operator's NEWEST shipped version, so an existing CR keeps
+  # today's behaviour. One operator build carries a supported RANGE of versions (run a canary
+  # version in one namespace, or take an operator fix without moving the platform). NOT a CEL
+  # enum (the supported set grows over time): an unknown version degrades with an actionable
+  # supported-versions message, never a crash. status.observedVersion reports the resolved
+  # version.
+  version: ""                          # e.g. "2.18.0"; empty pins the operator's newest at creation (no auto-upgrade)
+
+  # [IMPLEMENTED] platform-wide
+  deletionPolicy: Retain               # Retain (default) | Delete
+
+  # [IMPLEMENTED] common — the ONE place for everything that applies to EVERY component:
+  # shared image defaults, the canonical public hostName, outbound proxy, log level, the
+  # trusted-CA bundle, and the fleet-wide pod-template passthrough (init/sidecar containers,
+  # volumes, ports, envFrom). Each component's own block overrides/augments what is set here.
+  # No secret VALUES live here — references only. (This consolidates what used to be the
+  # root image/proxy/logging/trustedCertificates scalars + the old `global` passthrough.)
+  common:
+    # hostName — the platform's canonical public FQDN; the single source of truth for the
+    # external host. The edge uses it for its host/cert SAN when edge.host is unset, and
+    # Keycloak (KC_HOSTNAME), the ilm OIDC client's redirect/web-origin/post-logout URIs, and
+    # the gateway CORS origin default (https://<hostName>) all derive from it. Set it even
+    # behind your own ingress (edge.enabled=false) so the platform knows its public address.
+    # edge.host overrides it per-edge (resolver: PlatformHost = edge.host | common.hostName).
+    # NOTE: the fe-administrator runtime URLs are intentionally host-RELATIVE (/api, /login,
+    # /logout served from the same origin), so they do NOT embed hostName.
+    hostName: ilm.example.com
+    # shared image (per-field defaults from the selected version bundle). digest pins the
+    # image immutably (registry/repository/name@digest) and wins over tag; command/args
+    # override the container ENTRYPOINT/CMD. Honored here (all components) and per component.
+    image:
+      registry: hub.omnitrustregistry.com
+      repository: ilm
+      name: ""                         # per-component default from the bundle
+      tag: ""                          # per-component default from the bundle
+      digest: ""                       # e.g. "sha256:abc123…"; when set, pins the image and ignores tag
+      pullPolicy: IfNotPresent
+      pullSecrets: []                  # e.g. [regcred]
+      command: []                      # overrides the image ENTRYPOINT (rarely needed)
+      args: []                         # overrides the image CMD
+    logging: { level: INFO }
+    # trustedCertificates.caKey is the optional in-Secret key override (default "ca.crt").
+    trustedCertificates: { secretRef: ilm-trusted-ca, caKey: ca.crt }
+    proxy: { enabled: false, http: "", https: "", noProxy: "" }
+    # fleet-wide pod-template passthrough applied to EVERY component, merged BEFORE each
+    # component's own override (a per-component override layers on top). Use it for
+    # cluster-wide injections (a Vault Agent sidecar, an Istio proxy, a custom-CA init
+    # container). Init/sidecar containers are SCC-hardened (restricted-v2, fill-AND-
+    # force) like every other container, so they can never weaken pod security.
+    # additionalEnvFrom holds Secret/ConfigMap NAMES only — no secret values.
+    initContainers: []                 # []corev1.Container (schemaless) — run before each main container
+    sidecars: []                       # []corev1.Container (schemaless) — run alongside each main container
+    volumes: []                        # []corev1.Volume (schemaless) — pod volumes added to every component
+    volumeMounts: []                   # []corev1.VolumeMount — extra mounts on every main container
+    additionalPorts: []                # []corev1.ContainerPort — extra ports on every main container
+    additionalEnvFrom: { secrets: [], configMaps: [] }  # whole-Secret/ConfigMap envFrom (NAMES only)
+    # fleet-wide scheduling + pod metadata — applied to every (stateless) component; each
+    # component's own block overrides/augments (nodeSelector merges, tolerations append,
+    # affinity replaces + beats the HA default). Managed infra uses each block's overrides.
+    nodeSelector: { workload: platform }
+    tolerations: [ { key: dedicated, operator: Equal, value: ilm, effect: NoSchedule } ]
+    affinity: {}                                        # corev1.Affinity (node/pod (anti-)affinity)
+    podAnnotations: { sidecar.istio.io/inject: "true" } # e.g. fleet-wide service-mesh injection
+    podLabels: { cost-center: pki }
+
+  # [IMPLEMENTED] provisioning (top-level, platform-level) — remote-proxy provisioning.
+  #   mode=external (default) — Core CALLS your own provisioner at apiURL (apiKey is the
+  #     optional in-Secret key override on apiKeySecretRef, default "provisioningApiKey").
+  #   mode=deploy — the operator RENDERS the bundled provisioning-rabbitmq service as a
+  #     native, operator-managed component (broker-wired via the platform messaging
+  #     connection) and points Core at it. mode=deploy requires messaging.brokerType=rabbitmq
+  #     and a deploy block (see the "provisioning.mode=deploy" section below). Core's
+  #     PROVISIONING_API_URL/KEY are derived by the operator from this block.
+  provisioning: { mode: external, apiURL: "", apiKeySecretRef: ilm-provisioning, apiKey: provisioningApiKey }
+
+  # [IMPLEMENTED] additionalEnv — non-sensitive inline env applied to EVERY component
+  # (merged BEFORE each component's own env, so a component var of the same name wins).
+  # Secret env must use a Secret reference, never inline here.
+  additionalEnv: []                    # e.g. [{ name: OTEL_SDK_DISABLED, value: "false" }]
+
+  # [IMPLEMENTED] highAvailability — the platform-wide HA profile. enabled is the ONLY field
+  # (a single boolean). When enabled, the operator applies HA DEFAULTS to the STATELESS
+  # components (core / auth / scheduler / fe-administrator / auth-opa-policies
+  # / utils / gateway): a sane multi-replica count, a PodDisruptionBudget
+  # (minAvailable 1), and pod anti-affinity spreading replicas across nodes. Every default is
+  # OVERRIDABLE per component (an explicit replicas / podDisruptionBudget / affinity wins).
+  # Stateful MANAGED infra HA is OUT OF SCOPE here — size it via each managed block's own
+  # instances/replicas (database.managed.instances, messaging.managed.replicas,
+  # keycloak.managed.instances).
+  highAvailability:
+    enabled: false                     # true → HA defaults on the stateless components
+
+  # [IMPLEMENTED] networkPolicy — default-deny network isolation. ENABLED BY DEFAULT
+  # (opt-out): omit the block (or set enabled: true) and the operator renders a SAFE
+  # default-deny set (networking.k8s.io/v1) — an ingress default-deny that allows only
+  # same-namespace traffic to the platform's pods (denying cross-namespace/external ingress),
+  # an edge->api-gateway allow from the ingress-controller namespace, and PERMISSIVE egress.
+  # Set enabled: false to render none (e.g. on a CNI without NetworkPolicy support).
+  # ingressNamespace is the ingress-controller / Gateway namespace (default "ingress-nginx").
+  networkPolicy:
+    enabled: true
+    ingressNamespace: ingress-nginx
+
+  # [IMPLEMENTED] database (REQUIRED) — mode: external OR managed (CloudNativePG)
+  database:
+    mode: external                     # external | managed (managed → see the managed block below)
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:                       # external mode: bring-your-own credentials Secret
+      secretRef: ilm-db
+      # Optional in-Secret key overrides for a bring-your-own (External-Secrets / Vault /
+      # CNPG-shaped) Secret. Default to username/password, so omit them when your Secret
+      # already uses those keys; set them to read e.g. POSTGRES_USER / POSTGRES_PASSWORD.
+      usernameKey: username
+      passwordKey: password
+    # [IMPLEMENTED] managed database (mode: managed) — operator-provisioned via the
+    # CloudNativePG operator (must be installed; serves postgresql.cnpg.io). When managed,
+    # host/name/credentials above are NOT required — the operator reads back the generated
+    # <cluster>-rw Service + <cluster>-app Secret (whose keys are the CNPG operator's, NOT
+    # user-mappable). managed.* is FLAT (no "cluster" wrapper); pgBouncer is a top-level
+    # sibling of managed (not nested under it).
+    #   mode: managed
+    #   pgBouncer: { managed: true, instances: 2, parameters: {} }   # CNPG Pooler — ON by default for a managed DB; opt out with managed: false
+    #   managed:
+    #     instances: 3
+    #     version: "18"                # major PG version → CloudNativePG image (latest supported)
+    #     upgradeAcknowledged: false   # set true to OPT IN to a MAJOR PG upgrade of a running cluster
+    #     storage: { size: 100Gi, storageClass: "" }   # storageClass optional
+    #     resources: { requests: { cpu: "2", memory: 4Gi }, limits: { memory: 8Gi } }
+    #     backup: { schedule: "0 0 2 * * *", retention: 30d }   # field accepted; object-store/restore DEFERRED
+    #     overrides: {}                # JSON-merge patch (RFC 7396) onto the CloudNativePG Cluster spec
+    #                                  #   (operator-owned fields rejected: metadata.name/namespace/ownerRefs,
+    #                                  #    spec.bootstrap.initdb.database/owner)
+
+  # [IMPLEMENTED] messaging (REQUIRED) — mode: external OR managed (RabbitMQ operators)
+  messaging:
+    mode: external                     # external | managed (managed → see the managed block below)
+    brokerType: rabbitmq               # rabbitmq | servicebus
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:                       # external mode: bring-your-own credentials Secret
+      secretRef: ilm-messaging
+      # Optional in-Secret key overrides (default username/password); managed mode uses the
+      # Messaging Topology Operator's generated-Secret keys, NOT user-mappable.
+      usernameKey: username
+      passwordKey: password
+    # [IMPLEMENTED] managed messaging (mode: managed) — operator-provisioned via the RabbitMQ
+    # Cluster Operator + Messaging Topology Operator (both must be installed; serve
+    # rabbitmq.com). The operator renders a RabbitmqCluster plus the full topology and wires
+    # the platform to the broker Service + the Topology-generated per-user Secrets (Core uses
+    # the core-user Secret). managed.* is FLAT (no "rabbitmqCluster" wrapper).
+    #   mode: managed
+    #   virtualHost: czertainly        # optional; the vhost the operator provisions (default "czertainly")
+    #   managed:
+    #     replicas: 3
+    #     version: "4.3.1"             # selects the RabbitmqCluster image (bundle default for 2.18.0)
+    #     upgradeAcknowledged: false   # set true to OPT IN to a MAJOR RabbitMQ upgrade of a running cluster
+    #     storage: { size: 20Gi }
+    #     resources: {}                # per-node requests/limits
+    #     overrides: {}                # JSON-merge patch (RFC 7396) onto the RabbitmqCluster spec
+    #                                  #   (forbidden: metadata.name/namespace/ownerReferences,
+    #                                  #    spec.rabbitmq.additionalConfig/advancedConfig)
+    # [IMPLEMENTED] management.expose — publish the RabbitMQ management UI through the gateway
+    # on /mq. Honored only when messaging is operator-managed (mode=managed, brokerType=rabbitmq).
+    management: { expose: false }
+
+  # [IMPLEMENTED] keycloak / managed OIDC (Keycloak Operator). mode=external (default) →
+  # configure OIDC providers in the app DB (operator provisions nothing). mode=managed →
+  # the operator renders a Keycloak CR sharing the platform database (a dedicated "keycloak"
+  # schema, SCC-clean pod), an optional create-only realm import, and wires Core's internal
+  # OIDC provider to Keycloak once both are Ready (OIDCConfigured). managed.* is FLAT (no
+  # "keycloak" wrapper); realmImport takes configMapRef/key only.
+  keycloak:
+    mode: external                     # external | managed
+    realm: ilm                         # the platform realm name (default "ilm")
+    # managed:
+    #   instances: 2
+    #   version: "26.6.3"              # selects the Keycloak CR image (bundle default for 2.18.0)
+    #   logLevel: info                 # managed Keycloak root log level (KC_LOG_LEVEL); empty = Keycloak default (info)
+    #   upgradeAcknowledged: false     # set true to OPT IN to a MAJOR Keycloak upgrade of a running instance
+    #   realmImport:                   # optional, create-only import from a user ConfigMap
+    #     configMapRef: ilm-realm
+    #     key: realm.json              # default "realm.json"
+    #   overrides: {}                  # JSON-merge patch (RFC 7396) onto the Keycloak CR spec
+    #                                  #   (forbidden: metadata.name/namespace/ownerReferences,
+    #                                  #    spec.db, spec.hostname, spec.proxy)
+
+  # [IMPLEMENTED] Kong API gateway declarative config. Also carries the full per-component
+  # override surface inline (see "the per-component override surface" note below). Exposing
+  # the broker management UI moved to spec.messaging.management.expose (the gateway still
+  # renders the /mq route, gated on it + managed RabbitMQ).
+  gateway:
+    cors: { enabled: false, origins: [], exposedHeaders: [] }
+    logging: { request: false }
+    trustedIps: []                     # e.g. ["0.0.0.0/0", "::/0"]
+
+  # [IMPLEMENTED] auth (.NET); DB connection string composed by the operator.
+  # Also carries the full per-component override surface inline.
+  auth:
+    create: { createUnknownUsers: false, createUnknownRoles: false }
+    syncPolicy: create-only            # create-only | sync-data
+
+  # [IMPLEMENTED] scheduler. Carries the full per-component override surface inline
+  # and adds no component-specific extras.
+  scheduler: {}
+
+  # [IMPLEMENTED] auth-opa-policies (the OPA bundle server). Carries the full per-component
+  # override surface inline and adds no component-specific extras.
+  authOpaPolicies: {}
+
+  # [IMPLEMENTED] fe-administrator runtime config.js URLs (plus the per-component override
+  # surface inline).
+  feAdministrator: { url: { base: "", api: /api, login: /login, logout: /logout } }
+
+  # [IMPLEMENTED] optional utils (plus the per-component override surface inline).
+  utils: { enabled: false }
+
+  # [IMPLEMENTED] ILM Core. Carries the shared per-component override surface (see the note
+  # below) PLUS the Core-only wiring field clientCertHeader. (Provisioning is a platform-
+  # level concern at spec.provisioning, not here; JVM tuning is plain env — set JAVA_OPTS in
+  # core.env, or fleet-wide via spec.common.additionalEnvFrom.)
+  core:
+    # clientCertHeader: the client-cert forwarding header from edge to Core (default
+    # "ssl-client-cert"). OIDC providers themselves live in the app DB.
+    clientCertHeader: ssl-client-cert
+    # ── the shared per-component override surface (below) is honored on Core and on EVERY
+    #    other component (gateway / auth / scheduler / authOpaPolicies /
+    #    feAdministrator / utils); shown here once. Every field is optional. ──
+    image: { repository: "", name: core, tag: "", digest: "", command: [], args: [] }
+    replicas: 1                        # ignored when autoscaling is set (the HPA then owns scaling)
+    workloadType: Deployment           # Deployment (default) | StatefulSet
+    autoscaling:                        # optional HPA; when set the operator omits .spec.replicas
+      maxReplicas: 5                   # REQUIRED when autoscaling is set
+      minReplicas: 1                   # optional (autoscaling/v2 default 1)
+      targetCPUUtilization: 80         # 1..100; renders a cpu Resource metric (needs a cpu request)
+      targetMemoryUtilization: 0       # 1..100; renders a memory Resource metric (needs a memory request)
+    podDisruptionBudget:                # optional PDB; minAvailable and maxUnavailable are mutually exclusive
+      enabled: false
+      minAvailable: 1                  # OR maxUnavailable (honored only when minAvailable is unset)
+    resources: {}                      # corev1.ResourceRequirements (requests/limits)
+    env: []                            # [{ name, value }] — non-sensitive only; e.g. JVM tuning: [{ name: JAVA_OPTS, value: "-XX:MaxRAMPercentage=75.0" }]
+    secretRefs: []                     # [{ name, type: env|volume, mountPath?, keys: [{ secretKey, envVar|path }] }]
+    configMapRefs: []                  # [{ name, type: env|volume, mountPath?, keys: [{ configMapKey, envVar|path }] }]
+    volumes: []                        # [{ name, mountPath, emptyDir: { medium?, sizeLimit? } }]
+    probes:                            # override liveness/readiness/startup; unset = operator defaults
+      liveness: { path: "", initialDelaySeconds: 0, periodSeconds: 0, failureThreshold: 0 }
+      readiness: {}
+      startup: {}
+    securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true }  # always SCC-hardened (fill-don't-replace)
+    podAnnotations: {}                 # merged onto the pod template (e.g. Vault/Istio annotations)
+    podLabels: {}                      # merged onto the pod template (operator labels win)
+    nodeSelector: {}
+    affinity: {}                       # corev1.Affinity (schemaless / preserve-unknown-fields)
+    tolerations: []                    # []corev1.Toleration
+    initContainers: []                 # []corev1.Container (schemaless) — appended; SCC-hardened
+    sidecars: []                       # []corev1.Container (schemaless) — appended; SCC-hardened
+    serviceAccount: { name: "", annotations: {} }   # override the per-component SA name/annotations
+    service: { port: 8080, type: ClusterIP }         # ClusterIP | NodePort | LoadBalancer
+    metrics:                           # per-component metrics + optional ServiceMonitor
+      enabled: false
+      path: /v1/metrics
+      port: 8080
+      serviceMonitor: { enabled: false, interval: "", labels: {} }
+
+  # [IMPLEMENTED] external edge: Ingress | gatewayAPI (+ cert-manager TLS)
+  edge:
+    enabled: true
+    type: ingress                      # ingress | gatewayAPI  (route NOT implemented — see SECTION 2)
+    className: nginx                   # Ingress edge only
+    host: ilm.example.com              # REQUIRED when enabled (overrides common.hostName for this edge)
+    annotations: {}
+    # tls.source: internal | letsEncrypt | issuerRef | secret
+    #   internal    → operator self-signed CA chain (cert-manager)
+    #   letsEncrypt → ACME issuer (cert-manager); set letsEncrypt.{email,environment}
+    #   issuerRef   → existing cert-manager Issuer/ClusterIssuer signs the leaf
+    #   secret      → bring-your-own kubernetes.io/tls Secret (no cert-manager); set secretRef
+    tls: { source: letsEncrypt, letsEncrypt: { email: ops@example.com, environment: staging } }
+    # gatewayAPI edge alternative (type: gatewayAPI): set ONE of —
+    #   gatewayAPI: { gatewayClassName: istio }          # operator owns its Gateway + TLS
+    #   gatewayAPI: { parentRef: { name: shared-gw } }   # attach HTTPRoute to an existing Gateway
+
+  # [IMPLEMENTED] first-admin bootstrap. Two independent methods — certificate (mTLS) and/or
+  # password (a Keycloak realm user). NO secret material is ever inlined; both methods reference
+  # Secrets by name only and the operator mints/logs nothing.
+  registerAdmin:
+    enabled: false
+    username: ""                       # login name (cert Subject CN / realm-user username)
+    name: ""                           # display / first name
+    lastName: ""                       # admin surname; recommended for the password method (Keycloak otherwise prompts to complete the profile on first login)
+    email: ""
+    # certificate (mTLS) method — DEFAULTS ON (enabled: true) when registerAdmin is enabled, so
+    # an omitted block keeps the historical single-method behaviour. Set enabled: false to run
+    # password-only.
+    certificate:
+      enabled: true
+      source: provided                 # provided (secretRef REQUIRED) | generated (cert-manager)
+      secretRef: ilm-admin-cert        # source=provided: kubernetes.io/tls Secret (tls.crt/tls.key)
+      certKey: tls.crt                 # source=provided only: optional cert key override (default "tls.crt")
+      privateKeyKey: tls.key           # source=provided only: optional key override (default "tls.key")
+      # source=generated: cert-manager mints the admin cert (operator mints nothing; cert/key
+      #   keys are the standard kubernetes.io/tls keys, NOT user-mappable) —
+      #   issuerRef: { name: corp-ca, kind: ClusterIssuer }   # or omit → platform internal CA
+    # password (Keycloak realm user) method — OFF by default. When enabled the operator creates
+    # an idempotent realm user with the superadmin attribute (groups: ["superadmin"]) whose
+    # password comes from secretRef. REQUIRES keycloak.mode: managed (a CEL rule enforces it);
+    # tracked by the AdminUserReady condition. The password is read read-only and never logged.
+    password:
+      enabled: false
+      secretRef: ilm-admin-password    # REQUIRED when enabled: generic Secret holding the password
+      passwordKey: password            # optional in-Secret key override (default "password")
+
+# -----------------------------------------------------------------------------
+# [IMPLEMENTED] provisioning.mode=deploy (the bundled provisioning-rabbitmq service).
+# mode=external (default, above) consumes your own provisioner; mode=deploy renders the
+# provisioning-rabbitmq service as an operator-managed component (broker-wired via the
+# platform messaging connection) and points Core's PROVISIONING_API_URL at it. The JWT
+# signing key and the API key are a referenced Secret (bootstrapSecretRef) — NEVER inlined.
+# mode=deploy requires messaging.brokerType=rabbitmq (the service is RabbitMQ-specific):
+#   provisioning:
+#     mode: deploy
+#     deploy:
+#       bootstrapSecretRef: ilm-provisioning-bootstrap   # REQUIRED: Secret with the API key + JWT signing key
+#       apiKeyKey: securityApiKey            # in-Secret key for the API key (default)
+#       tokenSigningKeyKey: tokenSigningKey  # in-Secret key for the JWT signing key (default)
+#       # provisioner/proxy broker creds default to the platform messaging credentials
+#       # (managed: the Topology-generated provisioner/proxy Secrets); override here:
+#       provisionerCredentials: { secretRef: "", usernameKey: username, passwordKey: password }
+#       proxyCredentials: { secretRef: "", usernameKey: username, passwordKey: password }
+#       exchange: czertainly-proxy           # bootstrap proxy exchange (bundle default)
+#       responseQueue: core                  # bootstrap response queue (bundle default)
+#       # + the full shared ComponentSpec (image/replicas/resources/env/probes/...) inline.
+# -----------------------------------------------------------------------------
+
+# =============================================================================
+# SECTION 2 — NOT IMPLEMENTED (design target). The blocks below are part of the DESIGN
+# in docs/design/platform-operator.md but are NOT in the shipped CRD; the apiserver
+# REJECTS them today (unknown fields are pruned; edge.type: route is rejected by
+# enum/CEL). Do NOT copy them into a live CR.
+# =============================================================================
+#
+# [NOT IMPLEMENTED] the richer highAvailability profile. Today highAvailability has the
+# single field `enabled` (SECTION 1). The tunable dimensions below (minReplicas floor,
+# topology, antiAffinity strength, a profile-level PDB) are a design target — tune
+# availability per component instead (component.replicas / autoscaling / podDisruptionBudget
+# / affinity), which IS shipped:
+#   highAvailability:
+#     enabled: true
+#     minReplicas: 2
+#     topology: node                   # node | zone
+#     antiAffinity: preferred          # preferred | required
+#     podDisruptionBudget: { minAvailable: 1 }
+#
+# [NOT IMPLEMENTED] gateway type selector (today the gateway is always Kong; there is no
+# gateway.type field — only the cors/logging/messaging/trustedIps knobs + the per-component
+# override surface in SECTION 1):
+#   gateway: { type: kong }
+#
+# [NOT IMPLEMENTED] managed-database BACKUP deep-wiring. The backup block is ACCEPTED
+# (schedule/retention, see SECTION 1) but its object-store coordinates and end-to-end
+# restore are not yet wired (future work):
+#   database:
+#     managed:
+#       backup:
+#         objectStore: { url: s3://…, endpoint: https://…, credentialsSecretRef: pg-backup-s3 }
+#
+# [NOT IMPLEMENTED] edge.type: route (OpenShift Route) and the edge client-certificate
+# block. Today edge.type accepts ingress | gatewayAPI, and the client-cert header is
+# configured via spec.core.clientCertHeader (SECTION 1), not under edge:
+#   edge:
+#     type: route
+#     clientCertificate: { mode: optional, passToUpstreamHeader: ssl-client-cert }
+#
+# [NOT IMPLEMENTED] the validating admission webhook. The CRD's CEL XValidation rules are
+# the create-time guard today (rejecting e.g. mode=deploy on a non-rabbitmq broker, an
+# external DB missing host/credentials, an enabled edge missing host); the validating
+# webhook that will ALSO reject inline secrets and enforce the per-namespace singleton at
+# create time is future work (today the singleton is a runtime guard:
+# AnotherPlatformExists).

@@ -1,0 +1,54 @@
+# platform_registeradmin_provided.yaml — external infra + first-admin bootstrap with
+# a CALLER-SUPPLIED admin client certificate.
+#
+# registerAdmin wires Core's ADMIN_CERT env from the admin client-certificate Secret
+# you provide. With source=provided the operator reads (read-only) the certificate
+# from your Secret; it mints nothing.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker (see platform_minimal_external.yaml).
+#   - No cert-manager required for source=provided.
+#
+# SECRETS YOU MUST CREATE FIRST:
+#   # DB + messaging creds (keys username/password), as in minimal:
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+#   # The admin client certificate — a standard kubernetes.io/tls Secret with keys
+#   # "tls.crt" (the admin client cert PEM) and "tls.key" (its private key PEM).
+#   # The operator reads tls.crt to populate Core's ADMIN_CERT:
+#   kubectl create secret tls ilm-admin-cert -n ilm \
+#     --cert=path/to/admin.crt --key=path/to/admin.key
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  registerAdmin:
+    enabled: true
+    # The admin identity below is carried for the operator-driven registration that
+    # POSTs the admin to Core (the registration action).
+    username: admin
+    name: Platform Administrator
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: provided
+      secretRef: ilm-admin-cert     # the kubernetes.io/tls Secret you created above

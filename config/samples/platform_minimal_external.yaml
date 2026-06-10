@@ -1,0 +1,41 @@
+# platform_minimal_external.yaml — the smoke test.
+#
+# The smallest Platform that converges: an EXTERNAL (bring-your-own) PostgreSQL and
+# an EXTERNAL AMQP broker, no edge. This is the canonical first deploy.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - An external PostgreSQL reachable at database.host:port with database.name.
+#   - An external AMQP 1.0 broker reachable at messaging.host:port (+ virtualHost).
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   # DB credentials — operator reads keys "username" and "password":
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>
+#   # Messaging credentials — operator reads keys "username" and "password":
+#   kubectl create secret generic ilm-messaging -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<broker-password>
+#
+# A kubernetes.io/basic-auth Secret also works (it stores the same username/password
+# keys); a generic Secret with those two keys is the simplest form.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
