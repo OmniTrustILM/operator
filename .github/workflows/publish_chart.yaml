@@ -22,6 +22,8 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.2.0 # pinned — Helm major bumps change CLI output behavior
 
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
@@ -134,9 +136,15 @@ jobs:
 
             helm dependency update $CHART
             helm package $CHART
-            pushed=$(helm push $name-$version.tgz oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY)
+            # Helm 4 writes "Pushed:"/"Digest:" to stderr, Helm 3 to stdout — capture both
+            pushed=$(helm push $name-$version.tgz oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY 2>&1)
+            echo "$pushed"
 
-            digest=$(echo "$pushed" | awk 'FNR == 2 {print $2}')
+            digest=$(echo "$pushed" | awk '/Digest:/ {print $2}')
+            if [[ -z "$digest" ]]; then
+              echo "❌ Could not parse pushed chart digest from helm push output"
+              exit 1
+            fi
 
             cosign sign --yes --key env://COSIGN_PRIVATE_KEY $HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name@$digest
 
@@ -148,7 +156,7 @@ jobs:
               echo "🔍 Check if develop tag 0.0.0 exists and remove it"
               pulled=$(helm pull oci://$HELM_OCI_REGISTRY/$HELM_OCI_REPOSITORY/$name --version 0.0.0 2>&1 || true)
               if [[ $pulled == *"Digest:"* ]]; then
-                removeFrom=$(echo "$pulled" | awk 'FNR == 2 {print $2}')
+                removeFrom=$(echo "$pulled" | awk '/Digest:/ {print $2}')
                 echo "🔀 Tag 0.0.0 exists, remove it from $removeFrom"
                 curl --user $HELM_USERNAME:$HELM_PASSWORD --request DELETE --silent --show-error \
                   https://$HELM_OCI_REGISTRY/api/v2.0/projects/$HELM_OCI_REPOSITORY/repositories/$name/artifacts/$removeFrom/tags/0.0.0
