@@ -95,6 +95,26 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(MAKE) sync-chart-crds
+
+# CHART_CRD_DIR is the Helm chart's embedded-CRD directory. The chart installs these
+# CRDs when crd.install=true, so they must stay byte-for-byte in sync with the generated
+# CRDs in config/crd/bases — otherwise a chart-installed operator ships stale CRDs and the
+# new fields silently do not work.
+CHART_CRD_DIR ?= deploy/charts/ilm-operator/templates/crds
+
+.PHONY: sync-chart-crds
+sync-chart-crds: ## Sync the Helm chart's embedded CRDs from config/crd/bases (wraps each in the chart's crd.install conditional).
+	@mkdir -p $(CHART_CRD_DIR)
+	@rm -f $(CHART_CRD_DIR)/*-crd.yaml
+	@for src in config/crd/bases/*.yaml; do \
+		kind=$$(basename $$src .yaml | sed 's/^otilm\.com_//' | sed 's/s$$//'); \
+		dst=$(CHART_CRD_DIR)/$$kind-crd.yaml; \
+		printf '{{- if .Values.crd.install }}\n' > $$dst; \
+		cat $$src >> $$dst; \
+		printf '{{- end }}\n' >> $$dst; \
+		echo "synced $$src -> $$dst"; \
+	done
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -111,6 +131,10 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./internal/... | grep -v -e /e2e -e /monitoring) -coverprofile cover.out
+	# Operator-native golden render snapshots (cross-variant full-render regression net).
+	# Pure builder render — no envtest, no coverprofile (it carries no production code, so it
+	# would not move the coverage total). Regenerate with: UPDATE_GOLDEN=1 go test ./test/golden/...
+	go test ./test/golden/...
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
@@ -119,22 +143,77 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 KIND_CLUSTER ?= ilm-operator-test-e2e
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
+setup-test-e2e: ## Set up a FRESH Kind cluster for e2e tests (delete-if-exists, then create)
 	@command -v $(KIND) >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
-		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
-		*) \
-			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
-	esac
+	# Always start from a pristine node. cleanup-test-e2e only runs after a SUCCESSFUL `go test`
+	# (it is the Make line after it), so a FAILED e2e run leaks its cluster; reusing that cluster
+	# on the next run compounds runtime damage (a crashed-mid-run containerd leaves orphaned
+	# shims and a half-written image store that wedges later pods in PodInitializing). Deleting
+	# any existing cluster before creating guarantees every run — especially a re-run after a
+	# failure — gets a clean containerd, so a green/red result reflects the operator, not stale
+	# node state. The delete is a no-op (|| true) when no such cluster exists.
+	@echo "Ensuring a FRESH Kind cluster '$(KIND_CLUSTER)' (delete-if-exists, then create)..."
+	@$(KIND) delete cluster --name $(KIND_CLUSTER) >/dev/null 2>&1 || true
+	@$(KIND) create cluster --name $(KIND_CLUSTER)
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PRs): operator deploy + external-mode Platform + Connector. Excludes the managed tier.
+	# FAST TIER (what every PR runs). The Ginkgo label filter '!managed' EXCLUDES the managed
+	# Contexts (CNPG/RabbitMQ/Keycloak/full-platform), whose own BeforeAll install the real
+	# upstream operators — so this run never installs them and stays cheap (~10min). It exercises
+	# only the operator deploy, the external-mode Platform reconcile, and the Connector lifecycle.
+	# Pass KIND through so the suite's image-load shells out to the SAME kind binary the
+	# Makefile manages ($(KIND), i.e. bin/kind) instead of a bare "kind" that may be absent.
+	# -timeout 20m: the fast tier only deploys the operator and reconciles external-mode/Connector
+	# CRs (no real stateful infra), so it finishes well within 20m.
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='!managed' -timeout 20m
+	$(MAKE) cleanup-test-e2e
+
+# E2E_MANAGED_LABEL selects which managed Context(s) run. Defaults to the umbrella 'managed' (all
+# managed blocks, sequential, one cluster — local convenience). CI passes a PER-BLOCK label
+# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix) so each block runs in its
+# OWN parallel job on its OWN fresh Kind cluster — no shared-cluster install/uninstall collisions.
+E2E_MANAGED_LABEL ?= managed
+
+.PHONY: test-e2e-managed
+test-e2e-managed: setup-test-e2e manifests generate fmt vet ## Run the GATED managed e2e tier: real CloudNativePG/RabbitMQ/Keycloak + full ILM platform. Set E2E_MANAGED_LABEL to run one block.
+	# GATED MANAGED TIER (nightly schedule + manual dispatch + managed-infra path changes in CI).
+	# The Ginkgo label filter 'managed' selects ONLY the managed Contexts, whose own BeforeAll
+	# install the real CloudNativePG + RabbitMQ Cluster/Topology + Keycloak operators and wait for
+	# them to provision real stateful infra; the full managed-platform spec additionally brings up
+	# the real ILM application images and drives the Core<-Keycloak OIDC wiring to completion.
+	# Pass KIND through (see test-e2e). -timeout 90m: a FRESH cluster (setup-test-e2e recreates it)
+	# re-pulls every component image from the registry, which on top of booting the whole system
+	# on a single Kind node runs well beyond `go test`'s 10m default; 90m leaves headroom so the
+	# suite never panics ("test timed out") mid-run on a cold image cache even though every spec passes.
+	# --ginkgo.timeout=85m: Ginkgo's OWN suite timeout defaults to 1h regardless of `go test
+	# -timeout`; on a cold image cache the managed suite runs past 1h, so raise it (kept just
+	# under the 90m go-test ceiling so Ginkgo times out gracefully + reports before go-test panics).
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='$(E2E_MANAGED_LABEL)' --ginkgo.timeout=85m -timeout 90m
+	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-matrix
+test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ONLY the version-matrix e2e (managed 2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused).
+	# FOCUSED VERSION-MATRIX run: the 'matrix' Ginkgo label selects only the version-matrix
+	# Context (which installs its own upstream operators), so it brings up ONE managed 2.17.0
+	# stack, upgrades it in place to 2.18.0, and proves the downgrade refusal — WITHOUT running
+	# the four per-infra managed blocks. -timeout 75m covers a cold image cache (fresh cluster
+	# re-pulls every image) plus the 2.17.0 bring-up and the in-place 2.18.0 re-roll.
+	# --ginkgo.timeout=70m: Ginkgo's own suite timeout defaults to 1h; the matrix's operator
+	# installs + the full 2.17.0 bring-up + the upgrade re-roll exceed that on a cold cache, so
+	# raise it (under the 75m go-test ceiling so Ginkgo reports before go-test panics).
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=70m -timeout 75m
+	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-all
+test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (fast + managed) in one cluster (~75min, full local run).
+	# Full local run: no label filter, so every spec (fast + managed) runs in one cluster.
+	# -timeout 75m covers the fast tier plus the full managed tier (real upstream operators + the
+	# whole ILM platform) end-to-end.
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v -timeout 75m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -192,10 +271,17 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	rm Dockerfile.cross
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
+build-installer: manifests generate kustomize ## Generate a consolidated install YAML (Namespace + CRDs + RBAC + manager). For `kubectl apply -f`.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
 	$(KUSTOMIZE) build config/default > dist/install.yaml
+	# Restore the tracked image placeholder so the working tree stays clean after a build.
+	cd config/manager && $(KUSTOMIZE) edit set image controller=controller:latest
+
+.PHONY: build-installer-crds
+build-installer-crds: manifests kustomize ## Generate a CRDs-only YAML (Connector + Platform). Companion to build-installer, for CRD-first / GitOps installs.
+	mkdir -p dist
+	$(KUSTOMIZE) build config/crd > dist/install-crds.yaml
 
 ##@ Deployment
 
@@ -220,6 +306,14 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: install-upstream-operators
+install-upstream-operators: ## Install the upstream operators a managed Platform depends on (cert-manager, CloudNativePG, RabbitMQ cluster+topology, Keycloak), pinned to the e2e-validated versions.
+	./hack/install-upstream-operators.sh install
+
+.PHONY: verify-upstream-operators
+verify-upstream-operators: ## Report which upstream operators are installed and ready (no changes).
+	./hack/install-upstream-operators.sh verify
+
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -242,7 +336,7 @@ CONTROLLER_TOOLS_VERSION ?= v0.18.0
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v2.1.0
+GOLANGCI_LINT_VERSION ?= v2.11.4
 KIND_VERSION ?= v0.29.0
 
 .PHONY: kustomize
@@ -369,7 +463,13 @@ catalog-push: ## Push a catalog image.
 
 ##@ Kind Cluster Management
 
-KIND_CLUSTER_NAME ?= ilm-operator-e2e
+# Single source of truth for the e2e Kind cluster name. KIND_CLUSTER_NAME is kept as an alias of
+# KIND_CLUSTER (defined above, used by the test-e2e* targets) so the dev helpers below —
+# especially `prune-kind-cluster` — operate on the SAME cluster the e2e suite runs in. They were
+# previously two different names ("ilm-operator-e2e" vs "ilm-operator-test-e2e"), so
+# `make prune-kind-cluster` silently deleted a non-existent cluster and never cleaned the test
+# one, leaving a reused, increasingly corrupt node across runs.
+KIND_CLUSTER_NAME ?= $(KIND_CLUSTER)
 
 .PHONY: kind-cluster
 kind-cluster: kind ## Create a Kind cluster for development/testing.

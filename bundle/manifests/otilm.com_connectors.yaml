@@ -88,15 +88,11 @@ spec:
                       description: Name is the name of the configmap.
                       type: string
                     type:
-                      allOf:
-                      - enum:
-                        - env
-                        - volume
-                      - enum:
-                        - env
-                        - volume
                       description: Type defines how the configmap is consumed (env
                         or volume).
+                      enum:
+                      - env
+                      - volume
                       type: string
                   required:
                   - name
@@ -106,22 +102,47 @@ spec:
               env:
                 description: Env defines environment variables for the connector.
                 items:
-                  description: EnvVar defines an environment variable for the connector.
+                  description: EnvVar defines an environment variable for a workload.
                   properties:
                     name:
                       description: Name is the environment variable name.
                       type: string
                     value:
-                      description: Value is the environment variable value.
+                      description: |-
+                        Value is the environment variable value. It is optional so a valueless or
+                        empty-string variable can be set, mirroring core/v1 EnvVar.
                       type: string
                   required:
                   - name
-                  - value
                   type: object
                 type: array
               image:
                 description: Image defines the container image configuration.
                 properties:
+                  args:
+                    description: |-
+                      Args overrides the container's command arguments. When unset the image's own CMD
+                      is used.
+                    items:
+                      type: string
+                    type: array
+                  command:
+                    description: |-
+                      Command overrides the container entrypoint (the container's command). When unset
+                      the image's own ENTRYPOINT is used.
+                    items:
+                      type: string
+                    type: array
+                  digest:
+                    description: |-
+                      Digest pins the image by content digest (e.g. "sha256:abc123..."). When set it
+                      takes precedence over Tag and the reference is composed as
+                      registry/repository/name@digest, so the workload runs an immutable image.
+                    type: string
+                  name:
+                    description: Name is the image name (optional; defaults from the
+                      version bundle when applicable).
+                    type: string
                   pullPolicy:
                     default: IfNotPresent
                     description: PullPolicy defines the image pull policy.
@@ -132,18 +153,22 @@ spec:
                     items:
                       type: string
                     type: array
+                  registry:
+                    description: Registry is the image registry host (optional; for
+                      example, registry.example.com).
+                    type: string
                   repository:
-                    description: Repository is the container image repository.
-                    minLength: 1
+                    description: Repository is the image repository or path.
                     type: string
                   tag:
-                    description: Tag is the container image tag.
-                    minLength: 1
+                    description: |-
+                      Tag is the image tag (optional; defaults from the version bundle when applicable).
+                      Ignored when Digest is set (a digest pins the image immutably).
                     type: string
-                required:
-                - repository
-                - tag
                 type: object
+                x-kubernetes-validations:
+                - message: image.repository and image.tag are required
+                  rule: has(self.repository) && has(self.tag)
               lifecycle:
                 description: Lifecycle defines lifecycle management settings.
                 properties:
@@ -154,12 +179,21 @@ spec:
                         description: Enabled indicates whether a PodDisruptionBudget
                           should be created.
                         type: boolean
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is the maximum number/percentage of pods that may be unavailable. It is
+                          honoured only when MinAvailable is unset (a PodDisruptionBudget may carry at most one).
+                        x-kubernetes-int-or-string: true
                       minAvailable:
                         anyOf:
                         - type: integer
                         - type: string
-                        description: MinAvailable is the minimum number/percentage
-                          of pods that must be available.
+                        description: |-
+                          MinAvailable is the minimum number/percentage of pods that must be available. It is
+                          mutually exclusive with MaxUnavailable and takes precedence when both are set.
                         x-kubernetes-int-or-string: true
                     required:
                     - enabled
@@ -182,7 +216,10 @@ spec:
                     type: string
                   port:
                     default: 8080
-                    description: Port is the port for the metrics endpoint.
+                    description: |-
+                      Port is the port for the metrics endpoint.
+                      Currently reserved for future use when metrics are served on a separate port.
+                      The ServiceMonitor uses the service port (spec.service.port) for scraping.
                     format: int32
                     type: integer
                   serviceMonitor:
@@ -312,20 +349,13 @@ spec:
                       type: object
                     type: array
                   authType:
-                    allOf:
-                    - enum:
-                      - none
-                      - basic
-                      - certificate
-                      - apiKey
-                      - jwt
-                    - enum:
-                      - none
-                      - basic
-                      - certificate
-                      - apiKey
-                      - jwt
                     description: AuthType defines the authentication type for registration.
+                    enum:
+                    - none
+                    - basic
+                    - certificate
+                    - apiKey
+                    - jwt
                     type: string
                   customAttributes:
                     description: CustomAttributes defines custom registration attributes.
@@ -455,15 +485,11 @@ spec:
                       description: Name is the name of the secret.
                       type: string
                     type:
-                      allOf:
-                      - enum:
-                        - env
-                        - volume
-                      - enum:
-                        - env
-                        - volume
                       description: Type defines how the secret is consumed (env or
                         volume).
+                      enum:
+                      - env
+                      - volume
                       type: string
                   required:
                   - name
@@ -508,7 +534,7 @@ spec:
                 description: Volumes defines additional volumes for the connector
                   pod.
                 items:
-                  description: VolumeSpec defines a volume to mount in the connector
+                  description: VolumeSpec defines a volume to mount in the workload
                     pod.
                   properties:
                     emptyDir:
@@ -600,6 +626,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               configChecksum:
                 description: ConfigChecksum is a checksum of the current configuration.
                 type: string

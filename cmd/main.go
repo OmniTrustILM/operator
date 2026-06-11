@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Package main is the entrypoint for the ILM Connector Operator manager.
+// Package main is the entrypoint for the ILM Operator manager, which runs the Connector and Platform controllers.
 package main
 
 import (
@@ -47,7 +47,8 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	otilmcomv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/controller"
+	"github.com/OmniTrustILM/operator/internal/controller/connector"
+	"github.com/OmniTrustILM/operator/internal/controller/platform"
 
 	// Import monitoring package for Prometheus metrics registration side effects.
 	_ "github.com/OmniTrustILM/operator/internal/monitoring"
@@ -222,12 +223,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.ConnectorReconciler{
+	if err := (&connector.Reconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // TODO: migrate to events.EventRecorder
+		Recorder: mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Connector")
+		os.Exit(1)
+	}
+	if err := (&platform.Reconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Platform")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

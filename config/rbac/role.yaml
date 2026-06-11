@@ -9,20 +9,6 @@ rules:
   resources:
   - configmaps
   - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
-  - ""
-  resources:
   - serviceaccounts
   - services
   verbs:
@@ -34,9 +20,68 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - apps
   resources:
   - deployments
+  - statefulsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - certificates
+  - issuers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
+  - gateways
+  - httproutes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - k8s.keycloak.org
+  resources:
+  - keycloakrealmimports
+  - keycloaks
   verbs:
   - create
   - delete
@@ -49,6 +94,19 @@ rules:
   - monitoring.coreos.com
   resources:
   - servicemonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  - networkpolicies
   verbs:
   - create
   - delete
@@ -71,20 +129,65 @@ rules:
   - otilm.com
   resources:
   - connectors/finalizers
+  - platforms/finalizers
   verbs:
   - update
 - apiGroups:
   - otilm.com
   resources:
   - connectors/status
+  - platforms/status
   verbs:
   - get
   - patch
   - update
 - apiGroups:
+  - otilm.com
+  resources:
+  - platforms
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - policy
   resources:
   - poddisruptionbudgets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgresql.cnpg.io
+  resources:
+  - clusters
+  - poolers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rabbitmq.com
+  resources:
+  - bindings
+  - exchanges
+  - permissions
+  - queues
+  - rabbitmqclusters
+  - users
+  - vhosts
   verbs:
   - create
   - delete

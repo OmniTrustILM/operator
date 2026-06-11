@@ -1,0 +1,65 @@
+# platform_quickstart_develop_latest.yaml — everything MANAGED, all ILM-built images on develop-latest.
+# Prereqs: the upstream operators (CloudNativePG, RabbitMQ Cluster + Messaging Topology,
+# Keycloak) + cert-manager (for the generated admin cert / internal-CA edge). Nothing to
+# pre-create — the managed operators mint their own credentials.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    hostName: ilm.example.com        # canonical public FQDN — the edge, Keycloak, OIDC, CORS all use it
+    image:
+      pullPolicy: Always             # develop-latest is a moving tag — always re-pull
+
+  database:
+    mode: managed
+    managed:
+      instances: 1
+      version: "18"
+      storage: { size: 20Gi }
+    # Connection pooling — REQUIRED for the managed fleet (else Postgres's 100 connections exhaust
+    # and Core crash-loops). The operator provisions a CloudNativePG PgBouncer Pooler.
+    pgBouncer: { managed: true }
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 1
+      version: "4.3.1"   # the 2.18.0 bundle's matched default; pinned here for clarity (omit to use the same default)
+      storage: { size: 10Gi }
+  keycloak:
+    mode: managed
+    realm: ilm
+    managed:
+      instances: 1
+      # version omitted → the Keycloak Operator uses its matched default server image.
+
+  # all ILM-built images → develop-latest (registry/repo default to hub.omnitrustregistry.com/ilm;
+  # the image NAME stays the bundle's per-component name). opa/curl/kong stay at their pinned tags.
+  core:             { image: { tag: develop-latest } }   # .../core:develop-latest
+  auth:      { image: { tag: develop-latest } }   # .../auth:develop-latest
+  scheduler: { image: { tag: develop-latest } }   # .../scheduler:develop-latest
+  authOpaPolicies:  { image: { tag: develop-latest } }   # .../auth-opa-policies:develop-latest
+  feAdministrator:  { image: { tag: develop-latest } }   # .../frontend-administrator:develop-latest
+  utils:
+    enabled: true                                        # optional component — run it on develop-latest too
+    image: { tag: develop-latest }                       # .../utils-service:develop-latest
+
+  registerAdmin:
+    enabled: true
+    username: admin
+    name: Platform Administrator
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: generated
+
+  edge:                              # optional — omit the whole block to run behind your own ingress
+    enabled: true                    # no edge.host → uses common.hostName above
+    type: ingress
+    className: nginx
+    tls:
+      source: internal               # operator-managed internal CA (needs cert-manager)

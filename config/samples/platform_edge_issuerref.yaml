@@ -1,0 +1,52 @@
+# platform_edge_issuerref.yaml — external infra + Ingress edge signed by an existing
+# cert-manager Issuer/ClusterIssuer (Vault, corporate CA, Venafi, ...).
+#
+# The operator creates NO issuer of its own for this source: it stamps the
+# cert-manager ingress-shim annotations naming your issuer onto the Ingress, and
+# cert-manager mints the leaf into the edge TLS Secret.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker (see platform_minimal_external.yaml).
+#   - cert-manager installed — REQUIRED for tls.source=issuerRef (absent → edge
+#     skipped, EdgeReady=False / CertManagerNotInstalled; non-fatal).
+#   - The referenced Issuer/ClusterIssuer must already exist and be Ready. The
+#     operator does not create or validate it.
+#   - An ingress controller for the chosen class (ingress-nginx for "nginx").
+#
+# SECRETS YOU MUST CREATE FIRST (same as minimal):
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+# The TLS Secret is populated BY cert-manager (default name ilm-ingress-tls).
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  edge:
+    enabled: true
+    type: ingress
+    className: nginx
+    host: ilm.example.com
+    tls:
+      source: issuerRef
+      issuerRef:
+        name: corp-ca
+        kind: ClusterIssuer         # Issuer (namespaced, the default) | ClusterIssuer
+        # group: cert-manager.io    # defaults to cert-manager.io

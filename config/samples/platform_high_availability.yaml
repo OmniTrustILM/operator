@@ -1,0 +1,57 @@
+# platform_high_availability.yaml — availability primitives.
+#
+# Demonstrates the three availability features:
+#   - spec.highAvailability.enabled: applies HA DEFAULTS to the stateless components
+#     (a 2-replica floor, a PodDisruptionBudget with minAvailable 1, and pod
+#     anti-affinity spreading replicas across nodes). Every default is overridable
+#     per component.
+#   - a per-component PodDisruptionBudget (auth-opa-policies below) overriding the HA
+#     default with an explicit minAvailable.
+#   - a per-component HorizontalPodAutoscaler (core below): when set, the operator
+#     renders an HPA targeting the component's Deployment and OMITS .spec.replicas on
+#     that Deployment, so the HPA owns scaling (it is never clobbered on reconcile).
+#
+# Stateful MANAGED infrastructure (CloudNativePG / RabbitMQ / Keycloak) HA is NOT
+# configured here — it is the upstream operators' concern, sized via each managed
+# block's own instances/replicas (this sample uses external infra).
+#
+# PREREQUISITES & SECRETS: same as platform_minimal_external.yaml (create the ilm-db
+# and ilm-messaging credential Secrets in the namespace first).
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  # Turn on the platform-wide HA profile: stateless components get a 2-replica floor,
+  # a PodDisruptionBudget (minAvailable 1), and node-spread anti-affinity by default.
+  highAvailability:
+    enabled: true
+  core:
+    # Core autoscales: the operator renders an HPA (2..6 replicas on 75% CPU) and OMITS
+    # .spec.replicas on Core's Deployment so the HPA owns the count. This overrides the
+    # HA replica default for Core; the HA default PDB still applies.
+    autoscaling:
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilization: 75
+  authOpaPolicies:
+    # Override the HA default PDB for this component with an explicit minAvailable.
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 2

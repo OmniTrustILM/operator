@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // ConnectorPhase represents the current phase of the Connector.
@@ -39,16 +38,6 @@ const (
 	ConnectorPhaseRunning   ConnectorPhase = "Running"
 	ConnectorPhaseFailed    ConnectorPhase = "Failed"
 	ConnectorPhaseUpdating  ConnectorPhase = "Updating"
-)
-
-// RefType defines how a secret or configmap is referenced.
-// +kubebuilder:validation:Enum=env;volume
-type RefType string
-
-// Reference type constants for secrets and configmaps.
-const (
-	RefTypeEnv    RefType = "env"
-	RefTypeVolume RefType = "volume"
 )
 
 // AuthType defines the authentication type for connector registration.
@@ -64,204 +53,6 @@ const (
 	AuthTypeJWT         AuthType = "jwt"
 )
 
-// ImageSpec defines the container image configuration.
-type ImageSpec struct {
-	// Repository is the container image repository.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Repository string `json:"repository"`
-
-	// Tag is the container image tag.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Tag string `json:"tag"`
-
-	// PullPolicy defines the image pull policy.
-	// +kubebuilder:default="IfNotPresent"
-	// +optional
-	PullPolicy string `json:"pullPolicy,omitempty"`
-
-	// PullSecrets is a list of secret names for pulling the image.
-	// +optional
-	PullSecrets []string `json:"pullSecrets,omitempty"`
-}
-
-// ServiceSpec defines the service configuration for the connector.
-type ServiceSpec struct {
-	// Port is the service port.
-	// +kubebuilder:default=8080
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	// +optional
-	Port int32 `json:"port,omitempty"`
-
-	// Type is the Kubernetes service type.
-	// +kubebuilder:default=ClusterIP
-	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
-	// +optional
-	Type string `json:"type,omitempty"`
-}
-
-// SecurityContextSpec defines security context settings for the connector pod.
-type SecurityContextSpec struct {
-	// RunAsNonRoot indicates that the container must run as a non-root user.
-	// +kubebuilder:default=true
-	// +optional
-	RunAsNonRoot *bool `json:"runAsNonRoot,omitempty"`
-
-	// ReadOnlyRootFilesystem indicates that the container has a read-only root filesystem.
-	// +kubebuilder:default=true
-	// +optional
-	ReadOnlyRootFilesystem *bool `json:"readOnlyRootFilesystem,omitempty"`
-}
-
-// ProbeConfig defines the configuration for a single probe.
-type ProbeConfig struct {
-	// Path is the HTTP path to probe.
-	// +optional
-	Path string `json:"path,omitempty"`
-
-	// InitialDelaySeconds is the number of seconds after the container starts before the probe is initiated.
-	// +optional
-	InitialDelaySeconds int32 `json:"initialDelaySeconds,omitempty"`
-
-	// PeriodSeconds is how often (in seconds) to perform the probe.
-	// +optional
-	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
-
-	// FailureThreshold is the number of consecutive failures before the probe is considered failed.
-	// +optional
-	FailureThreshold int32 `json:"failureThreshold,omitempty"`
-}
-
-// ProbeSpec defines the probe configuration for the connector.
-type ProbeSpec struct {
-	// Liveness defines the liveness probe configuration.
-	// +optional
-	Liveness *ProbeConfig `json:"liveness,omitempty"`
-
-	// Readiness defines the readiness probe configuration.
-	// +optional
-	Readiness *ProbeConfig `json:"readiness,omitempty"`
-
-	// Startup defines the startup probe configuration.
-	// +optional
-	Startup *ProbeConfig `json:"startup,omitempty"`
-}
-
-// EnvVar defines an environment variable for the connector.
-type EnvVar struct {
-	// Name is the environment variable name.
-	Name string `json:"name"`
-
-	// Value is the environment variable value.
-	Value string `json:"value"`
-}
-
-// RefKeyMapping defines the mapping of a key from a secret or configmap.
-type RefKeyMapping struct {
-	// SecretKey is the key in the secret to reference.
-	// +optional
-	SecretKey string `json:"secretKey,omitempty"`
-
-	// EnvVar is the environment variable name to map to (for env type).
-	// +optional
-	EnvVar *string `json:"envVar,omitempty"`
-
-	// Path is the file path to mount to (for volume type).
-	// +optional
-	Path *string `json:"path,omitempty"`
-}
-
-// SecretRef defines a reference to a Kubernetes secret.
-type SecretRef struct {
-	// Name is the name of the secret.
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-
-	// Type defines how the secret is consumed (env or volume).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=env;volume
-	Type RefType `json:"type"`
-
-	// MountPath is the path to mount the secret (required when type=volume).
-	// +optional
-	MountPath *string `json:"mountPath,omitempty"`
-
-	// Keys defines the individual key mappings from the secret.
-	// +optional
-	Keys []RefKeyMapping `json:"keys,omitempty"`
-}
-
-// ConfigMapKeyMapping defines the mapping of a key from a configmap.
-type ConfigMapKeyMapping struct {
-	// ConfigMapKey is the key in the configmap to reference.
-	// +optional
-	ConfigMapKey string `json:"configMapKey,omitempty"`
-
-	// EnvVar is the environment variable name to map to (for env type).
-	// +optional
-	EnvVar *string `json:"envVar,omitempty"`
-
-	// Path is the file path to mount to (for volume type).
-	// +optional
-	Path *string `json:"path,omitempty"`
-}
-
-// ConfigMapRef defines a reference to a Kubernetes configmap.
-type ConfigMapRef struct {
-	// Name is the name of the configmap.
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-
-	// Type defines how the configmap is consumed (env or volume).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=env;volume
-	Type RefType `json:"type"`
-
-	// MountPath is the path to mount the configmap (required when type=volume).
-	// +optional
-	MountPath *string `json:"mountPath,omitempty"`
-
-	// Keys defines the individual key mappings from the configmap.
-	// +optional
-	Keys []ConfigMapKeyMapping `json:"keys,omitempty"`
-}
-
-// EmptyDirSpec defines the configuration for an emptyDir volume.
-type EmptyDirSpec struct {
-	// Medium is the storage medium type (e.g., "", "Memory").
-	// +optional
-	Medium *string `json:"medium,omitempty"`
-
-	// SizeLimit is the maximum size of the emptyDir volume.
-	// +optional
-	SizeLimit *string `json:"sizeLimit,omitempty"`
-}
-
-// VolumeSpec defines a volume to mount in the connector pod.
-type VolumeSpec struct {
-	// Name is the name of the volume.
-	Name string `json:"name"`
-
-	// MountPath is the path to mount the volume in the container.
-	MountPath string `json:"mountPath"`
-
-	// EmptyDir defines the emptyDir volume source.
-	// +optional
-	EmptyDir *EmptyDirSpec `json:"emptyDir,omitempty"`
-}
-
-// PDBSpec defines the PodDisruptionBudget configuration.
-type PDBSpec struct {
-	// Enabled indicates whether a PodDisruptionBudget should be created.
-	Enabled bool `json:"enabled"`
-
-	// MinAvailable is the minimum number/percentage of pods that must be available.
-	// +optional
-	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
-}
-
 // LifecycleSpec defines lifecycle management settings for the connector.
 type LifecycleSpec struct {
 	// TerminationGracePeriodSeconds is the duration in seconds the pod needs to terminate gracefully.
@@ -271,42 +62,6 @@ type LifecycleSpec struct {
 	// PodDisruptionBudget defines the PDB configuration.
 	// +optional
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
-}
-
-// ServiceMonitorSpec defines the ServiceMonitor configuration for Prometheus.
-type ServiceMonitorSpec struct {
-	// Enabled indicates whether a ServiceMonitor should be created.
-	Enabled bool `json:"enabled"`
-
-	// Interval defines the scrape interval.
-	// +optional
-	Interval *string `json:"interval,omitempty"`
-
-	// Labels are additional labels to add to the ServiceMonitor.
-	// +optional
-	Labels map[string]string `json:"labels,omitempty"`
-}
-
-// MetricsSpec defines the metrics configuration for the connector.
-type MetricsSpec struct {
-	// Enabled indicates whether metrics are enabled.
-	Enabled bool `json:"enabled"`
-
-	// Path is the HTTP path for metrics endpoint.
-	// +kubebuilder:default="/v1/metrics"
-	// +optional
-	Path *string `json:"path,omitempty"`
-
-	// Port is the port for the metrics endpoint.
-	// Currently reserved for future use when metrics are served on a separate port.
-	// The ServiceMonitor uses the service port (spec.service.port) for scraping.
-	// +kubebuilder:default=8080
-	// +optional
-	Port *int32 `json:"port,omitempty"`
-
-	// ServiceMonitor defines the ServiceMonitor configuration.
-	// +optional
-	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
 }
 
 // RegistrationAttribute defines a name/value pair for registration attributes.
@@ -330,7 +85,6 @@ type RegistrationSpec struct {
 
 	// AuthType defines the authentication type for registration.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=none;basic;certificate;apiKey;jwt
 	AuthType AuthType `json:"authType"`
 
 	// AuthAttributes defines authentication-related attributes.
@@ -371,6 +125,7 @@ type RegistrationStatus struct {
 // ConnectorSpec defines the desired state of Connector.
 type ConnectorSpec struct {
 	// Image defines the container image configuration.
+	// +kubebuilder:validation:XValidation:rule="has(self.repository) && has(self.tag)",message="image.repository and image.tag are required"
 	Image ImageSpec `json:"image"`
 
 	// Service defines the service configuration.
@@ -465,6 +220,8 @@ type ConnectorStatus struct {
 
 	// Conditions represent the latest available observations of the Connector's state.
 	// +optional
+	// +listType=map
+	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Registration is the observed registration status.

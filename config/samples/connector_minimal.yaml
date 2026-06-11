@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   image:
-    repository: docker.io/czertainly/czertainly-x509-compliance-provider
+    repository: hub.omnitrustregistry.com/ilm/x509-compliance-provider
     tag: "1.3.1"
   service:
     port: 8080

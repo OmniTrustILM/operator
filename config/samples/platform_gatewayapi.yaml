@@ -1,0 +1,57 @@
+# platform_gatewayapi.yaml — external infra + Gateway API edge (the non-deprecated
+# Ingress successor), attaching an HTTPRoute to an EXISTING Gateway via parentRef.
+#
+# With parentRef set, the operator renders ONLY the HTTPRoute and no Gateway / no
+# cert-manager objects — TLS is the existing Gateway's concern (idiomatic
+# separation of concerns). Set gatewayClassName INSTEAD (see the alternative below)
+# to have the operator own its own Gateway + cert-manager TLS.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster.
+#   - External PostgreSQL + AMQP broker (see platform_minimal_external.yaml).
+#   - Gateway API CRDs (gateway.networking.k8s.io) installed — REQUIRED for
+#     type=gatewayAPI. If absent the edge is skipped and EdgeReady=False / reason
+#     GatewayAPINotInstalled is reported (non-fatal; self-heals when the CRDs appear).
+#   - parentRef form: an existing Gateway (here "shared-gw") must already be created
+#     and accepting routes, with TLS configured on its listener.
+#   - gatewayClassName form: a GatewayClass of that name must exist, and (if the
+#     Gateway's TLS uses a cert-managed source) cert-manager must be installed.
+#
+# SECRETS YOU MUST CREATE FIRST (same as minimal):
+#   kubectl create secret generic ilm-db        -n ilm --from-literal=username=ilm --from-literal=password=<db-password>
+#   kubectl create secret generic ilm-messaging -n ilm --from-literal=username=ilm --from-literal=password=<broker-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  edge:
+    enabled: true
+    type: gatewayAPI
+    host: ilm.example.com
+    gatewayAPI:
+      # Attach the operator's HTTPRoute to an existing, separately-managed Gateway:
+      parentRef:
+        name: shared-gw
+        # namespace: gateway-system   # defaults to the HTTPRoute's own namespace
+        # sectionName: https          # attach to a specific listener (optional)
+      # ── ALTERNATIVE: operator owns its own Gateway of this class (mutually
+      #    exclusive with parentRef; parentRef wins if both are set). With this form
+      #    the operator also renders cert-manager TLS, so configure spec.edge.tls.
+      # gatewayClassName: istio

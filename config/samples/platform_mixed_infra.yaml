@@ -1,0 +1,54 @@
+# platform_mixed_infra.yaml — mixing external and managed infrastructure.
+#
+# Each of the three infrastructure dependencies — database, messaging, keycloak — chooses
+# its mode INDEPENDENTLY. You are not all-external or all-managed: mix them per dependency
+# to fit your environment. This sample uses:
+#     database  → EXTERNAL   (you run PostgreSQL yourself, e.g. a corporate/cloud DB)
+#     messaging → MANAGED    (operator-provisioned RabbitMQ)
+#     keycloak  → MANAGED    (operator-provisioned Keycloak, sharing the EXTERNAL database)
+#
+# This is a common shape: keep the database on your existing managed-Postgres service while
+# letting the operator run the broker and the identity provider. A managed Keycloak shares
+# whatever the platform database resolves to — here, the external PostgreSQL below (in a
+# dedicated "keycloak" schema).
+#
+# PREREQUISITES (only the dependencies set to `managed` need their upstream operator):
+#   - RabbitMQ Cluster Operator + Messaging Topology Operator (messaging is managed)
+#   - Keycloak Operator (keycloak is managed)
+#   - NO CloudNativePG needed (the database is external).
+#   - A reachable external PostgreSQL at database.host:port with database.name.
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   # External DB credentials (keys username/password). Keycloak shares this same DB and
+#   # references this Secret too — the value is never inlined into any CR:
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>
+#   # No messaging Secret — the Messaging Topology Operator generates the broker credentials.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  common:
+    # Managed Keycloak derives KC_HOSTNAME from this; the OIDC redirect/web-origin URIs too.
+    hostName: ilm.example.com
+  database:
+    mode: external               # bring your own PostgreSQL
+    host: postgres.corp.internal
+    port: 5432
+    name: ilm
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: managed                # operator-provisioned RabbitMQ
+    brokerType: rabbitmq
+    managed:
+      replicas: 3
+      storage:
+        size: 20Gi
+  keycloak:
+    mode: managed                # operator-provisioned Keycloak, sharing the external DB above
+    realm: ilm
+    managed:
+      instances: 1

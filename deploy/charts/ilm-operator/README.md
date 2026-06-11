@@ -1,8 +1,8 @@
 # ILM Operator Helm Chart
 
-> This repository is part of the open-source project ILM. You can find more information about the project at [ILM Operator](https://github.com/OmniTrustILM/operator) repository, including the contribution guide.
+> This repository is part of the open-source project ILM. You can find more information about the project at the [ILM Operator](https://github.com/OmniTrustILM/operator) repository.
 
-This Helm chart deploys the ILM Connector Operator, which manages ILM platform connectors via Kubernetes Custom Resource Definitions (CRDs).
+This Helm chart deploys the ILM Operator, which manages the ILM platform and its connectors via Kubernetes Custom Resource Definitions (CRDs) — the `Platform` and `Connector` resources.
 
 ## Prerequisites
 
@@ -20,7 +20,7 @@ This Helm chart deploys the ILM Connector Operator, which manages ILM platform c
 
 Copy the default `values.yaml` from the Helm chart and modify the values accordingly:
 ```bash
-helm show values oci://harbor.3key.company/ilm-helm/ilm-operator > values.yaml
+helm show values oci://hub.omnitrustregistry.com/ilm-helm/ilm-operator > values.yaml
 ```
 Now edit the `values.yaml` according to your desired state, see [Configurable parameters](#configurable-parameters) for more information.
 
@@ -28,7 +28,7 @@ Now edit the `values.yaml` according to your desired state, see [Configurable pa
 
 For the basic installation, run:
 ```bash
-helm install --namespace ilm-system --create-namespace -f values.yaml ilm-operator oci://harbor.3key.company/ilm-helm/ilm-operator
+helm install --namespace ilm-system --create-namespace -f values.yaml ilm-operator oci://hub.omnitrustregistry.com/ilm-helm/ilm-operator
 ```
 
 By default, the chart will install the CRDs required for the operator to work properly. If you want to skip the installation of the CRDs, you can use the `--set crd.install=false` option.
@@ -40,7 +40,7 @@ By default, the chart will install the CRDs required for the operator to work pr
 
 For upgrading the installation, update your configuration and run:
 ```bash
-helm upgrade --namespace ilm-system -f values.yaml ilm-operator oci://harbor.3key.company/ilm-helm/ilm-operator
+helm upgrade --namespace ilm-system -f values.yaml ilm-operator oci://hub.omnitrustregistry.com/ilm-helm/ilm-operator
 ```
 
 ### Uninstall

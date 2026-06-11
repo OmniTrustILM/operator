@@ -24,6 +24,8 @@ spec:
       serviceAccountName: {{ include "ilm-operator.serviceAccountName" . }}
       securityContext:
         runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: manager
           image: {{ include "ilm-operator.image" . }}

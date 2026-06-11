@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Package v1alpha1 contains API Schema definitions for the  v1alpha1 API group.
+// Package v1alpha1 contains API Schema definitions for the otilm.com v1alpha1 API group.
 // +kubebuilder:object:generate=true
 // +groupName=otilm.com
 package v1alpha1

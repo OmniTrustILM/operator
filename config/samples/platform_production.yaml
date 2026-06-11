@@ -1,0 +1,153 @@
+# platform_production.yaml — a production-tuned starting point.
+#
+# Unlike platform_full.yaml (which exercises EVERY field with example values and is NOT a
+# recommendation), this sample is a REALISTIC production shape you can copy and adjust:
+# fully-managed infrastructure sized for redundancy, the stateless tier in HA, sensible
+# resource requests/limits, a pinned platform version, a cert-manager edge, and the
+# first-admin bootstrap. Tune the numbers to your workload — they are starting points, not
+# universally-correct values.
+#
+# WHAT MAKES IT "PRODUCTION"
+#   - spec.version pinned        → reproducible images; you upgrade deliberately.
+#   - highAvailability.enabled   → stateless components get a multi-replica floor, a
+#                                  PodDisruptionBudget, and node-spread anti-affinity.
+#   - managed DB: 3 instances    → 1 primary + 2 hot standbys (CloudNativePG failover).
+#   - managed broker: 3 replicas → a quorum-capable RabbitMQ cluster.
+#   - managed Keycloak: 2        → an HA identity provider.
+#   - pooler kept ON (default)   → PgBouncer fronts the DB so the fleet never exhausts
+#                                  connection slots; sized up for a busy platform.
+#   - resources set per tier     → requests for scheduling, limits to cap blast radius.
+#   - edge via a corporate CA    → cert-manager issuerRef (swap for letsEncrypt on the
+#                                  public internet — see the tls block).
+#
+# PREREQUISITES
+#   - CloudNativePG, the RabbitMQ Cluster + Messaging Topology operators, and the Keycloak
+#     Operator (all three dependencies are managed).
+#   - cert-manager + an ingress controller (the edge issues a serving cert).
+#   - A cert-manager ClusterIssuer named below (here "corporate-ca") for the edge cert, OR
+#     switch tls.source to letsEncrypt.
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   kubectl create secret generic ilm-trusted-ca -n ilm \
+#     --from-file=ca.crt=path/to/ca-bundle.pem               # CA bundle trusted by all components
+#   # No DB/messaging Secrets — the upstream operators generate those (managed mode).
+#   # The edge TLS Secret and the generated admin cert Secret are created BY cert-manager.
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.18.0"                 # pin the platform bundle (omit → operator's newest)
+  deletionPolicy: Retain            # protect managed data on accidental Platform deletion
+
+  # Stateless-tier HA: 2-replica floor + PDB (minAvailable 1) + node-spread anti-affinity,
+  # all overridable per component (e.g. core uses an HPA below).
+  highAvailability:
+    enabled: true
+
+  common:
+    hostName: ilm.example.com       # canonical public FQDN (edge host, Keycloak, OIDC, CORS)
+    image:
+      registry: hub.omnitrustregistry.com
+      repository: ilm
+      pullPolicy: IfNotPresent
+      pullSecrets: [regcred]
+    logging:
+      level: INFO
+    trustedCertificates:
+      secretRef: ilm-trusted-ca     # CA bundle injected as TRUSTED_CERTIFICATES
+    # Fleet-wide scheduling — pin the whole stateless platform onto a dedicated node pool in
+    # ONE place (each component still overrides/augments; managed infra uses each block's
+    # overrides). nodeSelector merges, tolerations append, affinity replaces per component.
+    nodeSelector: { workload: platform }
+    tolerations:
+      - { key: dedicated, operator: Equal, value: ilm, effect: NoSchedule }
+
+  database:
+    mode: managed
+    managed:
+      instances: 3                  # 1 primary + 2 hot standbys
+      version: "18"
+      storage:
+        size: 100Gi
+        # storageClass: fast-ssd    # pin a fast class in production
+      resources:
+        requests: { cpu: "2", memory: 4Gi }
+        limits: { memory: 8Gi }
+    pgBouncer:
+      managed: true                 # keep the default-on pooler (explicit here for clarity)
+      instances: 2                  # run 2 pooler pods for redundancy
+      parameters:
+        default_pool_size: "50"     # tune per workload (server-side connections per pool)
+        max_client_conn: "2000"     # client-facing connection ceiling
+
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 3                   # quorum-capable cluster
+      version: "4.3.1"
+      storage:
+        size: 20Gi
+      resources:
+        requests: { cpu: "1", memory: 2Gi }
+        limits: { memory: 4Gi }
+
+  keycloak:
+    mode: managed
+    realm: ilm
+    managed:
+      instances: 2                  # HA identity provider
+
+  # Core: autoscale on CPU (the HPA owns the replica count; .spec.replicas is omitted).
+  core:
+    clientCertHeader: ssl-client-cert
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { memory: 2Gi }
+    autoscaling:
+      minReplicas: 3
+      maxReplicas: 8
+      targetCPUUtilization: 70
+    env:
+      - name: JAVA_OPTS
+        value: "-XX:MaxRAMPercentage=75.0"
+
+  # Heavier resource floors for the other always-on components (HA gives them the replica
+  # count + PDB + anti-affinity; these just size the containers).
+  auth:
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { memory: 1Gi }
+  scheduler:
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits: { memory: 1Gi }
+  gateway:
+    trustedIps: ["10.0.0.0/8"]      # trust X-Forwarded-* from the in-cluster LB/ingress range
+
+  # External edge: Ingress + a cert-manager ClusterIssuer (your corporate CA).
+  edge:
+    enabled: true
+    type: ingress
+    className: nginx
+    host: ilm.example.com
+    tls:
+      source: issuerRef             # swap to letsEncrypt for a public cert (needs an ACME email)
+      issuerRef:
+        name: corporate-ca
+        kind: ClusterIssuer
+      # source: letsEncrypt
+      # letsEncrypt: { email: ops@example.com, environment: production }
+
+  # First-admin bootstrap via a cert-manager-issued client certificate (mTLS).
+  registerAdmin:
+    enabled: true
+    username: admin
+    name: Platform
+    lastName: Administrator
+    email: admin@example.com
+    certificate:
+      enabled: true
+      source: generated

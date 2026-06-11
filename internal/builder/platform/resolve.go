@@ -1,0 +1,930 @@
+/*
+Copyright (c) ILM.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+// Package platform builds the Kubernetes resources for a Platform CR. It
+// resolves the CR spec and the operator's versioned wiring profile into the
+// generic common.Component render models. Managed-infra
+// (CloudNativePG/RabbitMQ/Keycloak) and edge (Ingress/Gateway API/cert-manager)
+// builders live in their own files in this package.
+package platform
+
+import (
+	"fmt"
+	"strconv"
+
+	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/internal/builder/common"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
+
+// Well-known intra-platform Service names and ports the operator wires Core to.
+// The operator uses clean, unsuffixed Service names.
+const (
+	authName            = "auth"
+	authOPAPoliciesName = "auth-opa-policies"
+	schedulerName       = "scheduler"
+	feAdministratorName = "fe-administrator"
+	depServicePort      = 8080
+	opaPort             = 8181
+	ephemeralVolumeName = "ephemeral"
+	defaultLogLevel     = "INFO"
+	defaultSyncPolicy   = "create-only"
+	// startupInitialDelaySeconds is the startup.initialDelaySeconds for every stateless
+	// component using httpProbes (scheduler/utils/opa/auth/fe).
+	startupInitialDelaySeconds = 15
+	trustedCertsVolume         = "trusted-certificates-volume"
+	trustedCertsMount          = "/etc/ssl/certs"
+	feConfigVolume             = "fe-administrator-config-volume"
+	feConfigMapName            = "fe-administrator-configmap"
+	feConfigFile               = "config.js"
+	feConfigMountPath          = "/usr/share/nginx/html/config.js"
+	nginxCacheMountPath        = "/var/cache/nginx"
+	tmpMountPath               = "/tmp"
+	defaultFeURLAPI            = "/api"
+	defaultFeURLLogin          = "/login"
+	defaultFeURLLogout         = "/logout"
+	secretVolumeFileMode       = 0o644
+	// binSh is the shell the operator's init/sidecar containers exec their generated scripts with.
+	binSh = "/bin/sh"
+)
+
+// readOnlyRootFS returns a *bool true, for components whose every writable path is
+// backed by a mounted volume so a read-only root filesystem is safe (see the
+// per-component notes at each call site).
+func readOnlyRootFS() *bool { b := true; return &b }
+
+// resolveBundle returns the version bundle the render uses for this Platform: the bundle
+// selected by spec.version, or — defensively — the operator's newest (DefaultVersion)
+// bundle when the version is unknown. The controller already REJECTS an unknown
+// spec.version BEFORE rendering (Reconcile resolves bom.BundleFor once and degrades with
+// an actionable supported-versions message), so an unknown version never reaches a
+// builder in practice; the fallback only keeps the pure builders (and the unit tests,
+// which call them directly) total rather than panicking. spec.version=="" →
+// the DefaultVersion bundle, so the out-of-the-box render is unchanged.
+//
+// Resolving here (off p.Spec.Version) is what makes spec.version REAL end to end: every
+// Resolve* threads the selected bundle's wiring/topology/image coordinates, so selecting a
+// (future) version renders that version's images and env wiring. The map lookup is a few
+// reads per reconcile (one per builder call) — negligible — and keeps builder signatures
+// stable (each already takes *Platform).
+func resolveBundle(p *otilmv1alpha1.Platform) bom.Bundle {
+	if b, ok := bom.BundleFor(p.Spec.Version); ok {
+		return b
+	}
+	b, _ := bom.BundleFor("") // DefaultVersion bundle (always present)
+	return b
+}
+
+// wiringFor returns the wiring profile of the bundle selected by spec.version.
+func wiringFor(p *otilmv1alpha1.Platform) bom.WiringProfile { return resolveBundle(p).Wiring }
+
+// imageCommand resolves the container entrypoint override with per-component-over-shared
+// precedence (spec.<component>.image.command wins over spec.image.command). It returns
+// nil when neither sets a command, so the image's own ENTRYPOINT is used.
+func imageCommand(shared, comp otilmv1alpha1.ImageSpec) []string {
+	if len(comp.Command) > 0 {
+		return comp.Command
+	}
+	return shared.Command
+}
+
+// imageArgs resolves the container args override with the same precedence as
+// imageCommand. It returns nil when neither sets args, so the image's own CMD is used.
+func imageArgs(shared, comp otilmv1alpha1.ImageSpec) []string {
+	if len(comp.Args) > 0 {
+		return comp.Args
+	}
+	return shared.Args
+}
+
+// DefaultImageRegistry mutates the platform's effective shared ImageSpec in place,
+// defaulting an unset spec.image.registry / spec.image.repository to the public ILM
+// registry coordinates (bom.DefaultImageRegistry / bom.DefaultImageRepository). It is
+// the single chokepoint applied once per reconcile (and once in RenderPlatform) BEFORE
+// any common.ResolveImage call,
+// so every ILM component image resolves to hub.omnitrustregistry.com/ilm/<name>:<tag>
+// out of the box rather than the bare "<name>:<tag>" Docker would treat as docker.io.
+//
+// A user-set spec.image.registry / spec.image.repository is left untouched (only empty
+// fields are filled), so an explicit override still wins. It does NOT touch per-
+// component image overrides (spec.<component>.image) — those flow through ResolveImage's
+// per-field precedence and may legitimately point a single component elsewhere; an
+// unset per-component field falls back to this defaulted shared ImageSpec. Defaulting
+// here (not via a kubebuilder marker on the shared ImageSpec type) keeps the default
+// platform-only: ImageSpec is shared with Connector, which has no version bundle and
+// must not inherit the platform registry.
+func DefaultImageRegistry(p *otilmv1alpha1.Platform) {
+	if p.Spec.Common.Image.Registry == "" {
+		p.Spec.Common.Image.Registry = bom.DefaultImageRegistry
+	}
+	if p.Spec.Common.Image.Repository == "" {
+		p.Spec.Common.Image.Repository = bom.DefaultImageRepository
+	}
+}
+
+// ResolveCore resolves the Core component's render model from the Platform spec.
+// Env-var names, service URLs, and the connection-string format come from the
+// versioned wiring profile (bom.Wiring()); the CR's core.env entries are applied
+// last as overrides. Core runs with the OPA sidecar, a wait-for-auth init
+// container, a /tmp ephemeral volume, and readiness/startup probes (see the
+// volume/lifecycle notes below).
+func ResolveCore(p *otilmv1alpha1.Platform) common.Component {
+	b := resolveBundle(p)
+	w := b.Wiring
+	image, policy := common.ResolveImage(b.Lookup, "core", p.Spec.Common.Image, p.Spec.Core.Image)
+
+	c := common.Component{
+		Name: "core", Instance: p.Name, Namespace: p.Namespace,
+		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		// Recreate: Core runs schema migrations at startup. A rolling update would briefly run the
+		// old and new pods together; Recreate terminates the old pod first so a migrating pod is
+		// never interrupted mid-flight — which, with Core's non-idempotent cross-service migrations,
+		// can wedge the schema on the retry. Matches the chart's deploy-once model. See Component.Recreate.
+		Recreate: true,
+		Command:  imageCommand(p.Spec.Common.Image, p.Spec.Core.Image),
+		Args:     imageArgs(p.Spec.Common.Image, p.Spec.Core.Image),
+		Env:      coreEnv(p, w),
+		ConfigMapEnv: []common.ConfigMapEnvRef{
+			{EnvVar: w.MessagingHostEnv, ConfigMapName: w.MessagingConfigMapName, ConfigMapKey: w.MessagingHostKey},
+			{EnvVar: w.MessagingPortEnv, ConfigMapName: w.MessagingConfigMapName, ConfigMapKey: w.MessagingPortKey},
+		},
+		SecretEnv:      coreSecretEnv(p, w),
+		InitContainers: coreInitContainers(p),
+		Sidecars:       []corev1.Container{opaSidecar(p)},
+		// OPA must start BEFORE Core: Core's OIDC postStart (register-internal-keycloak.sh) blocks
+		// on the OPA sidecar's :8181 before PUTting Core's settings API, and the kubelet starts
+		// containers in order + runs postStart synchronously — so OPA-after-Core deadlocks. Mirrors
+		// the chart's core-deployment container order (auth-opa before core).
+		SidecarsFirst: true,
+		Volumes:       []corev1.Volume{ephemeralVolume()},
+		VolumeMounts:  []corev1.VolumeMount{{Name: ephemeralVolumeName, MountPath: "/tmp"}},
+		Probes:        coreProbes(),
+		// Read-only root filesystem: ENABLED. Core is a Spring Boot (JVM) service; its
+		// only writable path is the in-memory /tmp ephemeral volume (the JVM honours
+		// java.io.tmpdir=/tmp). Validated end-to-end against the live core image on Kind
+		// (managed-platform e2e): Core reaches Ready with a read-only root.
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+		// IN-POD bootstrap wiring is layered below via withCoreInPodScripts: it mounts a
+		// "core-scripts" ConfigMap at /opt/ilm/scripts and runs register-admin.sh (the first-admin
+		// registration, certificate method) and/or register-internal-keycloak.sh (managed-Keycloak
+		// OIDC provider) via a lifecycle.postStart hook — because BOTH of Core's target endpoints
+		// (POST /api/v1/local/admins and the settings OIDC PUT) are localhost-only and a cross-pod
+		// call from the operator is rejected.
+	}
+
+	// Layer Core's IN-POD bootstrap wiring (the scripts ConfigMap volume/mount, the postStart
+	// exec, and — for managed Keycloak — the $INTERNAL_OAUTH_SECRET secretKeyRef) BEFORE the user
+	// overrides, so a user could still extend it. It runs register-admin.sh (certificate admin)
+	// and/or register-internal-keycloak.sh (managed Keycloak), both targeting Core's
+	// localhost-only APIs. A no-op when neither the cert admin nor a managed Keycloak applies.
+	c = withCoreInPodScripts(p, c)
+
+	// PROXY_INSTANCE_ID: when proxy support is enabled, Core needs a stable per-pod
+	// identity (a downward-API env), sourced from the pod name via fieldRef
+	// metadata.name. Omitted when proxy is disabled.
+	if p.Spec.Common.Proxy.Enabled {
+		c.FieldRefEnv = []common.FieldRefEnv{
+			{EnvVar: w.ProxyInstanceIDEnv, FieldPath: "metadata.name"},
+		}
+	}
+
+	// Layer the user's per-component overrides (env/resources/replicas/refs/volumes/
+	// probes/securityContext/pod meta/scheduling/init+sidecar/serviceAccount/service) onto
+	// the operator-derived Core component. Defaults stay intact when the spec is empty.
+	applyComponentSpec(p, &c, p.Spec.Core.ComponentSpec)
+	return c
+}
+
+// sharedDBAndMessagingEnv returns the inline and ConfigMap-backed env vars that both
+// Core and scheduler require: the JDBC connection URL, the messaging virtual
+// host, and the ConfigMap-backed broker host/port. It does NOT include credentials —
+// those are always secret-backed and added separately by each caller via
+// sharedCredSecretEnv.
+func sharedDBAndMessagingEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) ([]common.EnvPair, []common.ConfigMapEnvRef) {
+	// Resolve the database coordinates mode-agnostically: external → the spec coordinates,
+	// managed → the CloudNativePG-generated Service/port/database. The JDBC URL is built
+	// from the resolved facts identically in both modes.
+	db := ResolveDatabaseConnection(p)
+	// Resolve the broker vhost mode-agnostically too: external → the spec virtualHost,
+	// managed → the operator-provisioned vhost (spec.messaging.virtualHost or the default).
+	mq := ResolveMessagingConnection(p)
+	env := []common.EnvPair{
+		{Name: w.DatabaseURLEnv, Value: w.DatabaseURL(db.Host, db.Port, db.Name)},
+		{Name: w.MessagingVHostEnv, Value: mq.VirtualHost},
+	}
+	cmEnv := []common.ConfigMapEnvRef{
+		{EnvVar: w.MessagingHostEnv, ConfigMapName: w.MessagingConfigMapName, ConfigMapKey: w.MessagingHostKey},
+		{EnvVar: w.MessagingPortEnv, ConfigMapName: w.MessagingConfigMapName, ConfigMapKey: w.MessagingPortKey},
+	}
+	return env, cmEnv
+}
+
+// sharedCredSecretEnv returns the secretKeyRef wiring for the database and messaging
+// credentials shared between Core and scheduler. When the resolved credentials
+// Secret name is empty the corresponding refs are omitted (the pod is still valid but the
+// service will fail to connect — the operator validates presence at admission time).
+func sharedCredSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.SecretEnvRef {
+	var refs []common.SecretEnvRef
+	// Mode-agnostic DB credentials Secret: the caller's Secret (external) or the
+	// CloudNativePG-generated <cluster>-app Secret (managed). Either way the credentials
+	// are injected by secretKeyRef from that Secret — never copied into the rendered
+	// object. The OUTPUT env-var names stay BOM application contracts; the INPUT in-Secret
+	// keys are the resolved effective keys (the user's external mapping, or the upstream
+	// operator's keys for managed) — see ResolveDatabaseConnection.
+	if db := ResolveDatabaseConnection(p); db.CredentialsSecretName != "" {
+		refs = append(refs,
+			common.SecretEnvRef{EnvVar: w.DatabaseCred.UsernameEnv, SecretName: db.CredentialsSecretName, SecretKey: db.UsernameKey},
+			common.SecretEnvRef{EnvVar: w.DatabaseCred.PasswordEnv, SecretName: db.CredentialsSecretName, SecretKey: db.PasswordKey},
+		)
+	}
+	// Mode-agnostic messaging credentials Secret: the caller's Secret (external) or the
+	// Messaging-Topology-Operator-generated Core-user Secret (managed). Same INPUT-key
+	// mapping rule as the database creds above; the OUTPUT BROKER_* env names stay BOM
+	// contracts.
+	if mq := ResolveMessagingConnection(p); mq.CredentialsSecretName != "" {
+		refs = append(refs,
+			common.SecretEnvRef{EnvVar: w.MessagingCred.UsernameEnv, SecretName: mq.CredentialsSecretName, SecretKey: mq.UsernameKey},
+			common.SecretEnvRef{EnvVar: w.MessagingCred.PasswordEnv, SecretName: mq.CredentialsSecretName, SecretKey: mq.PasswordKey},
+		)
+	}
+	return refs
+}
+
+// coreEnv composes Core's inline (static/derived) environment variables. Secret-
+// and ConfigMap-backed vars are added separately (see coreSecretEnv and the
+// ConfigMapEnv wiring in ResolveCore). Env-var names come from the wiring profile.
+func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
+	headerName := p.Spec.Core.ClientCertHeader
+	if headerName == "" {
+		headerName = w.HeaderNameValue
+	}
+	logLevel := p.Spec.Common.Logging.Level
+	if logLevel == "" {
+		logLevel = defaultLogLevel
+	}
+
+	// Shared DB URL + messaging vhost from the helper; Core adds its extra static
+	// service-URL, header, proxy, and provisioning env on top.
+	sharedEnv, _ := sharedDBAndMessagingEnv(p, w)
+
+	env := []common.EnvPair{
+		{Name: w.HeaderEnabledEnv, Value: "true"},
+		{Name: w.HeaderNameEnv, Value: headerName},
+		{Name: w.OPABaseURLEnv, Value: w.OPABaseURL},
+		{Name: w.AuthURLEnv, Value: w.AuthURL},
+		{Name: w.SchedulerURLEnv, Value: w.SchedulerURL},
+		{Name: w.LoggingLevelEnv, Value: logLevel},
+		{Name: w.ProvisioningURLEnv, Value: provisioningAPIURL(p)},
+		{Name: w.ProxyEnabledEnv, Value: strconv.FormatBool(p.Spec.Common.Proxy.Enabled)},
+	}
+	// Splice shared DB/messaging env at a stable position (after the header env,
+	// before the proxy env) for a deterministic env ordering.
+	env = append(env[:2], append(sharedEnv, env[2:]...)...)
+
+	// Proxy URLs are only injected when set.
+	if p.Spec.Common.Proxy.HTTP != "" {
+		env = append(env, common.EnvPair{Name: w.HTTPProxyEnv, Value: p.Spec.Common.Proxy.HTTP})
+	}
+	if p.Spec.Common.Proxy.HTTPS != "" {
+		env = append(env, common.EnvPair{Name: w.HTTPSProxyEnv, Value: p.Spec.Common.Proxy.HTTPS})
+	}
+	if p.Spec.Common.Proxy.NoProxy != "" {
+		env = append(env, common.EnvPair{Name: w.NoProxyEnv, Value: p.Spec.Common.Proxy.NoProxy})
+	}
+	return env
+}
+
+// coreSecretEnv lists Core's secret-backed env vars, all sourced via secretKeyRef
+// from user-provided Secrets — the operator never copies the values into the
+// rendered objects. DB and messaging creds come from the shared helper; Core adds
+// its own trusted-certificates, provisioning-API-key, and (when the optional admin
+// bootstrap is enabled) admin-certificate on top.
+func coreSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.SecretEnvRef {
+	refs := sharedCredSecretEnv(p, w)
+	// TRUSTED_CERTIFICATES is sourced from the effective trusted-certs Secret: the
+	// caller's SecretRef verbatim, or — when the admin bootstrap requires Core to also
+	// trust a generated admin CA — the operator-composed trusted-certificates Secret
+	// (see TrustedCertsSecretName / reconcileTrustedCerts). The value is never inlined.
+	//
+	// Optional=true: the trusted-cert Secret can legitimately lag behind Core (the
+	// operator-composed bundle, or a cert-manager CA Secret being minted), so an
+	// optional secretKeyRef lets Core START rather than wedge with
+	// CreateContainerConfigError. When the Secret later appears, the trusted-certs
+	// checksum annotation already wired on Core's pod template (reconcileTrustedCerts +
+	// StampConfigChecksum) changes the pod-template hash and rolls Core to pick it up.
+	if ref := TrustedCertsSecretName(p); ref != "" {
+		refs = append(refs, common.SecretEnvRef{
+			EnvVar: w.TrustedCertificates.Env, SecretName: ref, SecretKey: TrustedCertsSecretKey(p),
+			Optional: true,
+		})
+	}
+	if ref := provisioningAPIKeySecretRef(p); ref != "" {
+		refs = append(refs, common.SecretEnvRef{
+			EnvVar: w.ProvisioningAPIKey.Env, SecretName: ref, SecretKey: ProvisioningAPIKeyKey(p),
+		})
+	}
+	// ADMIN_CERT: only when registerAdmin is enabled, sourced via secretKeyRef from
+	// the admin client-certificate Secret's tls.crt key (the caller's SecretRef for
+	// source=provided, or the cert-manager-populated admin-certificate-secret for
+	// source=generated). Omitted when admin bootstrap is disabled. The cert value is
+	// never inlined — only referenced.
+	//
+	// Optional=true: for source=generated the admin cert Secret is minted by
+	// cert-manager and is not present the instant Core is applied; an optional
+	// secretKeyRef lets Core START (no CreateContainerConfigError wedge). When the cert
+	// Secret later appears, the trusted-certs checksum roll (above) re-rolls Core, which
+	// then resolves ADMIN_CERT. The reconciler also gates the registration action on the
+	// cert being present, so a missing cert never registers a half-configured admin.
+	if ref := adminCertSecretRef(p); ref != "" {
+		refs = append(refs, common.SecretEnvRef{
+			EnvVar: w.AdminCert.Env, SecretName: ref, SecretKey: AdminCertKey(p),
+			Optional: true,
+		})
+	}
+	return refs
+}
+
+// coreProbes returns Core's readiness and startup probes against the HTTP service
+// port. Readiness hits the readiness endpoint (gating Service traffic); startup hits
+// the liveness endpoint with a long failure budget (45 × 10s) so a slow boot — notably
+// the Flyway schema migration — is tolerated before liveness/traffic gating begins.
+//
+// Core intentionally has NO liveness probe, consistent with every other platform
+// component (httpProbes omits liveness fleet-wide) and with the chart, which ships
+// Core's image.probes.liveness.enabled=false. A liveness probe only earns its keep when
+// it recovers an unrecoverable in-process deadlock; Core has none. Its real-world effect
+// is the opposite: a probe that trips during a transient stall (a long migration, a GC
+// pause, a slow dependency) kills a healthy-but-busy pod, converting a recoverable blip
+// into a hard restart — and, mid-migration through a pooled connection, into schema
+// corruption. Readiness already removes a wedged pod from traffic without killing it;
+// startup already covers a slow boot. Liveness here is pure downside.
+func coreProbes() common.Probes {
+	port := intstr.FromInt32(depServicePort)
+	httpGet := func(path string) *corev1.Probe {
+		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: path, Port: port}}}
+	}
+	readiness := httpGet("/api/v1/health/readiness")
+	readiness.InitialDelaySeconds = 15
+	startup := httpGet("/api/v1/health/liveness")
+	startup.InitialDelaySeconds = 15
+	startup.PeriodSeconds = 10
+	startup.FailureThreshold = 45
+	return common.Probes{Readiness: readiness, Startup: startup}
+}
+
+// ephemeralVolume returns the /tmp scratch volume: an in-memory emptyDir (medium
+// Memory, 1Mi size limit).
+func ephemeralVolume() corev1.Volume {
+	sizeLimit := resource.MustParse("1Mi")
+	return corev1.Volume{
+		Name: ephemeralVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &sizeLimit,
+			},
+		},
+	}
+}
+
+// opaSidecar returns the OPA policy-engine sidecar ("auth-opa"). It runs as a
+// server on :8181 and pulls its policy bundle from the auth-opa-policies Service.
+// The builder SCC-hardens it automatically (filling the four SCC fields around the
+// read-only-root flag set here).
+//
+// Read-only root filesystem: ENABLED. OPA pulls its bundle over HTTP into memory and
+// writes nothing to disk by default, so a read-only root is safe.
+func opaSidecar(p *otilmv1alpha1.Platform) corev1.Container {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "opa", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   "/health?bundle=true",
+				Port:   intstr.FromInt32(opaPort),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: 5,
+		TimeoutSeconds:      5,
+		PeriodSeconds:       10,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
+	}
+	return corev1.Container{
+		Name:            "auth-opa",
+		Image:           image,
+		ImagePullPolicy: policy,
+		Ports:           []corev1.ContainerPort{{ContainerPort: opaPort}},
+		Args: []string{
+			"run",
+			"--server",
+			"--addr=0.0.0.0:8181",
+			fmt.Sprintf("--set=services.nginx.url=http://%s:%d", authOPAPoliciesName, depServicePort),
+			"--set=bundles.nginx.service=nginx",
+			"--set=bundles.nginx.resource=bundles/bundle.tar.gz",
+		},
+		ReadinessProbe:  probe,
+		StartupProbe:    probe.DeepCopy(),
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
+	}
+}
+
+// ResolveScheduler resolves the scheduler component's render model.
+// It is a Java service that requires the platform's database and messaging broker.
+// Credentials are sourced from the same platform-level Secrets as Core (no
+// per-service Secrets are invented). The broker host/port come from the shared
+// messaging ConfigMap. An init container blocks startup until the broker is reachable.
+//
+// DB credentials: like Core, scheduler injects JDBC_USERNAME/JDBC_PASSWORD by
+// secretKeyRef straight from the user-referenced database credentials Secret
+// (sharedCredSecretEnv) — the operator never copies the values into a rendered Secret.
+// (auth-db is the one composed Secret, and only because .NET needs a transformed
+// connection string; plain user/pass needs no transform, so no scheduler Secret is
+// rendered.)
+func ResolveScheduler(p *otilmv1alpha1.Platform) common.Component {
+	b := resolveBundle(p)
+	w := b.Wiring
+	image, policy := common.ResolveImage(b.Lookup, schedulerName, p.Spec.Common.Image, p.Spec.Scheduler.Image)
+
+	logLevel := p.Spec.Common.Logging.Level
+	if logLevel == "" {
+		logLevel = defaultLogLevel
+	}
+
+	sharedEnv, sharedCMEnv := sharedDBAndMessagingEnv(p, w)
+	// Scheduler has PORT and LOGGING_LEVEL_COM_CZERTAINLY as inline env;
+	// DB URL and messaging vhost come from the shared helper.
+	env := []common.EnvPair{
+		{Name: "PORT", Value: fmt.Sprintf("%d", depServicePort)},
+		{Name: w.LoggingLevelEnv, Value: logLevel},
+	}
+	env = append(env, sharedEnv...)
+
+	c := common.Component{
+		Name: schedulerName, Instance: p.Name, Namespace: p.Namespace,
+		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		Command:        imageCommand(p.Spec.Common.Image, p.Spec.Scheduler.Image),
+		Args:           imageArgs(p.Spec.Common.Image, p.Spec.Scheduler.Image),
+		Env:            env,
+		ConfigMapEnv:   sharedCMEnv,
+		SecretEnv:      sharedCredSecretEnv(p, w),
+		InitContainers: []corev1.Container{waitForMessagingInitContainer(p)},
+		Volumes:        []corev1.Volume{ephemeralVolume()},
+		VolumeMounts:   []corev1.VolumeMount{{Name: ephemeralVolumeName, MountPath: "/tmp"}},
+		Probes:         schedulerProbes(),
+		// Read-only root filesystem: ENABLED. JVM service whose only writable path is the
+		// in-memory /tmp ephemeral volume. Validated against the live scheduler
+		// image on Kind (managed-platform e2e): reaches Ready with a read-only root.
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+	}
+	applyComponentSpec(p, &c, p.Spec.Scheduler.ComponentSpec)
+	return c
+}
+
+// httpProbes builds a readiness+startup probe pair from per-component paths and
+// the readiness initial delay. The startup initial delay is the fleet-wide default
+// (startupInitialDelaySeconds) and the liveness probe is intentionally omitted for
+// these stateless components.
+func httpProbes(readinessPath string, readinessInitialDelay int32, startupPath string) common.Probes {
+	return httpProbesOn(readinessPath, readinessInitialDelay, startupPath, depServicePort)
+}
+
+// httpProbesOn is httpProbes parameterized by the container port, for a component whose
+// primary port is not the shared depServicePort (e.g. the provisioning-rabbitmq service on
+// 8077). The probe parameters (timeouts/thresholds) are the same fleet-wide defaults.
+func httpProbesOn(readinessPath string, readinessInitialDelay int32, startupPath string, containerPort int32) common.Probes {
+	port := intstr.FromInt32(containerPort)
+	httpGet := func(path string) *corev1.Probe {
+		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: path, Port: port}}}
+	}
+	readiness := httpGet(readinessPath)
+	readiness.InitialDelaySeconds = readinessInitialDelay
+	readiness.TimeoutSeconds = 5
+	readiness.PeriodSeconds = 10
+	readiness.SuccessThreshold = 1
+	readiness.FailureThreshold = 3
+	startup := httpGet(startupPath)
+	startup.InitialDelaySeconds = startupInitialDelaySeconds
+	startup.TimeoutSeconds = 5
+	startup.PeriodSeconds = 10
+	startup.SuccessThreshold = 1
+	startup.FailureThreshold = 45
+	return common.Probes{Readiness: readiness, Startup: startup}
+}
+
+// schedulerProbes returns scheduler's readiness (path /health/readiness) and
+// startup (path /health/liveness) probes; liveness is intentionally omitted.
+func schedulerProbes() common.Probes {
+	return httpProbes("/health/readiness", 15, "/health/liveness")
+}
+
+// waitForMessagingInitContainer returns the "wait-for-messaging-service" init
+// container used by scheduler: a simple nc loop that blocks until the
+// broker AMQP port is reachable.
+func waitForMessagingInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+	// Resolve the broker host/port mode-agnostically so a managed broker waits on the
+	// RabbitMQ Service, an external one on the caller's host.
+	mq := ResolveMessagingConnection(p)
+	script := fmt.Sprintf("while ! nc -z %s %d; do sleep 1; done &&\necho \"messaging service seems to be started\"\n",
+		mq.Host, mq.Port)
+	return corev1.Container{
+		Name:            "wait-for-messaging-service",
+		Image:           image,
+		ImagePullPolicy: policy,
+		Command:         []string{binSh, "-c", script},
+		// Read-only root filesystem: ENABLED. A pure nc-poll loop writes nothing to disk.
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
+	}
+}
+
+// ResolveUtils resolves the utils component's render model.
+// It is a minimal Java service with no database or messaging dependencies.
+// It is only included when spec.utils.enabled is true.
+func ResolveUtils(p *otilmv1alpha1.Platform) common.Component {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "utils", p.Spec.Common.Image, p.Spec.Utils.Image)
+
+	logLevel := p.Spec.Common.Logging.Level
+	if logLevel == "" {
+		logLevel = defaultLogLevel
+	}
+
+	c := common.Component{
+		Name: "utils", Instance: p.Name, Namespace: p.Namespace,
+		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		Command: imageCommand(p.Spec.Common.Image, p.Spec.Utils.Image),
+		Args:    imageArgs(p.Spec.Common.Image, p.Spec.Utils.Image),
+		Env: []common.EnvPair{
+			{Name: "PORT", Value: fmt.Sprintf("%d", depServicePort)},
+			{Name: "LOG_LEVEL", Value: logLevel},
+		},
+		Volumes:      []corev1.Volume{ephemeralVolume()},
+		VolumeMounts: []corev1.VolumeMount{{Name: ephemeralVolumeName, MountPath: "/tmp"}},
+		Probes:       utilsProbes(),
+		// Read-only root filesystem: ENABLED. Minimal JVM service whose only writable path
+		// is the in-memory /tmp ephemeral volume. Validated against the live utils
+		// image on Kind (managed-platform e2e): reaches Ready with a read-only root.
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+	}
+	applyComponentSpec(p, &c, p.Spec.Utils.ComponentSpec)
+	return c
+}
+
+// utilsProbes returns utils's readiness (path /health/readiness) and startup
+// (path /health/liveness) probes; liveness is intentionally omitted.
+func utilsProbes() common.Probes {
+	return httpProbes("/health/readiness", 15, "/health/liveness")
+}
+
+// ResolveAuthOpaPolicies resolves the auth-opa-policies component's render model.
+// It is an nginx bundle server that serves the OPA policy bundle to Core's OPA
+// sidecar. It has no environment variables, and a single ephemeral volume backs both
+// /var/cache/nginx and /tmp.
+//
+// Read-only root filesystem: ENABLED. nginx's only writable paths are its cache
+// (/var/cache/nginx) and /tmp, both backed by the in-memory ephemeral volume, so a
+// read-only root is safe (the standard hardened-nginx carve-out).
+func ResolveAuthOpaPolicies(p *otilmv1alpha1.Platform) common.Component {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, authOPAPoliciesName, p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image)
+	c := common.Component{
+		Name: authOPAPoliciesName, Instance: p.Name, Namespace: p.Namespace,
+		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		Command: imageCommand(p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image),
+		Args:    imageArgs(p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image),
+		// No env vars — nginx serves a static bundle; all configuration is baked in.
+		Volumes: []corev1.Volume{ephemeralVolume()},
+		// The same ephemeral volume is mounted at both /var/cache/nginx and /tmp.
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: ephemeralVolumeName, MountPath: "/var/cache/nginx"},
+			{Name: ephemeralVolumeName, MountPath: "/tmp"},
+		},
+		Probes:                 opaProbes(),
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+	}
+	applyComponentSpec(p, &c, p.Spec.AuthOpaPolicies.ComponentSpec)
+	return c
+}
+
+// opaProbes returns auth-opa-policies' readiness (path /index.html) and startup
+// (same path) probes; liveness is intentionally omitted.
+func opaProbes() common.Probes {
+	return httpProbes("/index.html", 5, "/index.html")
+}
+
+// ResolveAuth resolves the auth component's render model. auth
+// is the .NET authentication service. Its container is named "auth". It receives
+// static AUTH_* / SYNC_POLICY / ASPNETCORE_URLS env inline and its database connection
+// string via secretKeyRef from an operator-managed Secret (see the controller's
+// reconcileAuthDBSecret): the operator composes that string so the credential lives
+// ONLY in that Secret and is never inlined here, in env values, or anywhere in the
+// rendered objects. A trusted-CA bundle is volume-mounted at /etc/ssl/certs when configured.
+func ResolveAuth(p *otilmv1alpha1.Platform) common.Component {
+	b := resolveBundle(p)
+	w := b.Wiring
+	image, policy := common.ResolveImage(b.Lookup, authName, p.Spec.Common.Image, p.Spec.Auth.Image)
+
+	syncPolicy := p.Spec.Auth.SyncPolicy
+	if syncPolicy == "" {
+		syncPolicy = defaultSyncPolicy
+	}
+
+	c := common.Component{
+		Name: authName, Instance: p.Name, Namespace: p.Namespace,
+		ContainerName: "auth", // the container is named "auth", not "auth"
+		Image:         image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		// Recreate: auth runs DB schema migrations at startup — never run two migrating
+		// pods concurrently (see Component.Recreate / Core above).
+		Recreate: true,
+		Command:  imageCommand(p.Spec.Common.Image, p.Spec.Auth.Image),
+		Args:     imageArgs(p.Spec.Common.Image, p.Spec.Auth.Image),
+		Env: []common.EnvPair{
+			{Name: w.AuthCreateUsersEnv, Value: strconv.FormatBool(p.Spec.Auth.Create.CreateUnknownUsers)},
+			{Name: w.AuthCreateRolesEnv, Value: strconv.FormatBool(p.Spec.Auth.Create.CreateUnknownRoles)},
+			{Name: w.AuthSyncPolicyEnv, Value: syncPolicy},
+			{Name: w.AuthAspNetURLsEnv, Value: w.AuthAspNetURLs},
+		},
+		// The connection string is composed by the operator and read from the
+		// operator-managed Secret — never inlined. The Secret is created by the
+		// controller before the workload is applied.
+		SecretEnv: []common.SecretEnvRef{
+			{EnvVar: w.AuthDBConnEnv, SecretName: w.AuthDBSecretName, SecretKey: w.AuthDBSecretKey},
+		},
+		Probes: authProbes(),
+		// Read-only root filesystem: ENABLED. auth is a .NET (ASP.NET Core)
+		// service; unlike the JVM components it writes outside the image layers (the
+		// data-protection keyring + general temp files), so it needs a writable /tmp. We
+		// add the in-memory /tmp ephemeral volume here (the JVM components already carry
+		// one) and point the runtime at it (TMPDIR=/tmp) so a read-only root is safe.
+		// Validated against the live auth image on Kind (managed-platform e2e).
+		Volumes:                []corev1.Volume{ephemeralVolume()},
+		VolumeMounts:           []corev1.VolumeMount{{Name: ephemeralVolumeName, MountPath: tmpMountPath}},
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+	}
+	// TMPDIR pins the process temp dir to the writable /tmp ephemeral volume so the .NET
+	// runtime (and any libraries honouring TMPDIR) never attempts to write to the now
+	// read-only root. Prepended so an explicit auth.env override could still win.
+	c.Env = append([]common.EnvPair{{Name: "TMPDIR", Value: tmpMountPath}}, c.Env...)
+
+	// Trusted CA bundle: mounted as a read-only volume at /etc/ssl/certs. The cert value
+	// is never inlined. Uses the effective trusted-certs Secret name so auth mounts
+	// the same bundle Core trusts (the operator-composed Secret when source=generated).
+	if ref := TrustedCertsSecretName(p); ref != "" {
+		mode := int32(secretVolumeFileMode)
+		c.Volumes = append(c.Volumes, corev1.Volume{
+			Name: trustedCertsVolume,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: ref, DefaultMode: &mode},
+			},
+		})
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name: trustedCertsVolume, MountPath: trustedCertsMount, ReadOnly: true,
+		})
+	}
+	applyComponentSpec(p, &c, p.Spec.Auth.ComponentSpec)
+	return c
+}
+
+// authProbes returns auth's readiness and startup probes (both
+// against /health); liveness is intentionally omitted.
+func authProbes() common.Probes {
+	return httpProbes("/health", 5, "/health")
+}
+
+// ResolveFeAdministrator resolves the fe-administrator component's render model.
+// fe-administrator is a static nginx front-end. Its single static config file
+// (config.js) is mounted (subPath) from the fe-administrator ConfigMap at
+// /usr/share/nginx/html/config.js; nginx's writable paths (/var/cache/nginx, /tmp)
+// are backed by an in-memory ephemeral volume so the root filesystem stays read-only.
+func ResolveFeAdministrator(p *otilmv1alpha1.Platform) common.Component {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, feAdministratorName, p.Spec.Common.Image, p.Spec.FeAdministrator.Image)
+
+	c := common.Component{
+		Name: feAdministratorName, Instance: p.Name, Namespace: p.Namespace,
+		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
+		Command: imageCommand(p.Spec.Common.Image, p.Spec.FeAdministrator.Image),
+		Args:    imageArgs(p.Spec.Common.Image, p.Spec.FeAdministrator.Image),
+		// No environment variables — runtime configuration is served from config.js.
+		Volumes: []corev1.Volume{feConfigVolumeSource(), ephemeralVolume()},
+		// config.js is mounted via subPath so it appears as a single file inside the
+		// served document root; the ephemeral volume backs both nginx writable paths.
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: feConfigVolume, MountPath: feConfigMountPath, SubPath: feConfigFile},
+			{Name: ephemeralVolumeName, MountPath: nginxCacheMountPath},
+			{Name: ephemeralVolumeName, MountPath: tmpMountPath},
+		},
+		Probes: feAdministratorProbes(),
+		// Read-only root filesystem: ENABLED. The served root is a baked-in image layer;
+		// the only writable paths (nginx cache + /tmp) are backed by the in-memory
+		// ephemeral volume, and config.js is a read-only subPath mount.
+		ReadOnlyRootFilesystem: readOnlyRootFS(),
+	}
+	applyComponentSpec(p, &c, p.Spec.FeAdministrator.ComponentSpec)
+	return c
+}
+
+// feConfigVolumeSource returns the pod volume that projects the fe-administrator
+// ConfigMap's config.js as a single named item.
+func feConfigVolumeSource() corev1.Volume {
+	return corev1.Volume{
+		Name: feConfigVolume,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: feConfigMapName},
+				Items:                []corev1.KeyToPath{{Key: feConfigFile, Path: feConfigFile}},
+			},
+		},
+	}
+}
+
+// feAdministratorProbes returns fe-administrator's readiness and startup probes
+// against "/"; liveness is intentionally omitted.
+func feAdministratorProbes() common.Probes {
+	return httpProbes("/", 5, "/")
+}
+
+// provisioningAPIURL returns the provisioning API base URL Core is wired to:
+//
+//   - mode=deploy → the in-cluster URL of the operator-rendered provisioning Service
+//     (http://provisioning-rabbitmq:8077), so Core calls the bundled service the operator
+//     manages, not the (ignored) spec.apiURL;
+//   - mode=external → the configured spec.provisioning.apiURL (today's behaviour);
+//   - provisioning not configured (nil block) → "".
+//
+// It is the single nil-safe accessor the env wiring and the configured/gate helpers read.
+func provisioningAPIURL(p *otilmv1alpha1.Platform) string {
+	if p.Spec.Provisioning == nil {
+		return ""
+	}
+	if ProvisioningDeploy(p) {
+		return fmt.Sprintf("http://%s:%d", provisioningName, provisioningPort)
+	}
+	return p.Spec.Provisioning.APIURL
+}
+
+// provisioningAPIKeySecretRef returns the Secret name Core's PROVISIONING_API_KEY is sourced
+// from: the deploy bootstrap Secret (mode=deploy — the same Secret + key that backs the
+// deployed service's SECURITY_API_KEY) or the caller's spec.apiKeySecretRef (mode=external).
+// "" when unset.
+func provisioningAPIKeySecretRef(p *otilmv1alpha1.Platform) string {
+	pr := p.Spec.Provisioning
+	if pr == nil {
+		return ""
+	}
+	if ProvisioningDeploy(p) {
+		return pr.Deploy.BootstrapSecretRef
+	}
+	return pr.APIKeySecretRef
+}
+
+// provisioningConfigured reports whether the platform points Core at a provisioning API —
+// either an external one (a non-empty spec.provisioning.apiURL) or the operator-
+// deployed bundled service (mode=deploy). It gates both Core's PROVISIONING_API_URL wiring
+// and the provision-instance-queue init container, so the init container also runs against
+// the deployed service.
+func provisioningConfigured(p *otilmv1alpha1.Platform) bool {
+	return provisioningAPIURL(p) != ""
+}
+
+// coreInitContainers returns Core's ordered init containers. wait-for-auth
+// always runs first; the provision-instance-queue init container is appended only
+// on the proxy path (spec.proxy.enabled AND a provisioning API configured). Both are
+// SCC-hardened by the common BuildDeployment path.
+func coreInitContainers(p *otilmv1alpha1.Platform) []corev1.Container {
+	inits := []corev1.Container{waitForAuthInitContainer(p)}
+	if p.Spec.Common.Proxy.Enabled && provisioningConfigured(p) {
+		inits = append(inits, provisionInstanceQueueInitContainer(p))
+	}
+	return inits
+}
+
+// provisionInstanceQueueInitContainer returns the "provision-instance-queue" init
+// container rendered on Core when proxy support is enabled and a provisioning API
+// is configured (see coreInitContainers). It registers this pod's own per-instance
+// AMQP queue with the provisioning API by POSTing to <apiURL>/api/v1/queues, naming
+// the queue after the pod hostname, and retries until the call succeeds (so the
+// queue exists before Core starts consuming). The optional X-API-Key header is
+// sourced via secretKeyRef from the provisioning Secret (spec.provisioning.
+// apiKeySecretRef) — never inlined — and the request omits the header when no key
+// is configured. The builder SCC-hardens it.
+func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
+	b := resolveBundle(p)
+	w := b.Wiring
+	image, policy := common.ResolveImage(b.Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+
+	// PROVISIONING_API_URL is inline (non-secret); the API key, when configured, is
+	// referenced via secretKeyRef from the user-provided provisioning Secret so the
+	// value never lands in the rendered manifest, env value, or logs.
+	env := []corev1.EnvVar{{Name: w.ProvisioningURLEnv, Value: provisioningAPIURL(p)}}
+	if ref := provisioningAPIKeySecretRef(p); ref != "" {
+		env = append(env, corev1.EnvVar{
+			Name: w.ProvisioningAPIKey.Env,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: ref},
+					Key:                  ProvisioningAPIKeyKey(p),
+				},
+			},
+		})
+	}
+
+	// Per-pod, self-idempotent retry loop: name the queue after this pod's hostname,
+	// include the X-API-Key header only when PROVISIONING_API_KEY is set, and retry
+	// until the POST succeeds.
+	script := `HOSTNAME=$(hostname)
+until
+  if [ -n "${PROVISIONING_API_KEY:-}" ]; then
+    curl -sf -X POST "${PROVISIONING_API_URL}/api/v1/queues" \
+      -H "Content-Type: application/json" \
+      -H "X-API-Key: ${PROVISIONING_API_KEY}" \
+      -d "{
+        \"name\": \"${HOSTNAME}\",
+        \"exchange\": \"czertainly-proxy\",
+        \"routingKey\": \"proxymessage.*.${HOSTNAME}\",
+        \"properties\": { \"x-expires\": 1800000 }
+      }"
+  else
+    curl -sf -X POST "${PROVISIONING_API_URL}/api/v1/queues" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"name\": \"${HOSTNAME}\",
+        \"exchange\": \"czertainly-proxy\",
+        \"routingKey\": \"proxymessage.*.${HOSTNAME}\",
+        \"properties\": { \"x-expires\": 1800000 }
+      }"
+  fi
+do
+  echo "Waiting for provisioning API at ${PROVISIONING_API_URL}..."
+  sleep 5
+done
+echo "Instance queue provisioned for ${HOSTNAME}"
+`
+	return corev1.Container{
+		Name:            "provision-instance-queue",
+		Image:           image,
+		ImagePullPolicy: policy,
+		Env:             env,
+		Command:         []string{binSh, "-c", script},
+		// Read-only root filesystem: ENABLED. A curl/POST retry loop writes nothing to disk.
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
+	}
+}
+
+// waitForAuthInitContainer returns the "wait-for-auth" init
+// container: a shell loop that blocks until auth, auth-opa-policies, the
+// message broker, and scheduler are all reachable. The builder SCC-hardens
+// it automatically. (The proxy-path provision-instance-queue init container is
+// rendered separately by coreInitContainers.)
+func waitForAuthInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+	// Resolve the broker host/port mode-agnostically so a managed broker waits on the
+	// RabbitMQ Service, an external one on the caller's host.
+	mq := ResolveMessagingConnection(p)
+	script := fmt.Sprintf(`while ! nc -z %s %d; do sleep 1; done &&
+while ! nc -z %s %d; do sleep 1; done &&
+echo "auth service seems to be started" &&
+while ! nc -z %s %d; do sleep 1; done &&
+while ! nc -z %s %d; do sleep 1; done &&
+echo "messaging and scheduler service seems to be started"
+`,
+		authName, depServicePort,
+		authOPAPoliciesName, depServicePort,
+		mq.Host, mq.Port,
+		schedulerName, depServicePort,
+	)
+	return corev1.Container{
+		Name:            "wait-for-auth",
+		Image:           image,
+		ImagePullPolicy: policy,
+		Command:         []string{binSh, "-c", script},
+		// Read-only root filesystem: ENABLED. A pure nc-poll loop writes nothing to disk.
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
+	}
+}
