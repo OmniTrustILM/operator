@@ -5,7 +5,7 @@ name: Publish release manifests
 #
 #   ilm-operator.yaml       — self-contained install (Namespace + CRDs + RBAC + manager),
 #                             image pinned to this release tag. No cert-manager required.
-#   ilm-operator.crds.yaml  — CRDs only (Connector + Platform), for CRD-first / GitOps installs.
+#   ilm-operator.crds.yaml  — CRDs only (Connector + Platform + Proxy), for CRD-first / GitOps installs.
 #   checksums.txt           — sha256 of both manifests.
 #   *.sig                   — cosign signatures of each manifest and of checksums.txt.
 #

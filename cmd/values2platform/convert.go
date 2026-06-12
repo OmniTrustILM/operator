@@ -329,7 +329,7 @@ func (r *ConversionResult) mapProxy(global vals, spec *otilmv1alpha1.PlatformSpe
 	if http == "" && https == "" && no == "" {
 		return
 	}
-	spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true, HTTP: http, HTTPS: https, NoProxy: no}
+	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true, HTTP: http, HTTPS: https, NoProxy: no}
 }
 
 // mapLogging maps the top-level logging.level onto spec.common.logging.level. The chart's

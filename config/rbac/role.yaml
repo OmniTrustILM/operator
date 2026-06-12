@@ -119,6 +119,7 @@ rules:
   - otilm.com
   resources:
   - connectors
+  - proxies
   verbs:
   - get
   - list
@@ -130,6 +131,7 @@ rules:
   resources:
   - connectors/finalizers
   - platforms/finalizers
+  - proxies/finalizers
   verbs:
   - update
 - apiGroups:
@@ -137,6 +139,7 @@ rules:
   resources:
   - connectors/status
   - platforms/status
+  - proxies/status
   verbs:
   - get
   - patch

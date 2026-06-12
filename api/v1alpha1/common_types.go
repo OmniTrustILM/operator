@@ -21,7 +21,7 @@ SOFTWARE.
 */
 
 // common_types.go defines the generic building-block spec types shared by the
-// otilm.com CRDs (Connector and Platform). Keeping them in one place guarantees
+// otilm.com CRDs (Connector, Platform, and Proxy). Keeping them in one place guarantees
 // that every CRD renders these sub-objects with an identical schema. The
 // canonical package doc lives in groupversion_info.go.
 

@@ -110,6 +110,9 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 	if len(initContainers) > 0 {
 		podSpec.InitContainers = initContainers
 	}
+	if c.TerminationGracePeriodSeconds != nil {
+		podSpec.TerminationGracePeriodSeconds = c.TerminationGracePeriodSeconds
+	}
 	if len(c.Volumes) > 0 {
 		podSpec.Volumes = c.Volumes
 	}

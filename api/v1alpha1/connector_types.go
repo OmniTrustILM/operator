@@ -183,6 +183,48 @@ type ConnectorSpec struct {
 	// +optional
 	Metrics *MetricsSpec `json:"metrics,omitempty"`
 
+	// NodeSelector constrains the connector pods to nodes with matching labels —
+	// e.g. nodes with reachability to an HSM or appliance network segment.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations allow the connector pods to schedule onto tainted nodes.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// InitContainers are extra init containers run before the main container (e.g.
+	// wait-for-dependency). They are SCC-hardened like every other container, so a
+	// user init container cannot weaken pod security. The schema is preserved
+	// opaquely (x-kubernetes-preserve-unknown-fields) to keep the CRD compact; the
+	// Go type stays []corev1.Container so it marshals correctly and the kubelet
+	// validates it.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+
+	// Sidecars are extra containers run alongside the main container (e.g. a vault
+	// agent or log shipper). They are SCC-hardened like every other container. The
+	// schema is preserved opaquely for the same CRD-size reason as InitContainers.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Sidecars []corev1.Container `json:"sidecars,omitempty"`
+
+	// Affinity sets the pod's affinity/anti-affinity and node affinity rules. The
+	// schema is preserved opaquely (x-kubernetes-preserve-unknown-fields) to keep
+	// the CRD compact; the apiserver/kubelet still validate it as a PodSpec field.
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// ServiceAccount overrides the dedicated ServiceAccount's name (e.g. to bind a
+	// pre-created workload-identity ServiceAccount) and stamps extra annotations on
+	// it (e.g. an AWS IRSA role-arn or a GCP/Azure workload-identity binding).
+	// +optional
+	ServiceAccount *ServiceAccountSpec `json:"serviceAccount,omitempty"`
+
 	// Registration defines the platform registration configuration.
 	// +optional
 	Registration *RegistrationSpec `json:"registration,omitempty"`

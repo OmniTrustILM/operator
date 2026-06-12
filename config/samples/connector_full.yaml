@@ -118,3 +118,24 @@ spec:
       interval: 30s
       labels:
         release: prometheus
+
+  # Placement, workload identity, and extra containers (all optional). User-supplied
+  # sidecars/init containers are SCC-hardened by the operator — they cannot weaken
+  # restricted-v2 pod security.
+  nodeSelector:
+    hsm-zone: a
+  tolerations:
+    - key: hsm
+      operator: Exists
+  serviceAccount:
+    name: kms-identity # bind a pre-created workload-identity ServiceAccount
+    annotations:
+      iam.gke.io/gcp-service-account: connector-kms@project.iam.gserviceaccount.com
+  initContainers:
+    - name: wait-for-hsm
+      image: busybox:1.36
+      command: ["sh", "-c", "until nc -z hsm.internal 1792; do sleep 2; done"]
+  sidecars:
+    - name: vault-agent
+      image: hashicorp/vault:1.17
+      args: ["agent", "-config=/vault/config/agent.hcl"]

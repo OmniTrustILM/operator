@@ -19,7 +19,7 @@ Gateway API) and a first-admin bootstrap.
 
 ## 1. Install the operator and CRDs
 
-The operator and its CRDs (Connector + Platform) install together. Pick one path.
+The operator and its CRDs (Connector + Platform + Proxy) install together. Pick one path.
 
 ### kubectl apply (release manifest)
 
@@ -636,7 +636,7 @@ spec:
     # opt out; set managed: true (+ instances/parameters) to customize it. An EMPTY block
     # disables it. See docs/configuration.md → Connection pooling.
     # pgBouncer: { managed: true, instances: 2 }
-  messaging:                  # messaging is still external (managed RabbitMQ lands later)
+  messaging:                  # messaging shown external here; managed RabbitMQ is also supported (mode: managed)
     mode: external
     host: rabbitmq.example.com
     port: 5672

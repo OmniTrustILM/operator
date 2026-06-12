@@ -1,0 +1,13 @@
+apiVersion: otilm.com/v1alpha1
+kind: Proxy
+metadata:
+  labels:
+    app.kubernetes.io/name: ilm-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: proxy-sample
+spec:
+  # The Secret holds the provisioning-issued config token (key: configToken) — it is
+  # part of the manifest the ILM UI renders when you create a proxy. All broker
+  # configuration travels inside the token; the CR models none of it.
+  configTokenSecretRef:
+    name: proxy-sample-config

@@ -70,6 +70,12 @@ const version2170 = "2.17.0"
 // both the bundle map key and the published image name.
 const componentAuthOPAPolicies = "auth-opa-policies"
 
+// ComponentProxy is the operator's component identity for the ILM proxy image —
+// the restricted-zone broker bridge deployed via the Proxy CRD. Exported because
+// the proxy controller (a different package) resolves its image by this key. It
+// exists only in 2.18.0+ bundles (the component did not exist pre-rebrand).
+const ComponentProxy = "proxy"
+
 // Image is the per-component image coordinates from a bundle.
 type Image struct {
 	Name string
@@ -138,6 +144,7 @@ var bundles = map[string]Bundle{
 			"core":                   {Name: "core", Tag: DefaultVersion},
 			"auth":                   {Name: "auth", Tag: "1.6.3"},
 			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
+			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
 			"opa":                    {Name: "opa", Tag: "1.10.0-static"},
 			"curl":                   {Name: "curl", Tag: "8.16.0"},
 			"scheduler":              {Name: "scheduler", Tag: "1.1.0"},

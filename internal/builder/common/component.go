@@ -283,6 +283,19 @@ type Component struct {
 	// ServiceAccountAnnotations are stamped onto the rendered ServiceAccount (e.g. a
 	// cloud workload-identity binding). They do not affect the Deployment.
 	ServiceAccountAnnotations map[string]string
+	// TerminationGracePeriodSeconds, when non-nil, sets the pod's termination grace
+	// period (passthrough; the kubelet default of 30s applies when nil).
+	TerminationGracePeriodSeconds *int64
+	// LabelsOverride, when non-nil, replaces the standard label set returned by
+	// Labels(). It exists for the pre-Component Kinds (Connector, Proxy) whose child
+	// resources already carry a per-kind label scheme; new components should use the
+	// standard labels.
+	LabelsOverride map[string]string
+	// SelectorLabelsOverride, when non-nil, replaces the immutable selector subset
+	// returned by SelectorLabels(). REQUIRED when migrating a Kind whose Deployments
+	// already exist in the field: a Deployment's .spec.selector is immutable, so the
+	// historical per-kind selector labels must be preserved verbatim.
+	SelectorLabelsOverride map[string]string
 }
 
 // SAName returns the ServiceAccount name the component's pod uses and the rendered
@@ -321,13 +334,21 @@ func (c Component) MainContainerName() string {
 }
 
 // SelectorLabels is the immutable name+instance subset used as the workload/pod
-// selector — unique per component instance.
+// selector — unique per component instance. SelectorLabelsOverride, when set,
+// replaces it (per-kind schemes already deployed in the field are immutable).
 func (c Component) SelectorLabels() map[string]string {
+	if c.SelectorLabelsOverride != nil {
+		return c.SelectorLabelsOverride
+	}
 	return map[string]string{NameLabel: c.Name, InstanceLabel: c.instance()}
 }
 
 // Labels returns the standard recommended labels for a component's resources.
+// LabelsOverride, when set, replaces them (pre-Component per-kind schemes).
 func (c Component) Labels() map[string]string {
+	if c.LabelsOverride != nil {
+		return c.LabelsOverride
+	}
 	return map[string]string{
 		NameLabel:      c.Name,
 		InstanceLabel:  c.instance(),

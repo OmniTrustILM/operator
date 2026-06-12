@@ -32,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -75,7 +76,10 @@ func TestBuildDeploymentBasic(t *testing.T) {
 	// Container port
 	require.Len(t, c.Ports, 1)
 	assert.Equal(t, int32(8080), c.Ports[0].ContainerPort)
-	assert.Equal(t, corev1.ProtocolTCP, c.Ports[0].Protocol)
+	// The shared Component builder names the primary port and leaves Protocol to the
+	// API default (TCP) — semantically identical to the previous explicit value.
+	assert.Equal(t, "http", c.Ports[0].Name)
+	assert.Equal(t, corev1.Protocol(""), c.Ports[0].Protocol)
 }
 
 func TestBuildDeploymentImageCommandArgs(t *testing.T) {
@@ -486,7 +490,10 @@ func TestBuildDeploymentSecurityContext(t *testing.T) {
 	c := dep.Spec.Template.Spec.Containers[0]
 
 	require.NotNil(t, c.SecurityContext)
-	assert.Equal(t, false, *c.SecurityContext.RunAsNonRoot)
+	// RunAsNonRoot is FORCED true by the shared SCC hardening: a CR override can no
+	// longer weaken the restricted-v2 contract (matches the platform components).
+	assert.Equal(t, true, *c.SecurityContext.RunAsNonRoot)
+	// ReadOnlyRootFilesystem stays a per-workload runtime decision — override honored.
 	assert.Equal(t, false, *c.SecurityContext.ReadOnlyRootFilesystem)
 	// Hardened fields are always set regardless of spec overrides.
 	require.NotNil(t, c.SecurityContext.AllowPrivilegeEscalation)
@@ -604,4 +611,45 @@ func TestBuildDeploymentPodLabels(t *testing.T) {
 	assert.Equal(t, "platform", podLabels["team"])
 	// Operator label takes precedence over user-provided override
 	assert.Equal(t, testConnectorName, podLabels["app.kubernetes.io/name"])
+}
+
+func TestBuildDeploymentSchedulingSidecarsAndSA(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.NodeSelector = map[string]string{"hsm-zone": "a"}
+	conn.Spec.Tolerations = []corev1.Toleration{{Key: "hsm", Operator: corev1.TolerationOpExists}}
+	conn.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{}}
+	conn.Spec.InitContainers = []corev1.Container{{Name: "wait-for-hsm", Image: "busybox"}}
+	conn.Spec.Sidecars = []corev1.Container{{
+		Name:  "vault-agent",
+		Image: "vault:1.17",
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr.To(true), // must be forced back off by hardening
+		},
+	}}
+	saName := "kms-identity"
+	conn.Spec.ServiceAccount = &otilmv1alpha1.ServiceAccountSpec{
+		Name:        &saName,
+		Annotations: map[string]string{"iam.gke.io/gcp-service-account": "kms@proj.iam"},
+	}
+
+	dep := connector.BuildDeployment(conn, testChecksum)
+	podSpec := dep.Spec.Template.Spec
+
+	assert.Equal(t, "a", podSpec.NodeSelector["hsm-zone"])
+	require.Len(t, podSpec.Tolerations, 1)
+	assert.NotNil(t, podSpec.Affinity.PodAntiAffinity)
+	assert.Equal(t, saName, podSpec.ServiceAccountName)
+
+	require.Len(t, podSpec.InitContainers, 1)
+	assert.True(t, *podSpec.InitContainers[0].SecurityContext.RunAsNonRoot, "init containers are SCC-hardened")
+
+	require.Len(t, podSpec.Containers, 2)
+	sidecar := podSpec.Containers[1]
+	assert.Equal(t, "vault-agent", sidecar.Name)
+	assert.False(t, *sidecar.SecurityContext.Privileged, "a privileged sidecar must be forced back off")
+	assert.True(t, *sidecar.SecurityContext.RunAsNonRoot)
+
+	sa := connector.BuildServiceAccount(conn)
+	assert.Equal(t, saName, sa.Name)
+	assert.Equal(t, "kms@proj.iam", sa.Annotations["iam.gke.io/gcp-service-account"])
 }

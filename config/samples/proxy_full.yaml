@@ -1,0 +1,88 @@
+# Full Proxy: every optional knob. Broker configuration is deliberately NOT here —
+# it travels inside the config token (see docs/design/proxy-operator.md). spec.env is
+# process-level environment only (corporate egress proxies); in token mode the proxy
+# ignores PROXY_* viper overrides entirely.
+apiVersion: otilm.com/v1alpha1
+kind: Proxy
+metadata:
+  name: dc-west
+spec:
+  configTokenSecretRef:
+    name: dc-west-config
+    tokenKey: configToken          # default — shown for completeness
+    signingKeyKey: tokenSigningKey # default; wired as an optional secretKeyRef
+  image: # overrides the BOM-resolved image, per field
+    tag: 1.0.0 # current BOM default — shown for completeness
+  replicas: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  env: # process-level only (NOT proxy configuration; never secrets — use secretRefs)
+    - name: HTTPS_PROXY
+      value: http://egress.corp.example.com:3128
+    - name: NO_PROXY
+      value: .cluster.local,.svc
+  secretRefs: # projected by reference; reserved PROXY_CONFIG_TOKEN/_SIGNING_KEY names cannot be remapped
+    - name: corp-ca-bundle # e.g. private-PKI CA for the broker TLS connection
+      type: volume
+      mountPath: /etc/ssl/corp
+  configMapRefs:
+    - name: corp-trust-bundle # e.g. extra OS-level trust anchors; NOT a proxy-config channel — config lives in the token
+      type: volume
+      mountPath: /etc/pki/corp
+  volumes:
+    - name: scratch
+      mountPath: /tmp
+      emptyDir:
+        medium: Memory
+  securityContext:
+    readOnlyRootFilesystem: true # default; runAsNonRoot etc. are hardened and not configurable
+  terminationGracePeriodSeconds: 120 # drain in-flight broker messages
+  nodeSelector: # e.g. pin to egress-permitted nodes
+    network-zone: egress
+  tolerations:
+    - key: egress
+      operator: Exists
+  probes: # these ARE the defaults — shown for completeness; override sparingly
+    readiness:
+      path: /ready
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+  metrics:
+    enabled: true
+    # path defaults to /metrics (the proxy's endpoint)
+    serviceMonitor:
+      enabled: true # rendered only when the Prometheus operator CRD is served
+      labels:
+        release: prometheus
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  podAnnotations:
+    example.com/scrape: "true"
+  podLabels:
+    team: edge
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                otilm.com/proxy: dc-west
+  serviceAccount:
+    name: egress-identity # bind a pre-created workload-identity ServiceAccount
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/proxy-egress
+  initContainers: # SCC-hardened; cannot weaken pod security
+    - name: wait-broker-dns
+      image: busybox:1.36
+      command: ["sh", "-c", "until nslookup broker.ilm.example.com; do sleep 2; done"]
+  sidecars:
+    - name: log-shipper
+      image: fluent/fluent-bit:3.1

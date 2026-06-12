@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ilm-operator
-description: ILM Operator - manages the ILM platform and its connectors via CRDs (Platform and Connector)
+description: ILM Operator - manages the ILM platform and its connectors via CRDs (Platform, Connector, and Proxy)
 type: application
 # version must stay *-develop on main; release versions are set when tagging
 version: 0.1.0-develop

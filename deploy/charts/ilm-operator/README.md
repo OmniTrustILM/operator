@@ -2,7 +2,7 @@
 
 > This repository is part of the open-source project ILM. You can find more information about the project at the [ILM Operator](https://github.com/OmniTrustILM/operator) repository.
 
-This Helm chart deploys the ILM Operator, which manages the ILM platform and its connectors via Kubernetes Custom Resource Definitions (CRDs) — the `Platform` and `Connector` resources.
+This Helm chart deploys the ILM Operator, which manages the ILM platform and its connectors via Kubernetes Custom Resource Definitions (CRDs) — the `Platform`, `Connector`, and `Proxy` resources.
 
 ## Prerequisites
 

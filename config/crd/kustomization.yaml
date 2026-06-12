@@ -4,6 +4,7 @@
 resources:
 - bases/otilm.com_connectors.yaml
 - bases/otilm.com_platforms.yaml
+- bases/otilm.com_proxies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

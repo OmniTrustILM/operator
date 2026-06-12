@@ -212,3 +212,19 @@ func TestPackageWrappersResolveDefaultBundle(t *testing.T) {
 	assert.Equal(t, defImg, img)
 	assert.Equal(t, def.RabbitMQVersion, DefaultRabbitMQVersion)
 }
+
+func TestDefaultBundleHasProxyComponent(t *testing.T) {
+	b, ok := BundleFor(DefaultVersion)
+	assert.True(t, ok)
+	img, ok := b.Lookup(ComponentProxy)
+	assert.True(t, ok, "default bundle must carry the proxy component image")
+	assert.Equal(t, "proxy", img.Name)
+	assert.NotEmpty(t, img.Tag)
+}
+
+func TestPreRebrandBundleHasNoProxyComponent(t *testing.T) {
+	b, ok := BundleFor("2.17.0")
+	assert.True(t, ok)
+	_, ok = b.Lookup(ComponentProxy)
+	assert.False(t, ok, "the proxy component did not exist pre-rebrand")
+}
