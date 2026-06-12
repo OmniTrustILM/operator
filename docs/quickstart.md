@@ -32,7 +32,7 @@ cert-managed platform edges (step 3), not for installing the operator.
 Confirm the CRDs are registered:
 
 ```bash
-kubectl get crd platforms.otilm.com connectors.otilm.com
+kubectl get crd platforms.otilm.com connectors.otilm.com proxies.otilm.com
 ```
 
 ## 2. Install the upstream operators (the only prerequisites)

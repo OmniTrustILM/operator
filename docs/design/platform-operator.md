@@ -11,7 +11,7 @@ CRD (`otilm.com/v1alpha1`), which deploys and wires the ILM platform itself.
 ## Overview
 
 The `ilm-operator` manages ILM **connectors** via the `Connector` CRD and the **ILM
-platform itself** via the `Platform` CRD. One operator binary, two independent controllers,
+platform itself** via the `Platform` CRD. One operator binary, three independent controllers,
 no coupling between them.
 
 A `Platform` is a single namespaced custom resource that describes a whole ILM deployment:
@@ -28,7 +28,7 @@ object, gates on the cluster capabilities each feature requires, and reports a p
 1. **A clean, de-nested API.** Platform singletons are top-level fields, not buried under
    wrappers. Anything that applies to *every* component lives under a single consolidated
    `spec.common` block; everything component-specific lives under that component's block.
-2. **Two CRDs, one operator.** `Platform` and `Connector` are independent controllers
+2. **Three CRDs, one operator.** `Platform`, `Connector`, and `Proxy` are independent controllers
    sharing the same builder primitives. Nothing connector-related lives in the `Platform`
    CR, and nothing platform-related lives in the `Connector` CR.
 3. **Mandatory services have no `enabled` flag.** Only `utils` (and the optional
@@ -48,7 +48,7 @@ object, gates on the cluster capabilities each feature requires, and reports a p
 
 ## Architecture
 
-One operator binary, two controllers (`Platform`, `Connector`). Two rendering paths, both
+One operator binary, three controllers (`Platform`, `Connector`, `Proxy`). Two rendering paths, both
 continuously reconciled (watch / drift / status):
 
 - **Native builders** for the stateless components — the shared component render model in

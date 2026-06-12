@@ -47,19 +47,15 @@ var (
 		[]string{"connector", "namespace"},
 	)
 
-	// ConnectorsManaged tracks the current number of connectors managed by the operator.
-	ConnectorsManaged = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "ilm_operator_connectors_managed",
-			Help: "Current number of Connector resources managed by the ILM operator.",
-		},
-	)
+	// The connectors/proxies managed counts are NOT imperative gauges: they are
+	// computed from the informer cache at scrape time by ManagedCountCollector
+	// (managed_collector.go), so they cannot drift on reconcile retries or
+	// operator restarts.
 )
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(
 		ReconciliationsTotal,
 		ReconciliationDurationSeconds,
-		ConnectorsManaged,
 	)
 }

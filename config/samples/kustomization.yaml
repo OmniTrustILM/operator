@@ -4,6 +4,9 @@ resources:
 - connector_minimal.yaml
 - connector_full.yaml
 - connector_with_registration.yaml
+- v1alpha1_proxy.yaml
+- proxy_minimal.yaml
+- proxy_full.yaml
 - v1alpha1_platform.yaml
 # NOTE: only ONE Platform sample is listed here on purpose. The Platform is a
 # namespace-singleton, and every variant sample uses name "ilm" — listing them all

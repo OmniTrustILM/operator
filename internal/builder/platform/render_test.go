@@ -222,7 +222,7 @@ func TestRenderPlatformAllContainersSCCHardened(t *testing.T) {
 	// queue init containers, scheduler's wait-for-messaging init container, etc.).
 	p := basePlatform()
 	p.Spec.Utils.Enabled = true
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{APIURL: "https://prov.example.com"}
 	p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{Enabled: true, Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"}}
 

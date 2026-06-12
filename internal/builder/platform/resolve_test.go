@@ -427,7 +427,7 @@ func TestResolveCoreProxyDisabledOmitsURLs(t *testing.T) {
 func TestResolveCoreProxyEnabledInjectsURLs(t *testing.T) {
 	w := bom.Wiring()
 	p := basePlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{
 		Enabled: true, HTTP: "http://proxy:3128", HTTPS: "http://proxy:3129", NoProxy: "localhost,.svc",
 	}
 	c := ResolveCore(p)
@@ -473,7 +473,7 @@ func TestResolveCoreProxyInstanceIDGatedOnProxy(t *testing.T) {
 
 	// Proxy enabled: PROXY_INSTANCE_ID present via fieldRef metadata.name.
 	p := basePlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	c = ResolveCore(p)
 	path, has := fieldRefPath(c.FieldRefEnv, w.ProxyInstanceIDEnv)
 	require.True(t, has, "PROXY_INSTANCE_ID must be present when proxy is enabled")
@@ -633,7 +633,7 @@ func TestResolveCoreWaitForAuthInitContainer(t *testing.T) {
 // turns on the provision-instance-queue init container.
 func proxyProvisioningPlatform() *otilmv1alpha1.Platform {
 	p := basePlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
 		APIURL: testProvURL, APIKeySecretRef: testProvSecret,
 	}
@@ -690,7 +690,7 @@ func TestResolveCoreProvisionQueueInitOmittedWithoutProxy(t *testing.T) {
 func TestResolveCoreProvisionQueueInitOmittedWithoutProvisioning(t *testing.T) {
 	// Proxy enabled but no provisioning API => no provision-queue init container.
 	p := basePlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	c := ResolveCore(p)
 	_, ok := containerByName(c.InitContainers, testProvInstanceQueue)
 	assert.False(t, ok, "no provision-queue init container without a provisioning API")
@@ -777,7 +777,7 @@ func TestResolveCoreProvisionQueueInitNoAPIKeyHeaderWhenKeyUnset(t *testing.T) {
 	// no-header branch at runtime).
 	w := bom.Wiring()
 	p := basePlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{APIURL: testProvURL}
 	c := ResolveCore(p)
 

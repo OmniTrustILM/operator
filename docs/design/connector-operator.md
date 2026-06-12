@@ -171,6 +171,19 @@ spec:
       interval: 30s
       labels: {}
 
+  # Placement, workload identity, and extra containers (all optional). Sidecars and
+  # init containers are SCC-hardened by the operator (restricted-v2 fields forced),
+  # so a CR cannot weaken pod security. Container/affinity schemas are embedded
+  # opaquely (x-kubernetes-preserve-unknown-fields) to keep the CRD compact.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  serviceAccount:                  # override the dedicated SA (workload identity)
+    name: ""
+    annotations: {}
+  initContainers: []
+  sidecars: []
+
   # Platform registration (optional)
   registration:
     platformUrl: "https://my-ilm.example.com/api"
@@ -572,7 +585,7 @@ The Helm chart creates: operator Deployment, ServiceAccount, ClusterRole, Cluste
 The operator includes an OLM bundle for deployment via OLM or OperatorHub. The bundle is generated with `make bundle` and includes:
 
 - **ClusterServiceVersion (CSV)** — operator metadata, RBAC, install strategy
-- **CRDs** — the Connector and Platform CRDs
+- **CRDs** — the Connector, Platform, and Proxy CRDs
 - **Bundle metadata** — annotations for OLM catalog integration
 - **Scorecard configuration** — for OLM validation testing
 

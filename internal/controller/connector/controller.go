@@ -55,6 +55,10 @@ import (
 	"github.com/OmniTrustILM/operator/internal/registration"
 )
 
+// msgRefNotFound formats the missing-reference condition/event message
+// (kind = "Secret"/"ConfigMap", name = the referenced object).
+const msgRefNotFound = "%s %q not found"
+
 const (
 	finalizerName       = "otilm.com/finalizer"
 	requeueDelay        = 30 * time.Second
@@ -189,11 +193,9 @@ func (r *Reconciler) handleFinalizer(ctx context.Context, req ctrl.Request, conn
 	if conn.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(conn, finalizerName) {
 			r.Recorder.Event(conn, corev1.EventTypeNormal, monitoring.ReasonDeleting, "Connector is being deleted")
-			monitoring.ConnectorsManaged.Dec()
 			controllerutil.RemoveFinalizer(conn, finalizerName)
 			if err := r.Update(ctx, conn); err != nil {
 				logger.Error(err, "failed to remove finalizer")
-				monitoring.ConnectorsManaged.Inc() // restore on failure
 				return false, err
 			}
 		}
@@ -219,10 +221,6 @@ func (r *Reconciler) handleFinalizer(ctx context.Context, req ctrl.Request, conn
 // Connector is first seen or its generation changes. Returns the previous phase.
 func (r *Reconciler) setInitialPhase(conn *otilmv1alpha1.Connector) otilmv1alpha1.ConnectorPhase {
 	previousPhase := conn.Status.Phase
-	if conn.Status.Phase == "" {
-		// First time we've seen this Connector -- count it.
-		monitoring.ConnectorsManaged.Inc()
-	}
 	if conn.Status.Phase == "" || conn.Status.ObservedGeneration != conn.Generation {
 		conn.Status.Phase = otilmv1alpha1.ConnectorPhaseDeploying
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
@@ -319,6 +317,17 @@ func (r *Reconciler) reconcileServiceAccount(ctx context.Context, conn *otilmv1a
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: desiredSA.Name, Namespace: desiredSA.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
 		sa.Labels = desiredSA.Labels
+		// Merge (never replace) the builder's annotations — e.g. a workload-identity
+		// binding from spec.serviceAccount.annotations — so apiserver- or
+		// third-party-managed annotations on the live object survive.
+		if len(desiredSA.Annotations) > 0 {
+			if sa.Annotations == nil {
+				sa.Annotations = make(map[string]string, len(desiredSA.Annotations))
+			}
+			for k, v := range desiredSA.Annotations {
+				sa.Annotations[k] = v
+			}
+		}
 		return ctrl.SetControllerReference(conn, sa, r.Scheme)
 	}); err != nil {
 		logger.Error(err, "failed to reconcile ServiceAccount")
@@ -375,6 +384,7 @@ func (r *Reconciler) reconcilePDB(ctx context.Context, conn *otilmv1alpha1.Conne
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, pdb, func() error {
 			pdb.Labels = desiredPDB.Labels
 			pdb.Spec.MinAvailable = desiredPDB.Spec.MinAvailable
+			pdb.Spec.MaxUnavailable = desiredPDB.Spec.MaxUnavailable
 			pdb.Spec.Selector = desiredPDB.Spec.Selector
 			return ctrl.SetControllerReference(conn, pdb, r.Scheme)
 		}); err != nil {
@@ -514,6 +524,15 @@ func (r *Reconciler) setPhaseForZeroReady(conn *otilmv1alpha1.Connector, desired
 		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
 			Type:               condDegraded,
 			Status:             metav1.ConditionTrue,
+			ObservedGeneration: conn.Generation,
+			Reason:             "ReplicaFailure",
+			Message:            "Deployment pods are failing",
+		})
+		// A Failed connector is not available — without this, a connector that was
+		// once Running would keep Available=True forever while Failed.
+		meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+			Type:               condAvailable,
+			Status:             metav1.ConditionFalse,
 			ObservedGeneration: conn.Generation,
 			Reason:             "ReplicaFailure",
 			Message:            "Deployment pods are failing",
@@ -659,10 +678,17 @@ func (r *Reconciler) computeRefChecksums(
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: conn.Generation,
 					Reason:             missingReason,
-					Message:            fmt.Sprintf("%s %q not found", refKind, name),
+					Message:            fmt.Sprintf(msgRefNotFound, refKind, name),
 				})
 				conn.Status.Phase = otilmv1alpha1.ConnectorPhaseFailed
-				r.Recorder.Eventf(conn, corev1.EventTypeWarning, missingReason, "%s %q not found", refKind, name)
+				meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+					Type:               condAvailable,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: conn.Generation,
+					Reason:             missingReason,
+					Message:            fmt.Sprintf(msgRefNotFound, refKind, name),
+				})
+				r.Recorder.Eventf(conn, corev1.EventTypeWarning, missingReason, msgRefNotFound, refKind, name)
 				if statusErr := r.Status().Update(ctx, conn); statusErr != nil {
 					logger.Error(statusErr, "failed to update status for missing "+strings.ToLower(refKind))
 				}

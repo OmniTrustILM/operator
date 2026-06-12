@@ -2,10 +2,10 @@
 
 ## Project Overview
 
-The ILM Operator is a standalone Kubernetes operator that manages the ILM platform and its connectors via Custom Resource Definitions (CRDs). One binary, two independent controllers.
+The ILM Operator is a standalone Kubernetes operator that manages the ILM platform and its connectors via Custom Resource Definitions (CRDs). One binary, three independent controllers.
 
 - **API Group:** `otilm.com`
-- **Kinds:** `Connector` (v1alpha1) and `Platform` (v1alpha1) — both implemented
+- **Kinds:** `Connector`, `Platform`, and `Proxy` (all v1alpha1) — all implemented
 - **Tooling:** Operator SDK v1.42.2, Kubebuilder v4, controller-runtime
 - **Language:** Go 1.26+
 
@@ -125,7 +125,7 @@ make sonar
 ## Project Structure
 
 ```
-api/v1alpha1/          - CRD types: connector_types.go, platform_types.go, and common_types.go (shared building-block specs: ImageSpec, EnvVar, Secret/ConfigMap refs + key mappings, ServiceSpec, ProbeSpec, SecurityContextSpec, PDBSpec, VolumeSpec, MetricsSpec)
+api/v1alpha1/          - CRD types: connector_types.go, platform_types.go, proxy_types.go, and common_types.go (shared building-block specs: ImageSpec, EnvVar, Secret/ConfigMap refs + key mappings, ServiceSpec, ProbeSpec, SecurityContextSpec, PDBSpec, VolumeSpec, MetricsSpec)
 cmd/
   main.go              - Operator entrypoint
   values2platform/     - Helm-values → Platform CR migration converter (CLI)
@@ -134,19 +134,21 @@ internal/
     common/            - CRD-agnostic builders: Component render model, ResolveImage, Build{Deployment,StatefulSet,Service,ServiceAccount,PDB,HPA,ServiceMonitor}, SCC-clean pod security
     connector/         - Connector-specific builders (Deployment, Service, SA, PDB, ServiceMonitor)
     platform/          - Platform-specific builders (component resolution, edge, managed-infra CRs)
+    proxy/             - Proxy-specific builders (token-only Deployment, Service with http+api ports, SA, PDB, ServiceMonitor at /metrics)
   bom/                 - Versioned bill-of-materials: per-component image coordinates + the wiring profile (env-var names, connection-string template, Secret-key names) + managed topology, as data
   checksum/            - Configuration checksum utility for drift detection
   controller/
     connector/         - Connector reconciler (+ watches)
     platform/          - Platform reconciler (capability gates, prune, OIDC wiring, lifecycle, the managed-infra upgrade guard)
+    proxy/             - Proxy reconciler — pure consumer of the provisioning-issued config token; no platform calls
   monitoring/          - Prometheus metrics registration + event recorder helpers
   platform/            - capabilities/ holds the generic RESTMapper-based upstream-CRD detector (reused by the Platform controller's managed-infra gates)
   registration/        - ILM platform registration client (connector → platform) + OIDC wiring
   version/             - Build version info (injected via ldflags)
 config/
-  crd/bases/           - Generated CRD YAML (connectors + platforms)
+  crd/bases/           - Generated CRD YAML (connectors + platforms + proxies)
   rbac/                - Generated RBAC roles
-  samples/             - Example Connector and Platform CRs (README.md indexes the platform variants)
+  samples/             - Example Connector, Platform, and Proxy CRs (README.md indexes the variants)
   manifests/           - OLM CSV base and kustomization
   scorecard/           - OLM scorecard test configuration
 deploy/charts/         - Helm chart for operator deployment
@@ -172,7 +174,7 @@ sonar-project.properties - SonarCloud/SonarQube configuration
 
 ## Platform operator
 
-The operator manages the **ILM platform itself** via the `Platform` CRD, alongside `Connector`. Design: `docs/design/platform-operator.md`; CR examples + reference: `docs/design/examples/`; end-user guides: `docs/platform.md`, `docs/quickstart.md`, `docs/configuration.md`, `docs/versions.md`, `docs/upgrades.md`. Invariants to uphold in platform code:
+The operator manages the **ILM platform itself** via the `Platform` CRD, alongside `Connector` and `Proxy`. Design: `docs/design/platform-operator.md`; CR examples + reference: `docs/design/examples/`; end-user guides: `docs/platform.md`, `docs/quickstart.md`, `docs/configuration.md`, `docs/versions.md`, `docs/upgrades.md`. Invariants to uphold in platform code:
 
 - **No secrets in CRs.** Sensitive values are `Secret` references only (`*SecretRef`) — never inline. Read referenced Secrets read-only and inject via `secretKeyRef`/`envFrom` (never copy values into rendered objects). Never put secret values *or* connection coordinates (host/port/URI) in status, conditions, events, or logs.
 - **SCC-clean pods (OpenShift `restricted-v2`).** `runAsNonRoot: true`, **no hard-coded `runAsUser`**, drop **all** capabilities, `seccompProfile: RuntimeDefault`, no privilege escalation.
@@ -198,7 +200,7 @@ The operator manages the **ILM platform itself** via the `Platform` CRD, alongsi
 
 ## How to add a new CRD (the per-kind pattern)
 
-The operator is structured so a third Kind follows the same shape as `Connector` and `Platform`. The pattern, end to end:
+The operator is structured so a new Kind follows the same shape as `Connector`, `Platform`, and `Proxy` (`Proxy` was added exactly this way). The pattern, end to end:
 
 1. **Types** — add `api/v1alpha1/<kind>_types.go` (Spec/Status, kubebuilder markers, printer columns). Reuse the shared building-block specs in `common_types.go` (`ImageSpec`, `EnvVar`, ref + key-mapping types, `ProbeSpec`, `MetricsSpec`, …) rather than re-declaring them. Run `make generate manifests`.
 2. **Builders** — put pure, unit-tested builder functions under `internal/builder/<kind>/`, composing the CRD-agnostic primitives in `internal/builder/common/` (the Component render model, `ResolveImage`, the Deployment/StatefulSet/Service/SA/PDB/HPA/ServiceMonitor builders, SCC-clean pod security). Builders take a spec and return a K8s object — no client calls.
@@ -213,4 +215,5 @@ The operator is structured so a third Kind follows the same shape as `Connector`
 - `docs/design/connector-operator.md` — the `Connector` CRD: schema, reconciliation flow, architecture.
 - `docs/design/platform-operator.md` — the `Platform` CRD: architecture, security model, infra delegation (`external`/`managed`), pluggable edge, reconciliation. Validated against production operators.
 - `docs/design/platform-versioning.md` — the managed-infra version/BOM model and upgrade-guard design.
+- `docs/design/proxy-operator.md` — the `Proxy` CRD: config-token contract, credential delivery, reconciliation, Connector `proxyRef` future work.
 - `docs/design/examples/` — the annotated `Platform` CR field reference + worked example shapes.

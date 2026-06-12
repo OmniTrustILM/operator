@@ -100,3 +100,30 @@ func TestResolveImageDegenerateInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestComponentLabelOverrides(t *testing.T) {
+	legacySelector := map[string]string{"app.kubernetes.io/name": "x", "otilm.com/connector": "x"}
+	legacyLabels := map[string]string{"app.kubernetes.io/name": "x", "otilm.com/connector": "x", "app.kubernetes.io/managed-by": "ilm-operator"}
+	c := Component{
+		Name:                   "x",
+		LabelsOverride:         legacyLabels,
+		SelectorLabelsOverride: legacySelector,
+	}
+	assert.Equal(t, legacySelector, c.SelectorLabels())
+	assert.Equal(t, legacyLabels, c.Labels())
+
+	// Without overrides the standard scheme applies unchanged.
+	std := Component{Name: "core", Instance: "ilm"}
+	assert.Equal(t, map[string]string{NameLabel: "core", InstanceLabel: "ilm"}, std.SelectorLabels())
+}
+
+func TestBuildDeploymentTerminationGracePeriod(t *testing.T) {
+	grace := int64(90)
+	c := Component{Name: "x", TerminationGracePeriodSeconds: &grace}
+	dep := BuildDeployment(c)
+	if assert.NotNil(t, dep.Spec.Template.Spec.TerminationGracePeriodSeconds) {
+		assert.Equal(t, grace, *dep.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	}
+
+	assert.Nil(t, BuildDeployment(Component{Name: "x"}).Spec.Template.Spec.TerminationGracePeriodSeconds)
+}

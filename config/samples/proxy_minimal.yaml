@@ -1,0 +1,26 @@
+# Minimal Proxy: everything the proxy needs travels inside the provisioning-issued
+# config token (a JWT carrying broker URL, queue coordinates, and credentials).
+#
+# Prerequisite: a Secret in the same namespace holding the token — normally part of
+# the manifest the ILM UI renders when you create the proxy:
+#
+#   apiVersion: v1
+#   kind: Secret
+#   metadata:
+#     name: dc-east-config
+#   stringData:
+#     configToken: <JWT minted by the provisioning service>
+#     # tokenSigningKey: <HMAC key — only when the platform signs tokens>
+#
+# What it creates: Deployment (image from the operator's BOM), Service (http 8080 +
+# api 8081), ServiceAccount. The proxy dials OUT to the platform's broker; nothing is
+# exposed outside the cluster (no Ingress, no LoadBalancer — the ClusterIP Service
+# serves in-cluster health/metrics and the connector-facing API only). Rotating the
+# credential = applying a new Secret; the operator rolls the proxy automatically.
+apiVersion: otilm.com/v1alpha1
+kind: Proxy
+metadata:
+  name: dc-east
+spec:
+  configTokenSecretRef:
+    name: dc-east-config

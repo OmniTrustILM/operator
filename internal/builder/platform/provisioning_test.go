@@ -231,7 +231,7 @@ func TestProvisioningDeployCoreRewired(t *testing.T) {
 // proxy is enabled + provisioning configured, which deploy mode satisfies).
 func TestProvisioningDeployInitContainerRunsAgainstService(t *testing.T) {
 	p := deployProvisioningPlatform()
-	p.Spec.Common.Proxy = otilmv1alpha1.ProxySpec{Enabled: true}
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 
 	core := ResolveCore(p)
 	var found *corev1.Container

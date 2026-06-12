@@ -141,6 +141,17 @@ metadata:
               "repository": "hub.omnitrustregistry.com/ilm/ejbca-ng-connector",
               "tag": "2.13.0"
             },
+            "initContainers": [
+              {
+                "command": [
+                  "sh",
+                  "-c",
+                  "until nc -z hsm.internal 1792; do sleep 2; done"
+                ],
+                "image": "busybox:1.36",
+                "name": "wait-for-hsm"
+              }
+            ],
             "lifecycle": {
               "podDisruptionBudget": {
                 "enabled": true,
@@ -159,6 +170,9 @@ metadata:
                   "release": "prometheus"
                 }
               }
+            },
+            "nodeSelector": {
+              "hsm-zone": "a"
             },
             "podAnnotations": {
               "vault.hashicorp.com/agent-inject": "true",
@@ -242,6 +256,28 @@ metadata:
               "port": 8443,
               "type": "ClusterIP"
             },
+            "serviceAccount": {
+              "annotations": {
+                "iam.gke.io/gcp-service-account": "connector-kms@project.iam.gserviceaccount.com"
+              },
+              "name": "kms-identity"
+            },
+            "sidecars": [
+              {
+                "args": [
+                  "agent",
+                  "-config=/vault/config/agent.hcl"
+                ],
+                "image": "hashicorp/vault:1.17",
+                "name": "vault-agent"
+              }
+            ],
+            "tolerations": [
+              {
+                "key": "hsm",
+                "operator": "Exists"
+              }
+            ],
             "volumes": [
               {
                 "emptyDir": {
@@ -314,10 +350,178 @@ metadata:
               "virtualHost": "ilm"
             }
           }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Proxy",
+          "metadata": {
+            "name": "dc-east"
+          },
+          "spec": {
+            "configTokenSecretRef": {
+              "name": "dc-east-config"
+            }
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Proxy",
+          "metadata": {
+            "name": "dc-west"
+          },
+          "spec": {
+            "affinity": {
+              "podAntiAffinity": {
+                "preferredDuringSchedulingIgnoredDuringExecution": [
+                  {
+                    "podAffinityTerm": {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "otilm.com/proxy": "dc-west"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    },
+                    "weight": 100
+                  }
+                ]
+              }
+            },
+            "configMapRefs": [
+              {
+                "mountPath": "/etc/proxy/extra",
+                "name": "proxy-extra-config",
+                "type": "volume"
+              }
+            ],
+            "configTokenSecretRef": {
+              "name": "dc-west-config",
+              "signingKeyKey": "tokenSigningKey",
+              "tokenKey": "configToken"
+            },
+            "env": [
+              {
+                "name": "HTTPS_PROXY",
+                "value": "http://egress.corp.example.com:3128"
+              },
+              {
+                "name": "NO_PROXY",
+                "value": ".cluster.local,.svc"
+              }
+            ],
+            "image": {
+              "tag": "1.0.0"
+            },
+            "initContainers": [
+              {
+                "command": [
+                  "sh",
+                  "-c",
+                  "until nslookup broker.ilm.example.com; do sleep 2; done"
+                ],
+                "image": "busybox:1.36",
+                "name": "wait-broker-dns"
+              }
+            ],
+            "metrics": {
+              "enabled": true,
+              "serviceMonitor": {
+                "enabled": true,
+                "labels": {
+                  "release": "prometheus"
+                }
+              }
+            },
+            "nodeSelector": {
+              "network-zone": "egress"
+            },
+            "podAnnotations": {
+              "example.com/scrape": "true"
+            },
+            "podDisruptionBudget": {
+              "enabled": true,
+              "minAvailable": 1
+            },
+            "podLabels": {
+              "team": "edge"
+            },
+            "probes": {
+              "readiness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 5,
+                "path": "/ready",
+                "periodSeconds": 10
+              }
+            },
+            "replicas": 2,
+            "resources": {
+              "limits": {
+                "memory": "256Mi"
+              },
+              "requests": {
+                "cpu": "100m",
+                "memory": "128Mi"
+              }
+            },
+            "secretRefs": [
+              {
+                "mountPath": "/etc/ssl/corp",
+                "name": "corp-ca-bundle",
+                "type": "volume"
+              }
+            ],
+            "securityContext": {
+              "readOnlyRootFilesystem": true
+            },
+            "serviceAccount": {
+              "annotations": {
+                "eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/proxy-egress"
+              },
+              "name": "egress-identity"
+            },
+            "sidecars": [
+              {
+                "image": "fluent/fluent-bit:3.1",
+                "name": "log-shipper"
+              }
+            ],
+            "terminationGracePeriodSeconds": 120,
+            "tolerations": [
+              {
+                "key": "egress",
+                "operator": "Exists"
+              }
+            ],
+            "volumes": [
+              {
+                "emptyDir": {
+                  "medium": "Memory"
+                },
+                "mountPath": "/tmp",
+                "name": "scratch"
+              }
+            ]
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Proxy",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/managed-by": "kustomize",
+              "app.kubernetes.io/name": "ilm-operator"
+            },
+            "name": "proxy-sample"
+          },
+          "spec": {
+            "configTokenSecretRef": {
+              "name": "proxy-sample-config"
+            }
+          }
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-06-10T15:40:10Z"
+    createdAt: "2026-06-12T12:01:42Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1
@@ -344,14 +548,60 @@ spec:
         name: ""
         version: v1
       version: v1alpha1
-    - kind: Platform
+    - description: Platform is the Schema for the platforms API. It deploys and manages
+        the ILM platform itself — the stateless component tier, gateway, optional
+        edge, and its database/messaging/Keycloak dependencies (referenced when external
+        or provisioned via upstream operators when managed). A Platform is a per-namespace
+        singleton.
+      displayName: Platform
+      kind: Platform
       name: platforms.otilm.com
+      resources:
+      - kind: ConfigMaps
+        name: ""
+        version: v1
+      - kind: Deployments
+        name: ""
+        version: apps/v1
+      - kind: PodDisruptionBudgets
+        name: ""
+        version: policy/v1
+      - kind: ServiceAccounts
+        name: ""
+        version: v1
+      - kind: Services
+        name: ""
+        version: v1
+      version: v1alpha1
+    - description: Proxy is the Schema for the proxies API. It deploys one ILM proxy
+        instance — the outbound-only broker bridge for restricted network zones —
+        from a provisioning-issued config token.
+      displayName: Proxy
+      kind: Proxy
+      name: proxies.otilm.com
+      resources:
+      - kind: Deployments
+        name: ""
+        version: apps/v1
+      - kind: PodDisruptionBudgets
+        name: ""
+        version: policy/v1
+      - kind: ServiceAccounts
+        name: ""
+        version: v1
+      - kind: Services
+        name: ""
+        version: v1
       version: v1alpha1
   description: |
-    The ILM Operator manages ILM platform connectors via Kubernetes Custom
-    Resource Definitions. It automates the deployment, configuration, and
-    lifecycle management of connector workloads, including service creation,
-    health probes, metrics integration, and platform registration.
+    The ILM Operator manages the ILM platform, its connectors, and the ILM
+    proxy via Kubernetes Custom Resource Definitions. It automates deployment,
+    configuration, and lifecycle management: the Platform CR runs the platform
+    component tier with its database/messaging/Keycloak dependencies (external
+    or provisioned via upstream operators), the Connector CR runs connector
+    workloads with health probes, metrics, and platform registration, and the
+    Proxy CR runs the outbound-only broker bridge for restricted network zones
+    from a provisioning-issued config token.
   displayName: ILM Operator
   icon:
   - base64data: iVBORw0KGgoAAAANSUhEUgAAATkAAAE5CAYAAADr4VfxAAAACXBIWXMAAC4jAAAuIwF4pT92AAAZ/ElEQVR4nO3dTXLbxhYF4KPUm0tvBWLmrhKzAjMjDzCIsgLTK7BS9tzwXK4wKwi0gicPMPAo4ApCVnkB5A7MFfAN+kKEKJAESaBvo+/5qlSSZYm6ianD2z9oXKzXaxCd4uLjbFT540Deqq4ADBs81A8As5rPF5WPZ+v74Y/m1RE5Fww5qnPxcTaAC60hNmF1JZ+71qpLTOX9DJuA/LG+HxZqFVGwGHLGXXycDbEJs/LjG8WSzrWCC70ZgAVcB1hoFkS6GHKGSKBV317rVuTVEpvwKxh8djDkIiZzZuXbEMClYjkhmsPN+xVwwcc5vwgx5CIindoIwC1sdWltYehFiCHXYxcfZ1dwgTaS9+zU2jUF8AgXeHWrv9QDDLmekVXPMth+Uy3GliVc4GUMvH5hyPVAJdjG6PfKZywYeD3CkAtUZSg6BufXQlYG3mR9P1wo10I1GHKBkRXRMYC3upXQCeYAJgAeuWgRDoZcAKRrGwO4g/7VBNSOB7jhbKFdiHUMOUXs2kyYww1lM+1CrGLIKbj4OBuDc23WrOCGshnn7vxiyHnCISlVPABIGXZ+MOQ6JuF2J2/crEtVX+GGsoV2ITFjyLWE4UZHmMJ1doV2ITFiyLVAVktTcEGB2vUA4I4bi8/DkDuD7HObgNeTUnfKrScTht1pGHInkAvmJ+ApIOTPEq6re9QupG8Ycke6+DhLwXk30jMFMOZ8XXMMuYZkaJqB824Uhs/gELYRhtwBsmqagUNTCs8SrqsrtAsJGUNuj4uPs1u4gOPQlEL2F9yWE3Z1NRhyNdi9UQ+t4Lo6LkxsYchtYfdGPceubgtDTrB7o4hwrq7iJ+0CQiArpzMw4CgO1wD+ke1O5pnv5OSJ8Em7DqKOzAHcWt5XZzbkZHj6CJ7OS/EzvShhcrgqw9MFGHBkwyWA/118nE20C9FgrpO7+Di7A/Cndh1ESqZww1czq69mQk6GpxPwzlhEKwCj9f1wpl2IDyaGq3JqSAEGHBHghq//yjmI0Ys+5C4+zoZw20N45hvRc39bmKeLOuQk4P4Fr14g2uV97Pvpog45mXN40K6DKGBzuLnqaEUdcgCwvh+OwaAjqjOHW4CIeqU1+pADGHLGXXycDbEJs/LjG8WSzrWCC70ZgAVcB1hoFkS6GHKGSKBV317rVuTVEpvwKxh8djDkIiZzZuXbEMClYjkhmsPN+xVwwcc5vwgx5CIindoIwC1sdWltYehFiCHXYxcfZ1dwgTaS9+zU2jUF8AgXeHWrv9QDDLmekVXPMth+Uy3GliVc4GUMvH5hyPVAJdjG6PfKZywYeD3CkAtUZSg6BufXQlYG3mR9P1wo10I1GHKBkRXRMYC3upXQCeYAJgAeuWgRDoZcAKRrGwO4g/7VBNSOB7jhbKFdiHUMOUXs2kyYww1lM+1CrGLIKbj4OBuDc23WrOCGshnn7vxiyHnCISlVPABIGXZ+MOQ6JuF2J2/crEtVX+GGsoV2ITFjyLWE4UZHmMJ1doV2ITFiyLVAVktTcEGB2vUA4I4bi8/DkDuD7HObgNeTUnfKrScTht1pGHInkAvmJ+ApIOTPEq6re9QupG8Ycke6+DhLwXk30jMFMOZ8XXMMuYZkaJqB824Uhs/gELYRhtwBsmqagUNTCs8SrqsrtAsJGUNuj4uPs1u4gOPQlEL2F9yWE3Z1NRhyNdi9UQ+t4Lo6LkxsYchtYfdGPceubgtDTrB7o4hwrq7iJ+0CQiArpzMw4CgO1wD+ke1O5pnv5OSJ8Em7DqKOzAHcWt5XZzbkZHj6CJ7OS/EzvShhcrgqw9MFGHBkwyWA/118nE20C9FgrpO7+Di7A/Cndh1ESqZww1czq69mQk6GpxPwzlhEKwCj9f1wpl2IDyaGq3JqSAEGHBHghq//yjmI0Ys+5C4+zoZw20N45hvRc39bmKeLOuQk4P4Fr14g2uV97Pvpog45mXN40K6DKGBzuLnqaEUdcgCwvh+OwaAjqjOHW4CIeqU1+pADGHLGXXycDbEJs/LjG8WSzrWCC70ZgAVcB1hoFkS6GHKGSKBV317rVuTVEpvwKxh8djDkIiZzZuXbEMClYjkhmsPN+xVwwcc5vwgx5CIindoIwC1sdWltYehFiCHXYxcfZ1dwgTaS9+zU2jUF8AgXeHWrv9QDDLmekVXPMth+Uy3GliVc4GUMvH5hyPVAJdjG6PfKZywYeD3CkAtUZSg6BufXQlYG3mR9P1wo10I1GHKBkRXRMYC3upXQCeYAJgAeuWgRDoZcAKRrGwO4g/7VBNSOB7jhbKFdiHUMOUXs2kyYww1lM+1CrGLIKbj4OBuDc23WrOCGshnn7vxiyHnCISlVPABIGXZ+MOQ6JuF2J2/crEtVX+GGsoV2ITFjyLWE4UZHmMJ1doV2ITFiyLVAVktTcEGB2vUA4I4bi8/DkDuD7HObgNeTUnfKrScTht1pGHInkAvmJ+ApIOTPEq6re9QupG8Ycke6+DhLwXk30jMFMOZ8XXMMuYZkaJqB824Uhs/gELYRhtwBsmqagUNTCs8SrqsrtAsJGUNuj4uPs1u4gOPQlEL2F9yWE3Z1NRhyNdi9UQ+t4Lo6LkxsYchtYfdGPceubgtDTrB7o4hwrq7iJ+0CQiArpzMw4CgO1wD+ke1O5pnv5OSJ8Em7DqKOzAHcWt5XZzbkZHj6CJ7OS/EzvShhcrgqw9MFGHBkwyWA/118nE20C9FgrpO7+Di7A/Cndh1ESqZww1czq69mQk6GpxPwzlhEKwCj9f1wpl2IDyaGq3JqSAEGHBHghq//yjmI0Ys+5C4+zoZw20N45hvRc39bmKeLOuQk4P4Fr14g2uV97Pvpog45mXN40K6DKGBzuLnqaEUdcgCwvh+OwaAjqjOHW4CIeqU1+pADGHLGXXycDbEJs/LjG8WSzrWCC70ZgAVcB1hoFkS6GHKGSKBV317rVuTVEpvwKxh8djDkIiZzZuXbEMClYjkhmsPN+xVwwcc5vwgx5CIindoIwC1sdWltYehFiCHXYxcfZ1dwgTaS9+zU2jUF8AgXeHWrv9QDDLmekVXPMth+Uy3GliVc4GUMvH5hyPVAJdjG6PfKZywYeD3CkAtUZSg6BufXQlYG3mR9P1wo10I1GHKBkRXRMYC3upXQCeYAJgAeuWgRDoZcAKRrGwO4g/7VBNSOB7jhbKFdiHUMOUXs2kyYww1lM+1CrGLIKbj4OBuDc23WrOCGshnn7vxiyHnCISlVPABIGXZ+MOQ6JuF2J2/crEtVX+GGsoV2ITFjyLWE4UZHmMJ1doV2ITFiyLVAVktTcEGB2vUA4I4bi8/DkDuD7HObgNeTUnfKrScTht1pGHInkAvmJ+ApIOTPEq6re9QupG8Ycke6+DhLwXk30jMFMOZ8XXMMuYZkaJqB824Uhs/gELYRhtwBsmqagUNTCs8SrqsrtAsJGUNuj4uPs1u4gOPQlEL2F9yWE3Z1NRhyNdi9UQ+t4Lo6LkxsYchtYfdGPceubgtDTrB7o4hwrq7iJ+0CQiArpzMw4CgO1wD+ke1O5pnv5OSJ8Em7DqKOzAHcWt5XZzbkZHj6CJ7OS/EzvShhcrgqw9MFGHBkwyWA/118nE20C9FgrpO7+Di7A/Cndh1ESqZww1czq69mQk6GpxPwzlhEKwCj9f1wpl2IDyaGq3JqSAEGHBHghq//yjmI0Ys+5C4+zoZw20N45hvRc39bmKeLOuQk4P4Fr14g2uV97Pvpog45mXN40K6DKGBzuLnqaEUdcgCwvh+OwaAjqjOHW4CIeqU1+pADGHLGXXycDbEJs/LjG8WSzrWCC70ZgAVcB1hoFkS6GHKGSKBV317rVuTVEpvwKxh8djDkIiZzZuXbEMClYjkhmsPN+xVwwcc5vwgx5CIindoIwC1sdWltYehFiCHXYxcfZ1dwgTaS9+zU2jUF8AgXeHWrv9QDDLmekVXPMth+Uy3GliVc4GUMvH5hyPVAJdjG6PfKZywYeD3CkAtUZSg6BufXQlYG3mR9P1wo10I1GHKBkRXRMYC3upXQCeYAJgAeuWgRDoZcAKRrGwO4g/7VBNSOB7jhbKFdiHUMOUXs2kyYww1lM+1CrGLIKbj4OBuDc23WrOCGshnn7vxiyHnCISlVPABIGXZ+MOQKPMFm27PFVe2Q6P+B/wHCuHB4MQ8mbAAAAABJRU5ErkJggg==
@@ -475,6 +725,7 @@ spec:
           - otilm.com
           resources:
           - connectors
+          - proxies
           verbs:
           - get
           - list
@@ -486,6 +737,7 @@ spec:
           resources:
           - connectors/finalizers
           - platforms/finalizers
+          - proxies/finalizers
           verbs:
           - update
         - apiGroups:
@@ -493,6 +745,7 @@ spec:
           resources:
           - connectors/status
           - platforms/status
+          - proxies/status
           verbs:
           - get
           - patch
@@ -619,6 +872,7 @@ spec:
                   capabilities:
                     drop:
                     - ALL
+                  readOnlyRootFilesystem: true
               securityContext:
                 runAsNonRoot: true
                 seccompProfile:

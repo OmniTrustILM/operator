@@ -1,7 +1,7 @@
 # ILM Operator
 
-A Kubernetes operator that manages the **ILM (Identity Lifecycle Management) platform** and
-its **connectors** declaratively, through Custom Resources (`otilm.com/v1alpha1`):
+A Kubernetes operator that manages the **ILM (Identity Lifecycle Management) platform**, its
+**connectors**, and the **ILM proxy** declaratively, through Custom Resources (`otilm.com/v1alpha1`):
 
 - **`Platform`** — deploys and wires the ILM platform itself: Core, auth,
   auth-opa-policies, scheduler, fe-administrator, the Kong API gateway, and the
@@ -12,8 +12,11 @@ its **connectors** declaratively, through Custom Resources (`otilm.com/v1alpha1`
 - **`Connector`** — deploys an ILM connector: Deployment, Service, ServiceAccount, health
   probes, config injection, metrics, an optional PodDisruptionBudget, and optional
   registration with the ILM platform.
+- **`Proxy`** — deploys the ILM proxy, the outbound-only broker bridge for restricted
+  network zones, configured solely by the provisioning-issued config token (a Secret
+  reference — no credentials or broker settings in the CR).
 
-One operator binary runs both controllers.
+One operator binary runs all three controllers.
 
 ## Why an operator?
 
@@ -77,7 +80,7 @@ kubectl apply -f connector.yaml
 kubectl get connectors -o wide
 ```
 
-See the [samples index](config/samples/README.md) for more Connector and Platform examples.
+See the [samples index](config/samples/README.md) for more Connector, Platform, and Proxy examples.
 
 ## Features
 
@@ -109,6 +112,15 @@ See the [samples index](config/samples/README.md) for more Connector and Platfor
   ServiceMonitor, and optional platform registration.
 - Security hardened — non-root, read-only root filesystem, dropped capabilities.
 
+### Proxy
+
+- Declarative ILM proxy deployment from the provisioning-issued config token (a Secret
+  reference — credential rotation rolls the proxy automatically).
+- Deployment, two-port Service (health/metrics + the connector-facing API),
+  ServiceAccount, optional PodDisruptionBudget and ServiceMonitor.
+- Same configurability surface as Connector: secret/configMap refs, volumes,
+  SCC-hardened sidecars/init containers, scheduling, workload identity.
+
 ## Documentation
 
 | Document | What it covers |
@@ -121,6 +133,7 @@ See the [samples index](config/samples/README.md) for more Connector and Platfor
 | [Migrating from the Helm umbrella chart](docs/migration-from-helm.md) | Translating chart values to a `Platform` CR (the `values2platform` aid). |
 | [Platform design specification](docs/design/platform-operator.md) | Architecture, security model, infra delegation, reconciliation. |
 | [Connector design specification](docs/design/connector-operator.md) | The `Connector` CRD: schema, reconciliation flow, architecture. |
+| [Proxy design specification](docs/design/proxy-operator.md) | The `Proxy` CRD: config-token contract, credential delivery, reconciliation. |
 | [Platform CR field reference](docs/design/examples/platform-cr-reference.yaml) | Annotated full-surface reference (implemented vs. design-target). |
 | [Operator install paths](deploy/README.md) | Installing the operator itself — `kubectl apply` release manifest, Helm chart, or OLM. |
 | [CLAUDE.md](CLAUDE.md) | Development guide. |
@@ -131,7 +144,7 @@ The operator and its CRDs install together. Choose one path.
 
 ### kubectl apply (release manifest)
 
-Each release ships a single self-contained manifest — Namespace, both CRDs, RBAC, and the
+Each release ships a single self-contained manifest — Namespace, all three CRDs, RBAC, and the
 manager Deployment, with the operator image pinned to that release. No cluster tooling beyond
 `kubectl` is required, and **cert-manager is not needed to install the operator** (it is only a
 prerequisite for cert-managed *platform* edges):
@@ -229,7 +242,7 @@ make run          # run the operator outside the cluster
 ## Project structure
 
 ```
-api/v1alpha1/          CRD types: connector_types.go, platform_types.go, common_types.go
+api/v1alpha1/          CRD types: connector_types.go, platform_types.go, proxy_types.go, common_types.go
 cmd/
   main.go              Operator entrypoint
   values2platform/     Helm-values → Platform CR migration converter
@@ -238,11 +251,13 @@ internal/
     common/            CRD-agnostic builders (Component model, Deployment/Service/HPA/…, SCC-clean security)
     connector/         Connector-specific builders
     platform/          Platform-specific builders (component resolution, edge, infra CRs)
+    proxy/             Proxy-specific builders (token-only Deployment, two-port Service)
   bom/                 Versioned bill-of-materials (image coordinates + wiring + managed topology)
   checksum/            Configuration checksum utility (drift detection)
   controller/
     connector/         Connector reconciler
     platform/          Platform reconciler (gates, prune, OIDC, lifecycle)
+    proxy/             Proxy reconciler (config-token consumer; no platform calls)
   platform/            capabilities/ — the generic RESTMapper-based upstream-CRD detector
   registration/        ILM platform registration client (connector → platform) + OIDC wiring
   monitoring/          Prometheus metrics + event recorder helpers
@@ -260,7 +275,7 @@ The operator follows the standard controller-runtime pattern. Each controller wa
 and reconciles the desired state, delegating resource construction to pure builder functions.
 
 ```
-Platform / Connector CR --> Reconciler --> Builders --> Kubernetes resources
+Platform / Connector / Proxy CR --> Reconciler --> Builders --> Kubernetes resources
                                 |                        (+ upstream-operator CRs for managed infra)
                                 +--> capability detection & gating
                                 +--> Secret/ConfigMap watch (config-drift)

@@ -54,6 +54,12 @@ spec:
           spec:
             description: ConnectorSpec defines the desired state of Connector.
             properties:
+              affinity:
+                description: |-
+                  Affinity sets the pod's affinity/anti-affinity and node affinity rules. The
+                  schema is preserved opaquely (x-kubernetes-preserve-unknown-fields) to keep
+                  the CRD compact; the apiserver/kubelet still validate it as a PodSpec field.
+                x-kubernetes-preserve-unknown-fields: true
               configMapRefs:
                 description: ConfigMapRefs defines references to Kubernetes configmaps.
                 items:
@@ -169,6 +175,15 @@ spec:
                 x-kubernetes-validations:
                 - message: image.repository and image.tag are required
                   rule: has(self.repository) && has(self.tag)
+              initContainers:
+                description: |-
+                  InitContainers are extra init containers run before the main container (e.g.
+                  wait-for-dependency). They are SCC-hardened like every other container, so a
+                  user init container cannot weaken pod security. The schema is preserved
+                  opaquely (x-kubernetes-preserve-unknown-fields) to keep the CRD compact; the
+                  Go type stays []corev1.Container so it marshals correctly and the kubelet
+                  validates it.
+                x-kubernetes-preserve-unknown-fields: true
               lifecycle:
                 description: Lifecycle defines lifecycle management settings.
                 properties:
@@ -242,6 +257,13 @@ spec:
                     type: object
                 required:
                 - enabled
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector constrains the connector pods to nodes with matching labels —
+                  e.g. nodes with reachability to an HSM or appliance network segment.
                 type: object
               podAnnotations:
                 additionalProperties:
@@ -530,6 +552,72 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+              serviceAccount:
+                description: |-
+                  ServiceAccount overrides the dedicated ServiceAccount's name (e.g. to bind a
+                  pre-created workload-identity ServiceAccount) and stamps extra annotations on
+                  it (e.g. an AWS IRSA role-arn or a GCP/Azure workload-identity binding).
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations are extra annotations stamped onto the rendered ServiceAccount (e.g.
+                      a cloud workload-identity binding). They are non-sensitive routing metadata only.
+                    type: object
+                  name:
+                    description: |-
+                      Name overrides the ServiceAccount name the component uses (and is named after).
+                      When unset the component's own name is used.
+                    type: string
+                type: object
+              sidecars:
+                description: |-
+                  Sidecars are extra containers run alongside the main container (e.g. a vault
+                  agent or log shipper). They are SCC-hardened like every other container. The
+                  schema is preserved opaquely for the same CRD-size reason as InitContainers.
+                x-kubernetes-preserve-unknown-fields: true
+              tolerations:
+                description: Tolerations allow the connector pods to schedule onto
+                  tainted nodes.
+                items:
+                  description: |-
+                    The pod this Toleration is attached to tolerates any taint that matches
+                    the triple <key,value,effect> using the matching operator <operator>.
+                  properties:
+                    effect:
+                      description: |-
+                        Effect indicates the taint effect to match. Empty means match all taint effects.
+                        When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                      type: string
+                    key:
+                      description: |-
+                        Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                        If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                      type: string
+                    operator:
+                      description: |-
+                        Operator represents a key's relationship to the value.
+                        Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                        Exists is equivalent to wildcard for value, so that a pod can
+                        tolerate all taints of a particular category.
+                        Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                      type: string
+                    tolerationSeconds:
+                      description: |-
+                        TolerationSeconds represents the period of time the toleration (which must be
+                        of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                        it is not set, which means tolerate the taint forever (do not evict). Zero and
+                        negative values will be treated as 0 (evict immediately) by the system.
+                      format: int64
+                      type: integer
+                    value:
+                      description: |-
+                        Value is the taint value the toleration matches to.
+                        If the operator is Exists, the value should be empty, otherwise just a regular string.
+                      type: string
+                  type: object
+                type: array
               volumes:
                 description: Volumes defines additional volumes for the connector
                   pod.

@@ -416,10 +416,10 @@ type LoggingSpec struct {
 	Level string `json:"level,omitempty"`
 }
 
-// ProxySpec configures outbound HTTP(S) proxy support for platform components.
+// OutboundProxySpec configures outbound HTTP(S) proxy support for platform components.
 // When Enabled is true, PROXY_ENABLED is set; the HTTP/HTTPS/NoProxy values are
 // only injected when non-empty.
-type ProxySpec struct {
+type OutboundProxySpec struct {
 	// Enabled turns on proxy support (sets PROXY_ENABLED=true).
 	Enabled bool `json:"enabled,omitempty"`
 	// HTTP is the HTTP proxy URL (injected as HTTP_PROXY when set).
@@ -1201,7 +1201,7 @@ type CommonSpec struct {
 	HostName string `json:"hostName,omitempty"`
 	// Proxy configures outbound HTTP(S) proxy support for all components.
 	// +optional
-	Proxy ProxySpec `json:"proxy,omitempty"`
+	Proxy OutboundProxySpec `json:"proxy,omitempty"`
 	// Logging configures the platform log level for all components.
 	// +optional
 	Logging LoggingSpec `json:"logging,omitempty"`

@@ -1,0 +1,707 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  creationTimestamp: null
+  name: proxies.otilm.com
+spec:
+  group: otilm.com
+  names:
+    kind: Proxy
+    listKind: ProxyList
+    plural: proxies
+    shortNames:
+    - prx
+    singular: proxy
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.observedVersion
+      name: Version
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Proxy is the Schema for the proxies API. It deploys one ILM proxy instance — the
+          outbound-only broker bridge for restricted network zones — from a
+          provisioning-issued config token.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProxySpec defines the desired state of Proxy: one ILM proxy instance deployed from
+              a provisioning-issued config token. All broker configuration travels inside the
+              token; the CRD deliberately models none of it.
+            properties:
+              affinity:
+                description: |-
+                  Affinity sets the pod's affinity/anti-affinity and node affinity rules. The
+                  schema is preserved opaquely (x-kubernetes-preserve-unknown-fields) to keep
+                  the CRD compact; the apiserver/kubelet still validate it as a PodSpec field.
+                x-kubernetes-preserve-unknown-fields: true
+              configMapRefs:
+                description: |-
+                  ConfigMapRefs references Kubernetes ConfigMaps consumed as env or mounted as
+                  volumes, mirroring the Connector CR.
+                items:
+                  description: ConfigMapRef defines a reference to a Kubernetes configmap.
+                  properties:
+                    keys:
+                      description: Keys defines the individual key mappings from the
+                        configmap.
+                      items:
+                        description: ConfigMapKeyMapping defines the mapping of a
+                          key from a configmap.
+                        properties:
+                          configMapKey:
+                            description: ConfigMapKey is the key in the configmap
+                              to reference.
+                            type: string
+                          envVar:
+                            description: EnvVar is the environment variable name to
+                              map to (for env type).
+                            type: string
+                          path:
+                            description: Path is the file path to mount to (for volume
+                              type).
+                            type: string
+                        type: object
+                      type: array
+                    mountPath:
+                      description: MountPath is the path to mount the configmap (required
+                        when type=volume).
+                      type: string
+                    name:
+                      description: Name is the name of the configmap.
+                      type: string
+                    type:
+                      description: Type defines how the configmap is consumed (env
+                        or volume).
+                      enum:
+                      - env
+                      - volume
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              configTokenSecretRef:
+                description: |-
+                  ConfigTokenSecretRef names the Secret holding the proxy's config token (and,
+                  when token signing is enabled, the signing key).
+                properties:
+                  name:
+                    description: Name is the name of the Secret holding the config
+                      token.
+                    minLength: 1
+                    type: string
+                  signingKeyKey:
+                    default: tokenSigningKey
+                    description: |-
+                      SigningKeyKey is the Secret key holding the optional HMAC signing key, injected
+                      as PROXY_TOKEN_SIGNING_KEY via an optional secretKeyRef (the proxy verifies the
+                      token signature only when the key is present in the Secret).
+                    type: string
+                  tokenKey:
+                    default: configToken
+                    description: TokenKey is the Secret key holding the JWT config
+                      token.
+                    type: string
+                required:
+                - name
+                type: object
+              env:
+                description: |-
+                  Env sets additional process-level environment on the proxy container — e.g.
+                  HTTPS_PROXY/HTTP_PROXY/NO_PROXY for corporate egress, which the token cannot
+                  know. It is NOT a proxy-configuration channel: in token mode the proxy ignores
+                  PROXY_* viper env overrides entirely. Never put secrets here — use SecretRefs.
+                items:
+                  description: EnvVar defines an environment variable for a workload.
+                  properties:
+                    name:
+                      description: Name is the environment variable name.
+                      type: string
+                    value:
+                      description: |-
+                        Value is the environment variable value. It is optional so a valueless or
+                        empty-string variable can be set, mirroring core/v1 EnvVar.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              image:
+                description: Image optionally overrides the BOM-resolved proxy image,
+                  per field.
+                properties:
+                  args:
+                    description: |-
+                      Args overrides the container's command arguments. When unset the image's own CMD
+                      is used.
+                    items:
+                      type: string
+                    type: array
+                  command:
+                    description: |-
+                      Command overrides the container entrypoint (the container's command). When unset
+                      the image's own ENTRYPOINT is used.
+                    items:
+                      type: string
+                    type: array
+                  digest:
+                    description: |-
+                      Digest pins the image by content digest (e.g. "sha256:abc123..."). When set it
+                      takes precedence over Tag and the reference is composed as
+                      registry/repository/name@digest, so the workload runs an immutable image.
+                    type: string
+                  name:
+                    description: Name is the image name (optional; defaults from the
+                      version bundle when applicable).
+                    type: string
+                  pullPolicy:
+                    default: IfNotPresent
+                    description: PullPolicy defines the image pull policy.
+                    type: string
+                  pullSecrets:
+                    description: PullSecrets is a list of secret names for pulling
+                      the image.
+                    items:
+                      type: string
+                    type: array
+                  registry:
+                    description: Registry is the image registry host (optional; for
+                      example, registry.example.com).
+                    type: string
+                  repository:
+                    description: Repository is the image repository or path.
+                    type: string
+                  tag:
+                    description: |-
+                      Tag is the image tag (optional; defaults from the version bundle when applicable).
+                      Ignored when Digest is set (a digest pins the image immutably).
+                    type: string
+                type: object
+              initContainers:
+                description: |-
+                  InitContainers are extra init containers run before the main container (e.g.
+                  wait-for-dependency). They are SCC-hardened like every other container, so a
+                  user init container cannot weaken pod security. The schema is preserved
+                  opaquely (x-kubernetes-preserve-unknown-fields) to keep the CRD compact; the
+                  Go type stays []corev1.Container so it marshals correctly and the kubelet
+                  validates it.
+                x-kubernetes-preserve-unknown-fields: true
+              metrics:
+                description: Metrics defines the metrics configuration.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether metrics are enabled.
+                    type: boolean
+                  path:
+                    default: /metrics
+                    description: Path is the HTTP path of the metrics endpoint.
+                    type: string
+                  serviceMonitor:
+                    description: |-
+                      ServiceMonitor defines the ServiceMonitor configuration. Rendering is gated on
+                      the Prometheus operator CRD being served (adjunct ServiceMonitorReady condition).
+                    properties:
+                      enabled:
+                        description: Enabled indicates whether a ServiceMonitor should
+                          be created.
+                        type: boolean
+                      interval:
+                        description: Interval defines the scrape interval.
+                        type: string
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels are additional labels to add to the ServiceMonitor.
+                        type: object
+                    required:
+                    - enabled
+                    type: object
+                required:
+                - enabled
+                type: object
+              nodeSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  NodeSelector constrains the proxy pods to nodes with matching labels — e.g.
+                  nodes permitted outbound egress in a segmented restricted zone.
+                type: object
+              podAnnotations:
+                additionalProperties:
+                  type: string
+                description: PodAnnotations are arbitrary annotations added to the
+                  proxy pod template.
+                type: object
+              podDisruptionBudget:
+                description: PodDisruptionBudget defines an optional PDB for the proxy
+                  pods.
+                properties:
+                  enabled:
+                    description: Enabled indicates whether a PodDisruptionBudget should
+                      be created.
+                    type: boolean
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number/percentage of pods that may be unavailable. It is
+                      honoured only when MinAvailable is unset (a PodDisruptionBudget may carry at most one).
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MinAvailable is the minimum number/percentage of pods that must be available. It is
+                      mutually exclusive with MaxUnavailable and takes precedence when both are set.
+                    x-kubernetes-int-or-string: true
+                required:
+                - enabled
+                type: object
+              podLabels:
+                additionalProperties:
+                  type: string
+                description: |-
+                  PodLabels are arbitrary labels added to the proxy pod template. They are merged
+                  with the operator-managed labels; operator labels take precedence.
+                type: object
+              probes:
+                description: |-
+                  Probes overrides the proxy's liveness/readiness/startup probes. Defaults match
+                  the proxy's endpoints: /health (liveness, startup) and /ready (readiness) on
+                  the HTTP port.
+                properties:
+                  liveness:
+                    description: Liveness defines the liveness probe configuration.
+                    properties:
+                      failureThreshold:
+                        description: FailureThreshold is the number of consecutive
+                          failures before the probe is considered failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: InitialDelaySeconds is the number of seconds
+                          after the container starts before the probe is initiated.
+                        format: int32
+                        type: integer
+                      path:
+                        description: Path is the HTTP path to probe.
+                        type: string
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                    type: object
+                  readiness:
+                    description: Readiness defines the readiness probe configuration.
+                    properties:
+                      failureThreshold:
+                        description: FailureThreshold is the number of consecutive
+                          failures before the probe is considered failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: InitialDelaySeconds is the number of seconds
+                          after the container starts before the probe is initiated.
+                        format: int32
+                        type: integer
+                      path:
+                        description: Path is the HTTP path to probe.
+                        type: string
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                    type: object
+                  startup:
+                    description: Startup defines the startup probe configuration.
+                    properties:
+                      failureThreshold:
+                        description: FailureThreshold is the number of consecutive
+                          failures before the probe is considered failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: InitialDelaySeconds is the number of seconds
+                          after the container starts before the probe is initiated.
+                        format: int32
+                        type: integer
+                      path:
+                        description: Path is the HTTP path to probe.
+                        type: string
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
+              replicas:
+                default: 1
+                description: Replicas is the number of desired replicas.
+                format: int32
+                minimum: 0
+                type: integer
+              resources:
+                description: Resources defines the compute resource requirements.
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims,
+                      that are used by this container.
+
+                      This field depends on the
+                      DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: |-
+                            Name must match the name of one entry in pod.spec.resourceClaims of
+                            the Pod where this field is used. It makes that resource available
+                            inside a container.
+                          type: string
+                        request:
+                          description: |-
+                            Request is the name chosen for a request in the referenced claim.
+                            If empty, everything from the claim is made available, otherwise
+                            only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+              secretRefs:
+                description: |-
+                  SecretRefs references Kubernetes Secrets consumed as env (envFrom / secretKeyRef
+                  with key mapping) or mounted as volumes — e.g. a private-PKI CA bundle for the
+                  broker TLS connection. Values are projected by reference, never copied. The
+                  operator-reserved env names (PROXY_CONFIG_TOKEN, PROXY_TOKEN_SIGNING_KEY) cannot
+                  be remapped through a ref: the config-token wiring always wins.
+                items:
+                  description: SecretRef defines a reference to a Kubernetes secret.
+                  properties:
+                    keys:
+                      description: Keys defines the individual key mappings from the
+                        secret.
+                      items:
+                        description: RefKeyMapping defines the mapping of a key from
+                          a secret or configmap.
+                        properties:
+                          envVar:
+                            description: EnvVar is the environment variable name to
+                              map to (for env type).
+                            type: string
+                          path:
+                            description: Path is the file path to mount to (for volume
+                              type).
+                            type: string
+                          secretKey:
+                            description: SecretKey is the key in the secret to reference.
+                            type: string
+                        type: object
+                      type: array
+                    mountPath:
+                      description: MountPath is the path to mount the secret (required
+                        when type=volume).
+                      type: string
+                    name:
+                      description: Name is the name of the secret.
+                      type: string
+                    type:
+                      description: Type defines how the secret is consumed (env or
+                        volume).
+                      enum:
+                      - env
+                      - volume
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              securityContext:
+                description: |-
+                  SecurityContext tunes the per-workload runtime decisions of the container
+                  security context (readOnlyRootFilesystem). The SCC-critical fields
+                  (runAsNonRoot, no privilege escalation, dropped capabilities, seccomp) are
+                  hardened by the shared builders and cannot be weakened from the CR.
+                properties:
+                  readOnlyRootFilesystem:
+                    default: true
+                    description: ReadOnlyRootFilesystem indicates that the container
+                      has a read-only root filesystem.
+                    type: boolean
+                  runAsNonRoot:
+                    default: true
+                    description: RunAsNonRoot indicates that the container must run
+                      as a non-root user.
+                    type: boolean
+                type: object
+              serviceAccount:
+                description: |-
+                  ServiceAccount overrides the dedicated ServiceAccount's name (e.g. to bind a
+                  pre-created workload-identity ServiceAccount) and stamps extra annotations on
+                  it (e.g. an AWS IRSA role-arn or a GCP/Azure workload-identity binding).
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations are extra annotations stamped onto the rendered ServiceAccount (e.g.
+                      a cloud workload-identity binding). They are non-sensitive routing metadata only.
+                    type: object
+                  name:
+                    description: |-
+                      Name overrides the ServiceAccount name the component uses (and is named after).
+                      When unset the component's own name is used.
+                    type: string
+                type: object
+              sidecars:
+                description: |-
+                  Sidecars are extra containers run alongside the main container (e.g. a vault
+                  agent or log shipper). They are SCC-hardened like every other container. The
+                  schema is preserved opaquely for the same CRD-size reason as InitContainers.
+                x-kubernetes-preserve-unknown-fields: true
+              terminationGracePeriodSeconds:
+                description: |-
+                  TerminationGracePeriodSeconds is the duration the pod needs to terminate
+                  gracefully (in-flight broker messages drain before shutdown).
+                format: int64
+                type: integer
+              tolerations:
+                description: |-
+                  Tolerations allow the proxy pods to schedule onto tainted nodes (e.g. dedicated
+                  egress nodes).
+                items:
+                  description: |-
+                    The pod this Toleration is attached to tolerates any taint that matches
+                    the triple <key,value,effect> using the matching operator <operator>.
+                  properties:
+                    effect:
+                      description: |-
+                        Effect indicates the taint effect to match. Empty means match all taint effects.
+                        When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                      type: string
+                    key:
+                      description: |-
+                        Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                        If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                      type: string
+                    operator:
+                      description: |-
+                        Operator represents a key's relationship to the value.
+                        Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                        Exists is equivalent to wildcard for value, so that a pod can
+                        tolerate all taints of a particular category.
+                        Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                      type: string
+                    tolerationSeconds:
+                      description: |-
+                        TolerationSeconds represents the period of time the toleration (which must be
+                        of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                        it is not set, which means tolerate the taint forever (do not evict). Zero and
+                        negative values will be treated as 0 (evict immediately) by the system.
+                      format: int64
+                      type: integer
+                    value:
+                      description: |-
+                        Value is the taint value the toleration matches to.
+                        If the operator is Exists, the value should be empty, otherwise just a regular string.
+                      type: string
+                  type: object
+                type: array
+              volumes:
+                description: Volumes defines additional emptyDir volumes mounted into
+                  the proxy container.
+                items:
+                  description: VolumeSpec defines a volume to mount in the workload
+                    pod.
+                  properties:
+                    emptyDir:
+                      description: EmptyDir defines the emptyDir volume source.
+                      properties:
+                        medium:
+                          description: Medium is the storage medium type (e.g., "",
+                            "Memory").
+                          type: string
+                        sizeLimit:
+                          description: SizeLimit is the maximum size of the emptyDir
+                            volume.
+                          type: string
+                      type: object
+                    mountPath:
+                      description: MountPath is the path to mount the volume in the
+                        container.
+                      type: string
+                    name:
+                      description: Name is the name of the volume.
+                      type: string
+                  required:
+                  - mountPath
+                  - name
+                  type: object
+                type: array
+            required:
+            - configTokenSecretRef
+            type: object
+          status:
+            description: |-
+              ProxyStatus defines the observed state of Proxy. Conditions and fields carry names,
+              phases, reasons, and checksums — never secret values or connection coordinates.
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the Proxy's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              configChecksum:
+                description: ConfigChecksum is a checksum of the referenced config-token
+                  Secret.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed.
+                format: int64
+                type: integer
+              observedVersion:
+                description: ObservedVersion is the resolved proxy image tag (BOM
+                  default or spec.image override).
+                type: string
+              phase:
+                description: Phase is the current phase of the Proxy.
+                type: string
+              readyReplicas:
+                description: ReadyReplicas is the number of ready replicas.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: null
+  storedVersions: null

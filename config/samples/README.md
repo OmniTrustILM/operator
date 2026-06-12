@@ -1,4 +1,4 @@
-# Platform & Connector samples
+# Platform, Connector & Proxy samples
 
 Working, copy-pasteable `otilm.com/v1alpha1` examples. Every `platform_*.yaml` here is a
 **complete CR that passes apiserver validation** — pick the one closest to your scenario,
@@ -107,5 +107,14 @@ The operator also manages standalone `Connector` CRs:
 [`connector_full.yaml`](./connector_full.yaml),
 [`connector_with_registration.yaml`](./connector_with_registration.yaml).
 
-> `kustomization.yaml`, `v1alpha1_platform.yaml`, and `v1alpha1_connector.yaml` are
-> Kustomize/scaffolding entries, not curated examples — use the named samples above.
+## Proxy samples
+
+The `Proxy` CR deploys the ILM proxy — the outbound-only broker bridge for restricted
+network zones — from a provisioning-issued config token Secret (normally part of the
+manifest the ILM UI renders; design: [`docs/design/proxy-operator.md`](../../docs/design/proxy-operator.md)):
+[`proxy_minimal.yaml`](./proxy_minimal.yaml) (token Secret ref only — the common case),
+[`proxy_full.yaml`](./proxy_full.yaml) (every optional knob, annotated).
+
+> `kustomization.yaml`, `v1alpha1_platform.yaml`, `v1alpha1_connector.yaml`, and
+> `v1alpha1_proxy.yaml` are Kustomize/scaffolding entries, not curated examples — use
+> the named samples above.

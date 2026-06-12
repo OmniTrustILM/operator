@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Package main is the entrypoint for the ILM Operator manager, which runs the Connector and Platform controllers.
+// Package main is the entrypoint for the ILM Operator manager, which runs the Connector, Platform, and Proxy controllers.
 package main
 
 import (
@@ -49,6 +49,8 @@ import (
 	otilmcomv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/controller/connector"
 	"github.com/OmniTrustILM/operator/internal/controller/platform"
+	proxyctrl "github.com/OmniTrustILM/operator/internal/controller/proxy"
+	"github.com/OmniTrustILM/operator/internal/monitoring"
 
 	// Import monitoring package for Prometheus metrics registration side effects.
 	_ "github.com/OmniTrustILM/operator/internal/monitoring"
@@ -194,6 +196,13 @@ func addCertWatcherToManager(mgr ctrl.Manager, watcher *certwatcher.CertWatcher,
 	}
 }
 
+// recorderName is the EventRecorder source every controller emits events as;
+// errCreateController is the shared setup-failure log message.
+const (
+	recorderName        = "ilm-operator"
+	errCreateController = "unable to create controller"
+)
+
 func main() {
 	cfg := parseFlags()
 	setupLog.Info("starting ilm-operator", "version", version.Version, "commit", version.GitCommit)
@@ -223,20 +232,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := monitoring.RegisterManagedCountCollector(mgr.GetClient()); err != nil {
+		setupLog.Error(err, "unable to register managed-count metrics collector")
+		os.Exit(1)
+	}
+
 	if err := (&connector.Reconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Connector")
+		setupLog.Error(err, errCreateController, "controller", "Connector")
 		os.Exit(1)
 	}
 	if err := (&platform.Reconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Platform")
+		setupLog.Error(err, errCreateController, "controller", "Platform")
+		os.Exit(1)
+	}
+	if err := (&proxyctrl.Reconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, errCreateController, "controller", "Proxy")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

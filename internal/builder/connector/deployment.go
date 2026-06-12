@@ -23,66 +23,71 @@ SOFTWARE.
 package connector
 
 import (
-	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/builder/common"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	"github.com/OmniTrustILM/operator/internal/builder/common"
 )
 
-// BuildDeployment constructs a Deployment for the given Connector.
+// BuildDeployment constructs a Deployment for the given Connector by composing the
+// shared Component render model (the CLAUDE.md per-kind pattern): pod+container SCC
+// hardening, env/volume projection, and the workload shape all come from
+// internal/builder/common, so hardening fixes land on every Kind at once.
 func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *appsv1.Deployment {
-	name := ChildResourceName(conn)
-	labels := Labels(conn)
-	port := conn.Spec.Service.Port
+	return common.BuildDeployment(component(conn, configChecksum))
+}
 
-	envVars, envFrom := buildEnvVarsAndSources(conn)
-	volumes, volumeMounts := buildVolumes(conn)
+// component assembles the render-ready Component for a Connector. The historical
+// per-kind label/selector scheme is preserved via the override fields — a deployed
+// Connector's .spec.selector is immutable — and the Service port shape is passed
+// verbatim so live Services stay byte-identical.
+//
+// SCC note: the user SecurityContextSpec's ReadOnlyRootFilesystem is honored (a
+// runtime decision), but RunAsNonRoot is FORCED true by the shared hardening — a CR
+// can no longer weaken the restricted-v2 contract, matching the platform components.
+func component(conn *otilmv1alpha1.Connector, configChecksum string) common.Component {
 	// nil bundleLookup: Connector is version-agnostic (no BOM bundle); its image comes
 	// wholly from conn.Spec.Image, so there is no bundle default to fall back to.
 	image, pullPolicy := common.ResolveImage(nil, "", otilmv1alpha1.ImageSpec{}, conn.Spec.Image)
+	port := conn.Spec.Service.Port
 
-	container := corev1.Container{
-		Name:            "connector",
-		Image:           image,
-		ImagePullPolicy: pullPolicy,
-		// Command/Args pass through from the image spec (nil slices are harmless and
-		// leave the image's own ENTRYPOINT/CMD intact); honored like the Platform builder.
-		Command: conn.Spec.Image.Command,
-		Args:    conn.Spec.Image.Args,
-		Ports: []corev1.ContainerPort{
-			{
-				ContainerPort: port,
-				Protocol:      corev1.ProtocolTCP,
-			},
-		},
-		Env:             envVars,
-		EnvFrom:         envFrom,
-		VolumeMounts:    volumeMounts,
-		LivenessProbe:   buildProbe(conn, livenessProbe, port),
-		ReadinessProbe:  buildProbe(conn, readinessProbe, port),
-		StartupProbe:    buildProbe(conn, startupProbe, port),
-		SecurityContext: buildSecurityContext(conn),
+	inlineEnv := make([]common.EnvPair, 0, len(conn.Spec.Env))
+	for _, e := range conn.Spec.Env {
+		inlineEnv = append(inlineEnv, common.EnvPair{Name: e.Name, Value: e.Value})
 	}
 
-	// Resources
-	if conn.Spec.Resources != nil {
-		container.Resources = *conn.Spec.Resources
+	// Keyed secret/configmap refs render via the shared CRD-agnostic projection and
+	// ride in ExtraEnv (appended last, so a user keyed ref wins on a duplicate name —
+	// Kubernetes container env is last-duplicate-wins).
+	var extraEnv []corev1.EnvVar
+	var envFrom []corev1.EnvFromSource
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+	for i := range conn.Spec.SecretRefs {
+		b := common.BuildSecretRef(&conn.Spec.SecretRefs[i])
+		extraEnv = append(extraEnv, b.Env...)
+		envFrom = append(envFrom, b.EnvFrom...)
+		volumes = append(volumes, b.Volumes...)
+		volumeMounts = append(volumeMounts, b.VolumeMounts...)
+	}
+	for i := range conn.Spec.ConfigMapRefs {
+		b := common.BuildConfigMapRef(&conn.Spec.ConfigMapRefs[i])
+		extraEnv = append(extraEnv, b.Env...)
+		envFrom = append(envFrom, b.EnvFrom...)
+		volumes = append(volumes, b.Volumes...)
+		volumeMounts = append(volumeMounts, b.VolumeMounts...)
+	}
+	for _, v := range conn.Spec.Volumes {
+		vol, vm := common.BuildEphemeralVolume(v)
+		volumes = append(volumes, vol)
+		volumeMounts = append(volumeMounts, vm)
 	}
 
-	podSpec := corev1.PodSpec{
-		ServiceAccountName: name,
-		Containers:         []corev1.Container{container},
-		Volumes:            volumes,
-		ImagePullSecrets:   buildImagePullSecrets(conn),
-	}
-
-	// Termination grace period
-	if conn.Spec.Lifecycle != nil && conn.Spec.Lifecycle.TerminationGracePeriodSeconds != nil {
-		podSpec.TerminationGracePeriodSeconds = conn.Spec.Lifecycle.TerminationGracePeriodSeconds
+	replicas := int32(1)
+	if conn.Spec.Replicas != nil {
+		replicas = *conn.Spec.Replicas
 	}
 
 	// Merge user-provided pod annotations with the checksum annotation.
@@ -93,154 +98,65 @@ func BuildDeployment(conn *otilmv1alpha1.Connector, configChecksum string) *apps
 	}
 	podAnnotations[ChecksumAnnotation] = configChecksum
 
-	// Merge user-provided pod labels with operator-managed labels.
-	// Operator labels take precedence (they are immutable selectors).
-	podLabels := make(map[string]string, len(conn.Spec.PodLabels)+len(labels))
-	for k, v := range conn.Spec.PodLabels {
-		podLabels[k] = v
-	}
-	for k, v := range labels {
-		podLabels[k] = v
+	// Read-only root is a per-workload runtime decision: default true, user override honored.
+	roRoot := true
+	if conn.Spec.SecurityContext != nil && conn.Spec.SecurityContext.ReadOnlyRootFilesystem != nil {
+		roRoot = *conn.Spec.SecurityContext.ReadOnlyRootFilesystem
 	}
 
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: conn.Namespace,
-			Labels:    labels,
+	c := common.Component{
+		Name:          ChildResourceName(conn),
+		ContainerName: "connector",
+		Instance:      conn.Name,
+		Namespace:     conn.Namespace,
+		Image:         image,
+		PullPolicy:    pullPolicy,
+		PullSecrets:   conn.Spec.Image.PullSecrets,
+		Replicas:      replicas,
+		Port:          port,
+		ServiceType:   corev1.ServiceType(conn.Spec.Service.Type),
+		ServicePorts: []corev1.ServicePort{{
+			Name:       "http",
+			Port:       port,
+			TargetPort: intstr.FromInt32(port),
+			Protocol:   corev1.ProtocolTCP,
+		}},
+		Env:      inlineEnv,
+		ExtraEnv: extraEnv,
+		EnvFrom:  envFrom,
+		Probes: common.Probes{
+			Liveness:  buildProbe(conn, livenessProbe, port),
+			Readiness: buildProbe(conn, readinessProbe, port),
+			Startup:   buildProbe(conn, startupProbe, port),
 		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: conn.Spec.Replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: SelectorLabels(conn),
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      podLabels,
-					Annotations: podAnnotations,
-				},
-				Spec: podSpec,
-			},
-		},
+		Volumes:                volumes,
+		VolumeMounts:           volumeMounts,
+		Command:                conn.Spec.Image.Command,
+		Args:                   conn.Spec.Image.Args,
+		ReadOnlyRootFilesystem: &roRoot,
+		NodeSelector:           conn.Spec.NodeSelector,
+		Tolerations:            conn.Spec.Tolerations,
+		PodAnnotations:         podAnnotations,
+		PodLabels:              conn.Spec.PodLabels,
+		LabelsOverride:         Labels(conn),
+		SelectorLabelsOverride: SelectorLabels(conn),
 	}
-}
-
-// buildEnvVarsAndSources assembles inline env vars and EnvFrom sources from
-// the Connector spec, including inline env, SecretRefs, and ConfigMapRefs.
-func buildEnvVarsAndSources(conn *otilmv1alpha1.Connector) ([]corev1.EnvVar, []corev1.EnvFromSource) {
-	var envVars []corev1.EnvVar
-	var envFrom []corev1.EnvFromSource
-
-	for _, e := range conn.Spec.Env {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  e.Name,
-			Value: e.Value,
-		})
+	if conn.Spec.Resources != nil {
+		c.Resources = *conn.Spec.Resources
 	}
-
-	for i := range conn.Spec.SecretRefs {
-		sr := &conn.Spec.SecretRefs[i]
-		e, ef, _, _ := buildSecretRef(sr)
-		envVars = append(envVars, e...)
-		envFrom = append(envFrom, ef...)
+	if conn.Spec.Lifecycle != nil {
+		c.TerminationGracePeriodSeconds = conn.Spec.Lifecycle.TerminationGracePeriodSeconds
 	}
-
-	for i := range conn.Spec.ConfigMapRefs {
-		cmr := &conn.Spec.ConfigMapRefs[i]
-		e, ef, _, _ := buildConfigMapRef(cmr)
-		envVars = append(envVars, e...)
-		envFrom = append(envFrom, ef...)
-	}
-
-	return envVars, envFrom
-}
-
-// buildVolumes assembles all volumes and volume mounts from SecretRefs,
-// ConfigMapRefs, and ephemeral volumes.
-func buildVolumes(conn *otilmv1alpha1.Connector) ([]corev1.Volume, []corev1.VolumeMount) {
-	var volumes []corev1.Volume
-	var volumeMounts []corev1.VolumeMount
-
-	for i := range conn.Spec.SecretRefs {
-		sr := &conn.Spec.SecretRefs[i]
-		_, _, v, vm := buildSecretRef(sr)
-		volumes = append(volumes, v...)
-		volumeMounts = append(volumeMounts, vm...)
-	}
-
-	for i := range conn.Spec.ConfigMapRefs {
-		cmr := &conn.Spec.ConfigMapRefs[i]
-		_, _, v, vm := buildConfigMapRef(cmr)
-		volumes = append(volumes, v...)
-		volumeMounts = append(volumeMounts, vm...)
-	}
-
-	for _, v := range conn.Spec.Volumes {
-		vol, vm := buildEphemeralVolume(v)
-		volumes = append(volumes, vol)
-		volumeMounts = append(volumeMounts, vm)
-	}
-
-	return volumes, volumeMounts
-}
-
-// buildEphemeralVolume constructs a single ephemeral Volume and its VolumeMount.
-func buildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
-	vol := corev1.Volume{Name: v.Name}
-	emptyDir := &corev1.EmptyDirVolumeSource{}
-	if v.EmptyDir != nil {
-		if v.EmptyDir.Medium != nil {
-			emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
+	c.InitContainers = conn.Spec.InitContainers
+	c.Sidecars = conn.Spec.Sidecars
+	c.Affinity = conn.Spec.Affinity
+	if conn.Spec.ServiceAccount != nil {
+		if conn.Spec.ServiceAccount.Name != nil {
+			c.ServiceAccountName = *conn.Spec.ServiceAccount.Name
 		}
-		if v.EmptyDir.SizeLimit != nil {
-			qty, err := resource.ParseQuantity(*v.EmptyDir.SizeLimit)
-			if err != nil {
-				log.Log.Info("invalid sizeLimit value, skipping", "volume", v.Name, "sizeLimit", *v.EmptyDir.SizeLimit, "error", err)
-			} else {
-				emptyDir.SizeLimit = &qty
-			}
-		}
+		c.ServiceAccountAnnotations = conn.Spec.ServiceAccount.Annotations
 	}
-	vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
-	vm := corev1.VolumeMount{
-		Name:      v.Name,
-		MountPath: v.MountPath,
-	}
-	return vol, vm
-}
-
-// buildImagePullSecrets converts the image pull secret names into LocalObjectReferences.
-func buildImagePullSecrets(conn *otilmv1alpha1.Connector) []corev1.LocalObjectReference {
-	var secrets []corev1.LocalObjectReference
-	for _, s := range conn.Spec.Image.PullSecrets {
-		secrets = append(secrets, corev1.LocalObjectReference{Name: s})
-	}
-	return secrets
-}
-
-// buildSecretRef projects one SecretRef into its env / envFrom / volume bindings via the
-// shared CRD-agnostic renderer (common.BuildSecretRef), so the Connector and Platform
-// render identical secretKeyRef / volume shapes from the same spec type.
-func buildSecretRef(sr *otilmv1alpha1.SecretRef) (
-	envVars []corev1.EnvVar,
-	envFrom []corev1.EnvFromSource,
-	volumes []corev1.Volume,
-	volumeMounts []corev1.VolumeMount,
-) {
-	b := common.BuildSecretRef(sr)
-	return b.Env, b.EnvFrom, b.Volumes, b.VolumeMounts
-}
-
-// buildConfigMapRef projects one ConfigMapRef into its env / envFrom / volume bindings
-// via the shared CRD-agnostic renderer (common.BuildConfigMapRef).
-func buildConfigMapRef(cmr *otilmv1alpha1.ConfigMapRef) (
-	envVars []corev1.EnvVar,
-	envFrom []corev1.EnvFromSource,
-	volumes []corev1.Volume,
-	volumeMounts []corev1.VolumeMount,
-) {
-	b := common.BuildConfigMapRef(cmr)
-	return b.Env, b.EnvFrom, b.Volumes, b.VolumeMounts
+	return c
 }
 
 type probeType int
@@ -312,32 +228,5 @@ func defaultProbeConfig(pt probeType) *otilmv1alpha1.ProbeConfig {
 		}
 	default:
 		return &otilmv1alpha1.ProbeConfig{}
-	}
-}
-
-func buildSecurityContext(conn *otilmv1alpha1.Connector) *corev1.SecurityContext {
-	runAsNonRoot := true
-	readOnlyRoot := true
-	allowPrivilegeEscalation := false
-
-	if conn.Spec.SecurityContext != nil {
-		if conn.Spec.SecurityContext.RunAsNonRoot != nil {
-			runAsNonRoot = *conn.Spec.SecurityContext.RunAsNonRoot
-		}
-		if conn.Spec.SecurityContext.ReadOnlyRootFilesystem != nil {
-			readOnlyRoot = *conn.Spec.SecurityContext.ReadOnlyRootFilesystem
-		}
-	}
-
-	return &corev1.SecurityContext{
-		RunAsNonRoot:             &runAsNonRoot,
-		ReadOnlyRootFilesystem:   &readOnlyRoot,
-		AllowPrivilegeEscalation: &allowPrivilegeEscalation,
-		Capabilities: &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
-		},
-		SeccompProfile: &corev1.SeccompProfile{
-			Type: corev1.SeccompProfileTypeRuntimeDefault,
-		},
 	}
 }
