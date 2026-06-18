@@ -20,8 +20,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Package main implements values2platform, a best-effort CLI that converts an
-// umbrella Helm chart values.yaml into an equivalent otilm.com/v1alpha1 Platform CR.
+// Package convert implements the best-effort Helm-values → Platform CR conversion. It is
+// exported so any module can reuse it (cmd/values2platform is one such consumer). It converts
+// an umbrella Helm chart values.yaml into an equivalent otilm.com/v1alpha1 Platform CR.
 //
 // SECURITY: the tool NEVER copies a plaintext secret out of values into the CR. For
 // every inline secret in values (database/messaging passwords, the trusted-cert and
@@ -34,7 +35,7 @@ SOFTWARE.
 // The conversion is best-effort, not 100%: values with no CR equivalent are flagged with
 // "# UNMAPPED: <values path>" and customization the user must move by hand (connectors,
 // per-connector SMTP, raw sidecars/initContainers) with "# TODO(customization): ...".
-package main
+package convert
 
 import (
 	"fmt"
@@ -94,10 +95,10 @@ type secretTODO struct {
 	kubectl string
 }
 
-// ConversionResult holds the converted Platform CR plus the human-facing scaffolding the
+// Result holds the converted Platform CR plus the human-facing scaffolding the
 // tool emits around it: the secret-creation TODOs, the unmapped-values notes, and the
 // customization TODOs. Render assembles them into the final YAML document.
-type ConversionResult struct {
+type Result struct {
 	// Platform is the typed CR built from the values.
 	Platform *otilmv1alpha1.Platform
 	// Namespace is the namespace the CR is placed in (and the secrets are created in).
@@ -120,8 +121,8 @@ type vals = map[string]interface{}
 // It is best-effort: recognized values become typed CR fields, inline secrets become
 // Secret references + TODOs (never plaintext), and unrecognized values are flagged rather
 // than silently dropped.
-func Convert(values vals, name, namespace string) *ConversionResult {
-	r := &ConversionResult{
+func Convert(values vals, name, namespace string) *Result {
+	r := &Result{
 		Namespace: namespace,
 		Platform: &otilmv1alpha1.Platform{
 			TypeMeta: metav1.TypeMeta{
@@ -161,7 +162,7 @@ func Convert(values vals, name, namespace string) *ConversionResult {
 
 // mapImage maps the umbrella image block (registry/repository/name/tag/pullPolicy) and
 // global.image.pullSecrets onto spec.common.image (the shared image for all components).
-func (r *ConversionResult) mapImage(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapImage(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	img := mapOf(values["image"])
 	spec.Common.Image.Registry = str(img["registry"])
 	spec.Common.Image.Repository = str(img["repository"])
@@ -189,7 +190,7 @@ func (r *ConversionResult) mapImage(values vals, spec *otilmv1alpha1.PlatformSpe
 // hostName fallback) onto spec.common.hostName — the single source of truth from which the
 // edge host/cert, Keycloak KC_HOSTNAME, the OIDC redirect/web-origin/post-logout URIs, and
 // the gateway CORS origin all derive (edge.host overrides it per-edge via PlatformHost).
-func (r *ConversionResult) mapHostName(values, global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapHostName(values, global vals, spec *otilmv1alpha1.PlatformSpec) {
 	host := str(global["hostName"])
 	if host == "" {
 		host = str(values["hostName"])
@@ -201,7 +202,7 @@ func (r *ConversionResult) mapHostName(values, global vals, spec *otilmv1alpha1.
 
 // mapDatabase maps global.database onto spec.database (external mode). The password is
 // NEVER copied: it becomes a credentials.secretRef + a create-secret TODO.
-func (r *ConversionResult) mapDatabase(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapDatabase(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	db := mapOf(global["database"])
 	spec.Database.Mode = modeExternal
 	spec.Database.Host = str(db["host"])
@@ -237,7 +238,7 @@ func (r *ConversionResult) mapDatabase(global vals, spec *otilmv1alpha1.Platform
 
 // mapMessaging maps global.messaging onto spec.messaging (external mode). Passwords are
 // referenced, never inlined. remoteAccess maps to the gateway (handled in mapGateway).
-func (r *ConversionResult) mapMessaging(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapMessaging(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	ms := mapOf(global["messaging"])
 	spec.Messaging.Mode = modeExternal
 	spec.Messaging.BrokerType = "rabbitmq"
@@ -276,7 +277,7 @@ func (r *ConversionResult) mapMessaging(global vals, spec *otilmv1alpha1.Platfor
 // mapKeycloak maps global.keycloak onto spec.keycloak. The chart's clientSecret is an
 // inline secret -> a TODO (the operator wires the OIDC client secret by reference / via
 // managed-Keycloak readback; external mode configures OIDC in the app DB).
-func (r *ConversionResult) mapKeycloak(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapKeycloak(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	kc := mapOf(global["keycloak"])
 	if len(kc) == 0 {
 		return
@@ -305,7 +306,7 @@ func (r *ConversionResult) mapKeycloak(global vals, spec *otilmv1alpha1.Platform
 
 // mapTrustedCertificates maps global.trusted.certificates (an inline PEM bundle) onto
 // spec.common.trustedCertificates.secretRef + a create-secret TODO. The PEM is NEVER inlined.
-func (r *ConversionResult) mapTrustedCertificates(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapTrustedCertificates(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	tr := mapOf(global["trusted"])
 	if _, ok := tr["certificates"]; !ok {
 		return
@@ -322,7 +323,7 @@ func (r *ConversionResult) mapTrustedCertificates(global vals, spec *otilmv1alph
 }
 
 // mapProxy maps the chart's global.httpProxy/httpsProxy/noProxy onto spec.common.proxy.
-func (r *ConversionResult) mapProxy(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapProxy(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	http := str(global["httpProxy"])
 	https := str(global["httpsProxy"])
 	no := str(global["noProxy"])
@@ -334,7 +335,7 @@ func (r *ConversionResult) mapProxy(global vals, spec *otilmv1alpha1.PlatformSpe
 
 // mapLogging maps the top-level logging.level onto spec.common.logging.level. The chart's
 // logging.audit toggle has no CR field and is flagged unmapped.
-func (r *ConversionResult) mapLogging(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapLogging(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	lg := mapOf(values["logging"])
 	if len(lg) == 0 {
 		return
@@ -349,7 +350,7 @@ func (r *ConversionResult) mapLogging(values vals, spec *otilmv1alpha1.PlatformS
 
 // mapAdditionalEnv maps the top-level additionalEnv.variables onto spec.additionalEnv
 // (non-sensitive inline env applied to every component).
-func (r *ConversionResult) mapAdditionalEnv(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapAdditionalEnv(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	ae := mapOf(values["additionalEnv"])
 	for _, v := range slice(ae["variables"]) {
 		m := mapOf(v)
@@ -365,7 +366,7 @@ func (r *ConversionResult) mapAdditionalEnv(values vals, spec *otilmv1alpha1.Pla
 // is NOT duplicated on edge.host: the chart's single global.hostName lives on
 // spec.common.hostName (mapHostName), which the edge inherits via PlatformHost. Set
 // edge.host only when an edge needs a host distinct from the platform-wide hostName.
-func (r *ConversionResult) mapEdge(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapEdge(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	ing := mapOf(values["ingress"])
 	if len(ing) == 0 {
 		return
@@ -415,7 +416,7 @@ func (r *ConversionResult) mapEdge(values vals, spec *otilmv1alpha1.PlatformSpec
 
 // mapGateway maps apiGateway.* onto spec.gateway, and global.messaging.remoteAccess onto
 // spec.messaging.management.expose (the /mq toggle moved to messaging).
-func (r *ConversionResult) mapGateway(values, global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapGateway(values, global vals, spec *otilmv1alpha1.PlatformSpec) {
 	ag := mapOf(values["apiGateway"])
 	gw := otilmv1alpha1.GatewaySpec{}
 	changed := false
@@ -452,7 +453,7 @@ func mapGatewayTrustedIPs(ag vals, gw *otilmv1alpha1.GatewaySpec) bool {
 
 // mapGatewayLogging maps apiGateway.logging onto gw.Logging, recording apiGateway.logging.level
 // as unmapped. Returns true if it set any field.
-func (r *ConversionResult) mapGatewayLogging(ag vals, gw *otilmv1alpha1.GatewaySpec) bool {
+func (r *Result) mapGatewayLogging(ag vals, gw *otilmv1alpha1.GatewaySpec) bool {
 	lg := mapOf(ag["logging"])
 	if len(lg) == 0 {
 		return false
@@ -487,7 +488,7 @@ func mapGatewayCors(ag vals, gw *otilmv1alpha1.GatewaySpec) bool {
 
 // mapRegisterAdmin maps the chart's registerAdmin (admin client cert) onto
 // spec.registerAdmin. The admin cert PEM is NEVER inlined: it becomes a secretRef + TODO.
-func (r *ConversionResult) mapRegisterAdmin(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapRegisterAdmin(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	ra := mapOf(values["registerAdmin"])
 	if len(ra) == 0 {
 		return
@@ -526,7 +527,7 @@ func (r *ConversionResult) mapRegisterAdmin(values vals, spec *otilmv1alpha1.Pla
 
 // mapProvisioning maps the chart's global.provisioning (Core's remote-proxy provisioning)
 // onto spec.provisioning. The API key is NEVER inlined: it becomes a secretRef + TODO.
-func (r *ConversionResult) mapProvisioning(global vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapProvisioning(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	pr := mapOf(global["provisioning"])
 	if len(pr) == 0 {
 		return
@@ -560,7 +561,7 @@ const bannerRule = "# ----------------------------------------------------------
 // gone, so JVM tuning is plain per-component env now; this preserves the migrator's
 // today-behavior. It is NOT applied to fe-administrator / OPA / the gateway (non-JVM). A
 // NOTE is emitted so the reader knows the field moved.
-func (r *ConversionResult) mapJavaOpts(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapJavaOpts(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	jo := str(values["javaOpts"])
 	if jo == "" {
 		return
@@ -626,7 +627,7 @@ func platformComponents() []componentMap {
 // mapComponents fills each platform component's shared override surface (image, env,
 // resources, replicas) from its umbrella values block. Core's image comes from the
 // top-level `image` block (the chart's core image), the others from their own block.
-func (r *ConversionResult) mapComponents(values vals, spec *otilmv1alpha1.PlatformSpec) {
+func (r *Result) mapComponents(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	for _, cm := range platformComponents() {
 		block := mapOf(values[cm.valuesKey])
 		if len(block) == 0 {
@@ -659,7 +660,7 @@ func (r *ConversionResult) mapComponents(values vals, spec *otilmv1alpha1.Platfo
 // mapComponentImage fills a component's image override. For Core (valuesKey "image") the
 // registry/repository/name are already the shared spec.image; only per-component overrides
 // (tag/name) differ, so it fills name/tag/pullPolicy.
-func (r *ConversionResult) mapComponentImage(block vals, comp *otilmv1alpha1.ComponentSpec, valuesKey string) {
+func (r *Result) mapComponentImage(block vals, comp *otilmv1alpha1.ComponentSpec, valuesKey string) {
 	img := block
 	if valuesKey != coreImageKey {
 		img = mapOf(block["image"])
@@ -678,7 +679,7 @@ func (r *ConversionResult) mapComponentImage(block vals, comp *otilmv1alpha1.Com
 
 // mapComponentEnv fills a component's additionalEnv.variables onto comp.Env (non-sensitive
 // inline env). Secret-bearing additionalEnv (.secrets/.configMaps) is flagged.
-func (r *ConversionResult) mapComponentEnv(block vals, comp *otilmv1alpha1.ComponentSpec) {
+func (r *Result) mapComponentEnv(block vals, comp *otilmv1alpha1.ComponentSpec) {
 	ae := mapOf(block["additionalEnv"])
 	for _, v := range slice(ae["variables"]) {
 		m := mapOf(v)
@@ -690,7 +691,7 @@ func (r *ConversionResult) mapComponentEnv(block vals, comp *otilmv1alpha1.Compo
 
 // mapComponentResources copies a component's resources block verbatim (requests/limits)
 // into comp.Resources via a YAML round-trip onto the typed ResourceRequirements.
-func (r *ConversionResult) mapComponentResources(block vals, comp *otilmv1alpha1.ComponentSpec) {
+func (r *Result) mapComponentResources(block vals, comp *otilmv1alpha1.ComponentSpec) {
 	res := mapOf(block["resources"])
 	if len(res) == 0 {
 		return
@@ -702,7 +703,7 @@ func (r *ConversionResult) mapComponentResources(block vals, comp *otilmv1alpha1
 }
 
 // mapComponentReplicas copies a component's replicaCount/replicas onto comp.Replicas.
-func (r *ConversionResult) mapComponentReplicas(block vals, comp *otilmv1alpha1.ComponentSpec) {
+func (r *Result) mapComponentReplicas(block vals, comp *otilmv1alpha1.ComponentSpec) {
 	for _, k := range []string{"replicaCount", "replicas"} {
 		if n, ok := intOf(block[k]); ok {
 			comp.Replicas = ptrTo(n)
@@ -724,7 +725,7 @@ var connectorKeys = []string{
 
 // flagConnectors emits a customization TODO for every connector block found in values:
 // connectors are a SEPARATE Connector CRD, not part of the Platform CR.
-func (r *ConversionResult) flagConnectors(values vals) {
+func (r *Result) flagConnectors(values vals) {
 	var found []string
 	for _, k := range connectorKeys {
 		if _, ok := values[k]; ok {
@@ -744,7 +745,7 @@ func (r *ConversionResult) flagConnectors(values vals) {
 // initContainers/sidecars/volumes) the user must move to spec.common by hand, since the
 // chart shape (free-form) does not 1:1 round-trip through typed conversion safely. (The
 // fleet-wide passthrough now lives under spec.common — the former spec.global.)
-func (r *ConversionResult) flagGlobalCustomization(global vals) {
+func (r *Result) flagGlobalCustomization(global vals) {
 	for _, k := range []string{"initContainers", "sidecarContainers", "additionalVolumes", "additionalVolumeMounts", "additionalPorts"} {
 		if v, ok := global[k]; ok && !isEmpty(v) {
 			r.customization = append(r.customization, fmt.Sprintf(
@@ -783,7 +784,7 @@ var knownTopLevel = func() map[string]bool {
 
 // flagUnmappedTopLevel walks the values top level and flags any key the converter neither
 // maps nor recognizes, plus the bundled-infra blocks that map to managed-mode decisions.
-func (r *ConversionResult) flagUnmappedTopLevel(values vals) {
+func (r *Result) flagUnmappedTopLevel(values vals) {
 	// Bundled-infra blocks: the operator provisions these via managed mode (a deliberate
 	// decision), so flag them as customization rather than silent drops.
 	for key, note := range map[string]string{
@@ -806,7 +807,7 @@ func (r *ConversionResult) flagUnmappedTopLevel(values vals) {
 
 // addSecretTODO records a Secret the user must create, de-duplicating by name (the same
 // Secret can be referenced from multiple values paths).
-func (r *ConversionResult) addSecretTODO(s secretTODO) {
+func (r *Result) addSecretTODO(s secretTODO) {
 	for _, e := range r.secretTODOs {
 		if e.name == s.name {
 			return
@@ -817,7 +818,7 @@ func (r *ConversionResult) addSecretTODO(s secretTODO) {
 
 // Render assembles the final YAML document: the secret-creation TODO header, the typed
 // Platform CR, and the unmapped/customization notes footer.
-func (r *ConversionResult) Render() (string, error) {
+func (r *Result) Render() (string, error) {
 	crYAML, err := yaml.Marshal(r.Platform)
 	if err != nil {
 		return "", fmt.Errorf("marshal Platform CR: %w", err)
@@ -830,7 +831,7 @@ func (r *ConversionResult) Render() (string, error) {
 }
 
 // writeHeader writes the top-of-file banner and the prerequisite-Secrets TODO block.
-func (r *ConversionResult) writeHeader(b *strings.Builder) {
+func (r *Result) writeHeader(b *strings.Builder) {
 	b.WriteString(bannerRule)
 	b.WriteString("# Platform CR scaffolded by values2platform (best-effort).\n")
 	b.WriteString("# Review every field before applying. This is a SCAFFOLD, not a drop-in config.\n")
@@ -856,7 +857,7 @@ func (r *ConversionResult) writeHeader(b *strings.Builder) {
 }
 
 // writeFooter writes the UNMAPPED and TODO(customization) notes after the CR.
-func (r *ConversionResult) writeFooter(b *strings.Builder) {
+func (r *Result) writeFooter(b *strings.Builder) {
 	if len(r.unmapped) == 0 && len(r.customization) == 0 {
 		return
 	}

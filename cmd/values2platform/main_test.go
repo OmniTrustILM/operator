@@ -32,7 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRun_EndToEnd writes a values file to a temp dir, runs the CLI through run(), and
+// TestRun_EndToEnd writes a values file to a temp dir, runs the command through run(), and
 // asserts the scaffolded CR is produced with secrets referenced (never inlined).
 func TestRun_EndToEnd(t *testing.T) {
 	dir := t.TempDir()
@@ -55,7 +55,8 @@ ingress:
 	assert.Contains(t, got, "kind: Platform")
 	assert.Contains(t, got, "name: prod")
 	assert.Contains(t, got, "namespace: prod-ns")
-	assert.Contains(t, got, "secretRef: "+dbSecretName)
+	// dbSecretName is "ilm-db" (an unexported const in pkg/convert); assert the literal here.
+	assert.Contains(t, got, "secretRef: ilm-db")
 	// the password must NOT appear anywhere
 	assert.NotContains(t, got, "SUPER-SECRET-PW")
 }
