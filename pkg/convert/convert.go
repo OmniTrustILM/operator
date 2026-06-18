@@ -56,7 +56,7 @@ const modeExternal = "external"
 // `image` block is Core's image; every other component has its own block).
 const coreImageKey = "image"
 
-// Default in-Secret keys, mirroring the operator's wiring profile (internal/bom). The
+// Default in-Secret keys, mirroring the operator's wiring profile (pkg/bom). The
 // converter emits these as the keys the user must put into the Secrets it scaffolds, so a
 // freshly-created Secret needs no key override on the CR.
 const (

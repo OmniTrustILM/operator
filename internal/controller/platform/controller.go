@@ -32,7 +32,7 @@ import (
 	"time"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	"github.com/OmniTrustILM/operator/internal/checksum"

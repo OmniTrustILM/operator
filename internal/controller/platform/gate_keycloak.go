@@ -29,7 +29,7 @@ import (
 	"time"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

@@ -25,7 +25,7 @@ package platform
 import (
 	"testing"
 
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

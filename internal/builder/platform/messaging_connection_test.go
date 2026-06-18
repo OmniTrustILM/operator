@@ -26,7 +26,7 @@ import (
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
