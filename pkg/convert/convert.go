@@ -73,9 +73,9 @@ const (
 // that materialize those Secrets can reuse the names instead of duplicating string literals.
 const (
 	DefaultDatabaseSecretName     = "ilm-db"
-	DefaultMessagingSecretName    = "ilm-messaging"     //nolint:gosec // Secret object NAME, not a credential
-	DefaultTrustedCASecretName    = "ilm-trusted-ca"    //nolint:gosec // Secret object NAME, not a credential
-	DefaultAdminCertSecretName    = "ilm-admin-cert"    //nolint:gosec // Secret object NAME, not a credential
+	DefaultMessagingSecretName    = "ilm-messaging"  //nolint:gosec // Secret object NAME, not a credential
+	DefaultTrustedCASecretName    = "ilm-trusted-ca" //nolint:gosec // Secret object NAME, not a credential
+	DefaultAdminCertSecretName    = "ilm-admin-cert" //nolint:gosec // Secret object NAME, not a credential
 	DefaultProvisioningSecretName = "ilm-provisioning"
 	DefaultKeycloakSecretName     = "ilm-keycloak-client" //nolint:gosec // Secret object NAME, not a credential
 )
