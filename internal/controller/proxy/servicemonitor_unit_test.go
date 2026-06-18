@@ -42,7 +42,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/platform/capabilities"
+	"github.com/OmniTrustILM/operator/pkg/capabilities"
 )
 
 // newSMReconciler builds a Reconciler over a fake client whose RESTMapper does or

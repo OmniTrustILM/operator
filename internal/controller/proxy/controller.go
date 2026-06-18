@@ -49,7 +49,7 @@ import (
 	proxybuilder "github.com/OmniTrustILM/operator/internal/builder/proxy"
 	"github.com/OmniTrustILM/operator/internal/checksum"
 	"github.com/OmniTrustILM/operator/internal/monitoring"
-	"github.com/OmniTrustILM/operator/internal/platform/capabilities"
+	"github.com/OmniTrustILM/operator/pkg/capabilities"
 )
 
 const (

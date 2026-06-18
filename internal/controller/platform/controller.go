@@ -36,7 +36,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	"github.com/OmniTrustILM/operator/internal/checksum"
-	"github.com/OmniTrustILM/operator/internal/platform/capabilities"
+	"github.com/OmniTrustILM/operator/pkg/capabilities"
 	"github.com/OmniTrustILM/operator/internal/registration"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
