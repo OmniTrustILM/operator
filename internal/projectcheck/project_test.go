@@ -40,11 +40,11 @@ import (
 type projectFile struct {
 	Domain    string `json:"domain"`
 	Resources []struct {
-		Kind    string `json:"kind"`
-		Domain  string `json:"domain"`
-		Path    string `json:"path"`
-		Version string `json:"version"`
-		Controller bool `json:"controller"`
+		Kind       string `json:"kind"`
+		Domain     string `json:"domain"`
+		Path       string `json:"path"`
+		Version    string `json:"version"`
+		Controller bool   `json:"controller"`
 	} `json:"resources"`
 }
 

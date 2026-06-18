@@ -132,6 +132,9 @@ vet: ## Run go vet against code.
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./internal/... | grep -v -e /e2e -e /monitoring) -coverprofile cover.out
+	# Public pkg/* packages: no envtest needed; append coverage into the same profile.
+	go test ./pkg/... -coverprofile cover-pkg.out
+	cat cover-pkg.out | tail -n +2 >> cover.out
 	# Operator-native golden render snapshots (cross-variant full-render regression net).
 	# Pure builder render — no envtest, no coverprofile (it carries no production code, so it
 	# would not move the coverage total). Regenerate with: UPDATE_GOLDEN=1 go test ./test/golden/...

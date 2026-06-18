@@ -65,14 +65,18 @@ fi
 echo "Running sonar-scanner..."
 sonar-scanner \
     -Dsonar.projectKey="${PROJECT_KEY}" \
-    -Dsonar.sources=api,cmd,internal \
-    -Dsonar.tests=internal \
+    -Dsonar.sources=api,cmd,internal,pkg \
+    -Dsonar.tests=internal,pkg \
     -Dsonar.test.inclusions="**/*_test.go" \
     -Dsonar.exclusions="**/*_test.go,**/zz_generated*.go,test/**" \
     -Dsonar.go.coverage.reportPaths=cover.out \
+    -Dsonar.go.golangci-lint.reportPaths=golangci-lint-report.xml \
     -Dsonar.host.url="${SONAR_URL}" \
     -Dsonar.token="${TOKEN}" \
-    -Dsonar.cpd.minimumTokens=100
+    -Dsonar.cpd.minimumTokens=100 \
+    -Dsonar.issue.ignore.multicriteria=todoconv \
+    -Dsonar.issue.ignore.multicriteria.todoconv.ruleKey=go:S1135 \
+    -Dsonar.issue.ignore.multicriteria.todoconv.resourceKey=pkg/convert/convert.go
 
 echo ""
 echo "=== SonarQube Results ==="

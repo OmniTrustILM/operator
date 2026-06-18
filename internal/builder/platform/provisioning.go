@@ -42,8 +42,8 @@ import (
 	"strconv"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	corev1 "k8s.io/api/core/v1"
 )
 
