@@ -26,8 +26,8 @@ import (
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
 	"github.com/OmniTrustILM/operator/internal/checksum"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"

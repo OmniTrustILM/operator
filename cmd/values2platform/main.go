@@ -20,6 +20,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+// Command values2platform is a thin CLI wrapper over pkg/convert: it parses flags,
+// reads the umbrella values.yaml, and prints the scaffolded otilm.com/v1alpha1
+// Platform CR. All conversion logic lives in github.com/OmniTrustILM/operator/pkg/convert
+// so it can be reused by any module without depending on package main.
 package main
 
 import (
@@ -28,6 +32,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/OmniTrustILM/operator/pkg/convert"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,8 +54,8 @@ Flags:
 	flag.PrintDefaults()
 }
 
-// run reads the values file, converts it, and writes the scaffolded CR to out. It is
-// separated from main so it is testable and returns an error instead of exiting.
+// run reads the values file, converts it via pkg/convert, and writes the scaffolded CR to
+// out. It is separated from main so it is testable and returns an error instead of exiting.
 func run(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("values2platform", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -84,7 +89,7 @@ func run(args []string, out io.Writer) error {
 		values = map[string]interface{}{}
 	}
 
-	result := Convert(values, *name, *namespace)
+	result := convert.Convert(values, *name, *namespace)
 	rendered, err := result.Render()
 	if err != nil {
 		return err

@@ -37,7 +37,7 @@ package platform
 
 import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 // DatabaseConnection is the resolved, mode-agnostic database connection the platform's

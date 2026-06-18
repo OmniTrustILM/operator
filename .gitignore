@@ -9,6 +9,7 @@ bin/
 # Generated install manifests (`make build-installer` / `build-installer-crds`); published as release assets
 dist/
 cover.out
+cover-pkg.out
 *.o
 *.exe
 *.test

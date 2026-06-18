@@ -31,7 +31,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
-	"github.com/OmniTrustILM/operator/internal/bom"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 const testEgressProxyURL = "http://egress:3128"
