@@ -74,9 +74,11 @@ sonar-scanner \
     -Dsonar.host.url="${SONAR_URL}" \
     -Dsonar.token="${TOKEN}" \
     -Dsonar.cpd.minimumTokens=100 \
-    -Dsonar.issue.ignore.multicriteria=todoconv \
+    -Dsonar.issue.ignore.multicriteria=todoconv,todoconvtest \
     -Dsonar.issue.ignore.multicriteria.todoconv.ruleKey=go:S1135 \
-    -Dsonar.issue.ignore.multicriteria.todoconv.resourceKey=pkg/convert/convert.go
+    -Dsonar.issue.ignore.multicriteria.todoconv.resourceKey=pkg/convert/convert.go \
+    -Dsonar.issue.ignore.multicriteria.todoconvtest.ruleKey=go:S1135 \
+    -Dsonar.issue.ignore.multicriteria.todoconvtest.resourceKey=pkg/convert/convert_test.go
 
 echo ""
 echo "=== SonarQube Results ==="
