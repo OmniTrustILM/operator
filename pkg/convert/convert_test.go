@@ -122,7 +122,7 @@ letsEncrypt:
 	assert.Equal(t, "ilmdb", spec.Database.Name)
 	assert.Equal(t, int32(5432), spec.Database.Port)
 	require.NotNil(t, spec.Database.Credentials)
-	assert.Equal(t, dbSecretName, spec.Database.Credentials.SecretRef)
+	assert.Equal(t, DefaultDatabaseSecretName, spec.Database.Credentials.SecretRef)
 
 	// messaging (external) — host mapped, credentials a ref
 	assert.Equal(t, "external", spec.Messaging.Mode)
@@ -130,7 +130,7 @@ letsEncrypt:
 	assert.Equal(t, "mq.example.com", spec.Messaging.Host)
 	assert.Equal(t, "ilm", spec.Messaging.VirtualHost)
 	require.NotNil(t, spec.Messaging.Credentials)
-	assert.Equal(t, messagingSecret, spec.Messaging.Credentials.SecretRef)
+	assert.Equal(t, DefaultMessagingSecretName, spec.Messaging.Credentials.SecretRef)
 
 	// proxy
 	assert.True(t, spec.Common.Proxy.Enabled)
@@ -216,25 +216,25 @@ registerAdmin:
 
 	// refs, not values
 	require.NotNil(t, spec.Database.Credentials)
-	assert.Equal(t, dbSecretName, spec.Database.Credentials.SecretRef)
-	assert.Equal(t, trustedCASecret, spec.Common.TrustedCertificates.SecretRef)
+	assert.Equal(t, DefaultDatabaseSecretName, spec.Database.Credentials.SecretRef)
+	assert.Equal(t, DefaultTrustedCASecretName, spec.Common.TrustedCertificates.SecretRef)
 	require.NotNil(t, spec.RegisterAdmin)
 	require.NotNil(t, spec.RegisterAdmin.Certificate)
 	require.NotNil(t, spec.RegisterAdmin.Certificate.SecretRef)
-	assert.Equal(t, adminCertSecret, *spec.RegisterAdmin.Certificate.SecretRef)
+	assert.Equal(t, DefaultAdminCertSecretName, *spec.RegisterAdmin.Certificate.SecretRef)
 	require.NotNil(t, spec.Provisioning)
-	assert.Equal(t, provisioningSecret, spec.Provisioning.APIKeySecretRef)
+	assert.Equal(t, DefaultProvisioningSecretName, spec.Provisioning.APIKeySecretRef)
 
 	// secret TODOs cover each inline secret
 	names := map[string]bool{}
 	for _, s := range r.secretTODOs {
 		names[s.name] = true
 	}
-	assert.True(t, names[dbSecretName], "expected db secret TODO")
-	assert.True(t, names[trustedCASecret], "expected trusted-ca secret TODO")
-	assert.True(t, names[adminCertSecret], "expected admin-cert secret TODO")
-	assert.True(t, names[provisioningSecret], "expected provisioning secret TODO")
-	assert.True(t, names[keycloakSecret], "expected keycloak secret TODO")
+	assert.True(t, names[DefaultDatabaseSecretName], "expected db secret TODO")
+	assert.True(t, names[DefaultTrustedCASecretName], "expected trusted-ca secret TODO")
+	assert.True(t, names[DefaultAdminCertSecretName], "expected admin-cert secret TODO")
+	assert.True(t, names[DefaultProvisioningSecretName], "expected provisioning secret TODO")
+	assert.True(t, names[DefaultKeycloakSecretName], "expected keycloak secret TODO")
 
 	rendered, err := r.Render()
 	require.NoError(t, err)
@@ -242,10 +242,10 @@ registerAdmin:
 
 	// the rendered header carries a create-secret line for each Secret + a kubectl line
 	assert.Contains(t, rendered, "TODO: create the following Secrets")
-	assert.Contains(t, rendered, "kubectl create secret generic "+dbSecretName)
-	assert.Contains(t, rendered, "kubectl create secret tls "+adminCertSecret)
+	assert.Contains(t, rendered, "kubectl create secret generic "+DefaultDatabaseSecretName)
+	assert.Contains(t, rendered, "kubectl create secret tls "+DefaultAdminCertSecretName)
 	// the CR body references the Secret name
-	assert.Contains(t, rendered, "secretRef: "+dbSecretName)
+	assert.Contains(t, rendered, "secretRef: "+DefaultDatabaseSecretName)
 }
 
 // TestConvert_UnmappedAndCustomizationFlags asserts the honest-gaps behavior: unknown

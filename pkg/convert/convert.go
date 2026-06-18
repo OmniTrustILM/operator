@@ -69,16 +69,15 @@ const (
 	defaultKeycloakSecKey = "clientSecret" //nolint:gosec // in-Secret KEY name, not a credential value
 )
 
-// Default Secret NAMES the converter references (and instructs the user to create). They
-// are Kubernetes object names — never credential values — and match the canonical examples
-// (docs/design/examples) so the scaffold reads naturally.
+// Default names of the Secrets the converter scaffolds references to. Exported so callers
+// that materialize those Secrets can reuse the names instead of duplicating string literals.
 const (
-	dbSecretName       = "ilm-db"
-	messagingSecret    = "ilm-messaging"  //nolint:gosec // Secret object NAME, not a credential
-	trustedCASecret    = "ilm-trusted-ca" //nolint:gosec // Secret object NAME, not a credential
-	adminCertSecret    = "ilm-admin-cert" //nolint:gosec // Secret object NAME, not a credential
-	provisioningSecret = "ilm-provisioning"
-	keycloakSecret     = "ilm-keycloak-client" //nolint:gosec // Secret object NAME, not a credential
+	DefaultDatabaseSecretName     = "ilm-db"
+	DefaultMessagingSecretName    = "ilm-messaging"     //nolint:gosec // Secret object NAME, not a credential
+	DefaultTrustedCASecretName    = "ilm-trusted-ca"    //nolint:gosec // Secret object NAME, not a credential
+	DefaultAdminCertSecretName    = "ilm-admin-cert"    //nolint:gosec // Secret object NAME, not a credential
+	DefaultProvisioningSecretName = "ilm-provisioning"
+	DefaultKeycloakSecretName     = "ilm-keycloak-client" //nolint:gosec // Secret object NAME, not a credential
 )
 
 // secretTODO describes one Kubernetes Secret the user must create by hand before applying
@@ -214,15 +213,15 @@ func (r *Result) mapDatabase(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	_, hasUser := db["username"]
 	_, hasPass := db["password"]
 	if hasUser || hasPass || spec.Database.Host != "" {
-		spec.Database.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: dbSecretName}
+		spec.Database.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: DefaultDatabaseSecretName}
 		if hasPass || hasUser {
 			r.addSecretTODO(secretTODO{
-				name:   dbSecretName,
+				name:   DefaultDatabaseSecretName,
 				keys:   []string{defaultUsernameKey, defaultPasswordKey},
 				reason: "database credentials (was global.database.username/password)",
 				kubectl: fmt.Sprintf(
 					"kubectl create secret generic %s -n %s --from-literal=username='<DB_USER>' --from-literal=password='<DB_PASSWORD>'",
-					dbSecretName, r.Namespace),
+					DefaultDatabaseSecretName, r.Namespace),
 			})
 		}
 	}
@@ -252,18 +251,18 @@ func (r *Result) mapMessaging(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	_, hasUser := ms["username"]
 	_, hasPass := ms["password"]
 	if hasUser || hasPass {
-		spec.Messaging.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: messagingSecret}
+		spec.Messaging.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: DefaultMessagingSecretName}
 		r.addSecretTODO(secretTODO{
-			name:   messagingSecret,
+			name:   DefaultMessagingSecretName,
 			keys:   []string{defaultUsernameKey, defaultPasswordKey},
 			reason: "messaging credentials (was global.messaging.username/password)",
 			kubectl: fmt.Sprintf(
 				"kubectl create secret generic %s -n %s --from-literal=username='<MQ_USER>' --from-literal=password='<MQ_PASSWORD>'",
-				messagingSecret, r.Namespace),
+				DefaultMessagingSecretName, r.Namespace),
 		})
 	} else if spec.Messaging.Host != "" {
 		// External broker host given without inline creds — still needs a ref.
-		spec.Messaging.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: messagingSecret}
+		spec.Messaging.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: DefaultMessagingSecretName}
 	}
 	// External mode REQUIRES host + credentials.secretRef (CRD XValidation). The chart's
 	// bundled broker has neither (it relies on the in-chart messaging-rabbitmq subchart), so
@@ -294,12 +293,12 @@ func (r *Result) mapKeycloak(global vals, spec *otilmv1alpha1.PlatformSpec) {
 		"global.keycloak.enabled=true -> keycloak.mode=managed: fill keycloak.managed (instances/version/storage) per docs/design/examples/platform_managed_keycloak.yaml (Keycloak Operator must be installed)")
 	if _, ok := kc["clientSecret"]; ok {
 		r.addSecretTODO(secretTODO{
-			name:   keycloakSecret,
+			name:   DefaultKeycloakSecretName,
 			keys:   []string{defaultKeycloakSecKey},
 			reason: "Keycloak OIDC client secret (was global.keycloak.clientSecret) — managed Keycloak generates this and the operator reads it back; create only if you wire an external client secret",
 			kubectl: fmt.Sprintf(
 				"kubectl create secret generic %s -n %s --from-literal=clientSecret='<KEYCLOAK_CLIENT_SECRET>'",
-				keycloakSecret, r.Namespace),
+				DefaultKeycloakSecretName, r.Namespace),
 		})
 	}
 }
@@ -311,14 +310,14 @@ func (r *Result) mapTrustedCertificates(global vals, spec *otilmv1alpha1.Platfor
 	if _, ok := tr["certificates"]; !ok {
 		return
 	}
-	spec.Common.TrustedCertificates = otilmv1alpha1.TrustedCertificatesSpec{SecretRef: trustedCASecret}
+	spec.Common.TrustedCertificates = otilmv1alpha1.TrustedCertificatesSpec{SecretRef: DefaultTrustedCASecretName}
 	r.addSecretTODO(secretTODO{
-		name:   trustedCASecret,
+		name:   DefaultTrustedCASecretName,
 		keys:   []string{defaultTrustedCAKey},
 		reason: "trusted CA bundle (was global.trusted.certificates, inline PEM)",
 		kubectl: fmt.Sprintf(
 			"kubectl create secret generic %s -n %s --from-file=ca.crt=./trusted-ca.pem",
-			trustedCASecret, r.Namespace),
+			DefaultTrustedCASecretName, r.Namespace),
 	})
 }
 
@@ -509,18 +508,18 @@ func (r *Result) mapRegisterAdmin(values vals, spec *otilmv1alpha1.PlatformSpec)
 		Certificate: &otilmv1alpha1.AdminCertificateSpec{
 			Enabled:   ptrTo(true),
 			Source:    "provided",
-			SecretRef: ptrTo(adminCertSecret),
+			SecretRef: ptrTo(DefaultAdminCertSecretName),
 		},
 	}
 	spec.RegisterAdmin = out
 	if _, ok := admin["certificate"]; ok {
 		r.addSecretTODO(secretTODO{
-			name:   adminCertSecret,
+			name:   DefaultAdminCertSecretName,
 			keys:   []string{defaultAdminCertKey, defaultAdminKeyKey},
 			reason: "admin client certificate (was registerAdmin.admin.certificate, inline PEM) — kubernetes.io/tls Secret",
 			kubectl: fmt.Sprintf(
 				"kubectl create secret tls %s -n %s --cert=./admin.crt --key=./admin.key",
-				adminCertSecret, r.Namespace),
+				DefaultAdminCertSecretName, r.Namespace),
 		})
 	}
 }
@@ -534,14 +533,14 @@ func (r *Result) mapProvisioning(global vals, spec *otilmv1alpha1.PlatformSpec) 
 	}
 	prov := &otilmv1alpha1.ProvisioningSpec{Mode: modeExternal, APIURL: str(pr["apiUrl"])}
 	if _, ok := pr["apiKey"]; ok {
-		prov.APIKeySecretRef = provisioningSecret
+		prov.APIKeySecretRef = DefaultProvisioningSecretName
 		r.addSecretTODO(secretTODO{
-			name:   provisioningSecret,
+			name:   DefaultProvisioningSecretName,
 			keys:   []string{defaultProvAPIKeyKey},
 			reason: "provisioning API key (was global.provisioning.apiKey)",
 			kubectl: fmt.Sprintf(
 				"kubectl create secret generic %s -n %s --from-literal=provisioningApiKey='<PROVISIONING_API_KEY>'",
-				provisioningSecret, r.Namespace),
+				DefaultProvisioningSecretName, r.Namespace),
 		})
 	}
 	spec.Provisioning = prov

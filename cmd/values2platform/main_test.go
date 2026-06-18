@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/OmniTrustILM/operator/pkg/convert"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -55,8 +56,7 @@ ingress:
 	assert.Contains(t, got, "kind: Platform")
 	assert.Contains(t, got, "name: prod")
 	assert.Contains(t, got, "namespace: prod-ns")
-	// dbSecretName is "ilm-db" (an unexported const in pkg/convert); assert the literal here.
-	assert.Contains(t, got, "secretRef: ilm-db")
+	assert.Contains(t, got, "secretRef: "+convert.DefaultDatabaseSecretName)
 	// the password must NOT appear anywhere
 	assert.NotContains(t, got, "SUPER-SECRET-PW")
 }
