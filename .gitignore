@@ -3,6 +3,8 @@
 
 # Superpowers
 .superpowers/
+# Superpowers planning docs (specs/plans) stay local — never committed (same policy as helm-charts and cli repos)
+docs/superpowers/
 
 # Binaries and build artifacts
 bin/
