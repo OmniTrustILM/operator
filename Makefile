@@ -250,7 +250,7 @@ test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (f
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
-cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
+cleanup-test-e2e: kind ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
 
 .PHONY: lint
@@ -532,19 +532,6 @@ prune-kind-cluster: kind ## Delete the Kind cluster.
 .PHONY: kind-load
 kind-load: kind ## Load the operator Docker image into the Kind cluster.
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER_NAME)
-
-.PHONY: kind-load-archive
-kind-load-archive: kind ## Load a pre-built operator image archive (E2E_IMAGE_ARCHIVE, a `docker save` tarball) into the Kind cluster.
-	# The archive counterpart of kind-load, for the build-once model: import an image someone
-	# else built (CI's shared build job, or a `docker save` from another machine) without
-	# rebuilding it here. The e2e targets do NOT depend on this — they recreate the cluster
-	# first, so the suite loads E2E_IMAGE_ARCHIVE itself once the fresh node exists.
-	@[ -n "$(E2E_IMAGE_ARCHIVE)" ] || { echo "E2E_IMAGE_ARCHIVE is not set (path to a 'docker save' tarball)"; exit 1; }
-	$(KIND) load image-archive $(E2E_IMAGE_ARCHIVE) --name $(KIND_CLUSTER_NAME)
-
-# KIND_LOG_DIR is written here AND read by CI's "Upload logs" step — they were two different
-# paths, so a failing job exported logs and then uploaded an empty directory. Named once.
-KIND_LOG_DIR ?= /tmp/ilm-operator-e2e-logs
 
 .PHONY: kind-export-logs
 # Runs from CI's `if: failure()` step, where the cluster may never have been created. Exporting
