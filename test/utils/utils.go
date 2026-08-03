@@ -783,11 +783,26 @@ func crdsPresent(want []string) bool {
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
+	return kindLoad("docker-image", name)
+}
+
+// LoadImageArchiveToKindCluster loads a `docker save` image archive (a tarball carrying the
+// image AND its tags) into the Kind cluster. This is the CI path: the operator image is built
+// ONCE in a shared workflow job, published as a workflow artifact, and every e2e job imports
+// that archive instead of rebuilding the same image on its own runner.
+func LoadImageArchiveToKindCluster(path string) error {
+	return kindLoad("image-archive", path)
+}
+
+// kindLoad shells out to `kind load <source> <ref>` against the cluster the e2e run targets
+// (KIND_CLUSTER, defaulting to kind's own default name), using the same kind binary the
+// Makefile manages (see kindBinary).
+func kindLoad(source, ref string) error {
 	cluster := "kind"
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
 	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	kindOptions := []string{"load", source, ref, "--name", cluster}
 	cmd := exec.Command(kindBinary(), kindOptions...) //nolint:gosec // test utility with trusted input
 	_, err := Run(cmd)
 	return err

@@ -669,14 +669,20 @@ spec:
 	// containers, plus the runtime DB/messaging wiring the unit/builder tests cannot prove.
 	platformFullManagedSpecs()
 
-	// VERSION-MATRIX specs (defined in platform_test.go): a managed Platform pinned to 2.17.0
-	// reaches Available, UPGRADES in place to 2.18.0, then a downgrade is refused, then an upgrade
-	// onto the unreleased 2.19.0 preview bundle is refused, and finally a FRESH 2.19.0 platform
-	// comes up on the 2.19.0 contract — proving the multi-version / upgrade / preview story
-	// end-to-end. Labelled "matrix" so it can also run standalone
-	// (`--ginkgo.label-filter=matrix`); it installs its own upstream operators and, like the FULL
-	// block, runs in the namespace-scoped Keycloak Operator's namespace, draining the node first.
-	platformVersionMatrixSpecs()
+	// VERSION-MATRIX specs (defined in platform_test.go), SPLIT into two independent Ordered
+	// blocks so CI can run them in parallel on separate clusters instead of serialising two full
+	// bring-ups (with a node-freeing barrier between them) inside one Context:
+	//   - "matrix-upgrade": a managed Platform pinned to 2.17.0 reaches Available, UPGRADES in
+	//     place to 2.18.0, a downgrade is refused, an upgrade onto the unreleased 2.19.0 preview
+	//     bundle is refused and the restore re-converges, and its deletionPolicy=Delete teardown
+	//     reclaims every managed CR;
+	//   - "matrix-preview": a FRESH platform pinned to 2.19.0 comes up on the 2.19.0 contract.
+	// Together they prove the multi-version / upgrade / preview story end-to-end. Both keep the
+	// umbrella "matrix" label, so `--ginkgo.label-filter=matrix` still runs the whole story; each
+	// installs its own upstream operators and, like the FULL block, runs in the namespace-scoped
+	// Keycloak Operator's namespace, draining it first.
+	platformVersionMatrixUpgradeSpecs()
+	platformVersionMatrixPreviewSpecs()
 })
 
 // -------------------------------------------------------------------------

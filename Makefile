@@ -146,6 +146,16 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # - CERT_MANAGER_INSTALL_SKIP=true
 KIND_CLUSTER ?= ilm-operator-test-e2e
 
+# E2E_IMAGE_ARCHIVE points the e2e suite at a PRE-BUILT operator image archive (`docker save`
+# tarball) instead of having it build the image itself. CI sets it: the image is built ONCE in a
+# shared workflow job, published as a workflow artifact, and every e2e job imports that archive —
+# so the parallel managed jobs stop rebuilding the identical image on their own runners. It must
+# be empty for local runs (the default), where the suite builds the image as it always has.
+# The archive is loaded by the suite's BeforeSuite, not by a Make prerequisite, because every
+# test-e2e* target recreates the Kind cluster first (setup-test-e2e) — anything loaded before
+# `go test` would be thrown away with the old node.
+E2E_IMAGE_ARCHIVE ?=
+
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a FRESH Kind cluster for e2e tests (delete-if-exists, then create)
 	@command -v $(KIND) >/dev/null 2>&1 || { \
@@ -175,13 +185,16 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PR
 	# CRs (no real stateful infra), so it finishes well within 20m. --ginkgo.timeout=18m keeps
 	# Ginkgo's OWN suite timeout (1h by default) UNDER that ceiling, so a hung spec is reported by
 	# Ginkgo (with the spec tree + failure) instead of panicking as an opaque "test timed out".
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='!managed' --ginkgo.timeout=18m -timeout 20m
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='!managed' --ginkgo.timeout=18m -timeout 20m
 	$(MAKE) cleanup-test-e2e
 
 # E2E_MANAGED_LABEL selects which managed Context(s) run. Defaults to the umbrella 'managed' (all
 # managed blocks, sequential, one cluster — local convenience). CI passes a PER-BLOCK label
-# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix) so each block runs in its
-# OWN parallel job on its OWN fresh Kind cluster — no shared-cluster install/uninstall collisions.
+# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix-upgrade / matrix-preview)
+# so each block runs in its OWN parallel job on its OWN fresh Kind cluster — no shared-cluster
+# install/uninstall collisions. The version matrix is TWO blocks: 'matrix-upgrade' (2.17.0 deploy
+# -> 2.18.0 upgrade -> downgrade refused -> preview upgrade refused -> Delete reclaim) and
+# 'matrix-preview' (the fresh managed 2.19.0 install). Both also carry the umbrella label 'matrix'.
 E2E_MANAGED_LABEL ?= managed
 
 .PHONY: test-e2e-managed
@@ -198,23 +211,28 @@ test-e2e-managed: setup-test-e2e manifests generate fmt vet ## Run the GATED man
 	# --ginkgo.timeout=85m: Ginkgo's OWN suite timeout defaults to 1h regardless of `go test
 	# -timeout`; on a cold image cache the managed suite runs past 1h, so raise it (kept just
 	# under the 90m go-test ceiling so Ginkgo times out gracefully + reports before go-test panics).
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='$(E2E_MANAGED_LABEL)' --ginkgo.timeout=85m -timeout 90m
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='$(E2E_MANAGED_LABEL)' --ginkgo.timeout=85m -timeout 90m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-matrix
-test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ONLY the version-matrix e2e (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 preview upgrade refused -> fresh 2.19.0).
-	# FOCUSED VERSION-MATRIX run: the 'matrix' Ginkgo label selects only the version-matrix
-	# Context (which installs its own upstream operators), so it brings up ONE managed 2.17.0
-	# stack, upgrades it in place to 2.18.0, proves the downgrade refusal and the refusal to
-	# upgrade onto the unreleased 2.19.0 preview bundle, then drains the node and brings up a
-	# FRESH 2.19.0 platform — WITHOUT running the four per-infra managed blocks. The block measures
-	# ~21m locally on a warm-ish image cache; -timeout 90m keeps ~4x headroom for CI, where a fresh
-	# cluster re-pulls every image for BOTH full bring-ups (2.17.0 and 2.19.0) plus the in-place
-	# 2.18.0 re-roll.
-	# --ginkgo.timeout=85m: Ginkgo's own suite timeout defaults to 1h; the matrix's operator
+test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run BOTH version-matrix blocks (matrix-upgrade + matrix-preview) in one cluster.
+	# FOCUSED VERSION-MATRIX run: the umbrella 'matrix' Ginkgo label selects BOTH version-matrix
+	# Contexts (each installs its own upstream operators) — WITHOUT the four per-infra managed
+	# blocks. Sequentially, in this one cluster, that is:
+	#   'matrix-upgrade': bring up ONE managed 2.17.0 stack, upgrade it in place to 2.18.0, prove
+	#                     the downgrade refusal and the refusal to upgrade onto the unreleased
+	#                     2.19.0 preview bundle, then prove deletionPolicy=Delete reclaims every
+	#                     managed CR (which also frees this shared node);
+	#   'matrix-preview': bring up a FRESH 2.19.0 platform and assert the 2.19.0 contract.
+	# CI runs the two blocks as SEPARATE parallel jobs on separate clusters (see
+	# E2E_MANAGED_LABEL); locally they share this cluster, so the run is still the sum of both.
+	# The pair measures ~21m locally on a warm-ish image cache; -timeout 90m keeps ~4x headroom
+	# for CI, where a fresh cluster re-pulls every image for BOTH full bring-ups (2.17.0 and
+	# 2.19.0) plus the in-place 2.18.0 re-roll.
+	# --ginkgo.timeout=85m: Ginkgo's own suite timeout defaults to 1h; the two blocks' operator
 	# installs + the two full bring-ups + the upgrade re-roll can exceed that on a cold cache, so
 	# raise it (kept UNDER the 90m go-test ceiling so Ginkgo reports before go-test panics).
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=85m -timeout 90m
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=85m -timeout 90m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-all
@@ -225,7 +243,7 @@ test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (f
 	# is the sum-of-blocks ceiling that replaces the old 75m, which predated the matrix block and
 	# could no longer cover the run. --ginkgo.timeout=145m raises Ginkgo's own 1h default to just
 	# under it, so Ginkgo reports the failing spec instead of go-test panicking mid-run.
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=145m -timeout 150m
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=145m -timeout 150m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e
@@ -511,6 +529,15 @@ prune-kind-cluster: kind ## Delete the Kind cluster.
 .PHONY: kind-load
 kind-load: kind ## Load the operator Docker image into the Kind cluster.
 	$(KIND) load docker-image $(IMG) --name $(KIND_CLUSTER_NAME)
+
+.PHONY: kind-load-archive
+kind-load-archive: kind ## Load a pre-built operator image archive (E2E_IMAGE_ARCHIVE, a `docker save` tarball) into the Kind cluster.
+	# The archive counterpart of kind-load, for the build-once model: import an image someone
+	# else built (CI's shared build job, or a `docker save` from another machine) without
+	# rebuilding it here. The e2e targets do NOT depend on this — they recreate the cluster
+	# first, so the suite loads E2E_IMAGE_ARCHIVE itself once the fresh node exists.
+	@[ -n "$(E2E_IMAGE_ARCHIVE)" ] || { echo "E2E_IMAGE_ARCHIVE is not set (path to a 'docker save' tarball)"; exit 1; }
+	$(KIND) load image-archive $(E2E_IMAGE_ARCHIVE) --name $(KIND_CLUSTER_NAME)
 
 .PHONY: kind-export-logs
 kind-export-logs: kind ## Export logs from the Kind cluster.
