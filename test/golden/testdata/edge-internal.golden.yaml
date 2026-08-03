@@ -477,9 +477,14 @@ spec:
           while ! nc -z auth 8080; do sleep 1; done &&
           while ! nc -z auth-opa-policies 8080; do sleep 1; done &&
           echo "auth service seems to be started" &&
-          while ! nc -z messaging-service 5672; do sleep 1; done &&
+          while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done &&
           while ! nc -z scheduler 8080; do sleep 1; done &&
           echo "messaging and scheduler service seems to be started"
+        env:
+        - name: MQ_WAIT_HOST
+          value: messaging-service
+        - name: MQ_WAIT_PORT
+          value: "5672"
         image: hub.omnitrustregistry.com/ilm/curl:8.16.0
         imagePullPolicy: IfNotPresent
         name: wait-for-auth
@@ -708,8 +713,13 @@ spec:
         - /bin/sh
         - -c
         - |
-          while ! nc -z messaging-service 5672; do sleep 1; done &&
+          while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done &&
           echo "messaging service seems to be started"
+        env:
+        - name: MQ_WAIT_HOST
+          value: messaging-service
+        - name: MQ_WAIT_PORT
+          value: "5672"
         image: hub.omnitrustregistry.com/ilm/curl:8.16.0
         imagePullPolicy: IfNotPresent
         name: wait-for-messaging-service
@@ -1070,16 +1080,18 @@ data:
     CERT=$( echo $CERT | awk '{gsub(/-----BEGINCERTIFICATE-----/,""); print}' )
     CERT=$( echo $CERT | awk '{gsub(/-----ENDCERTIFICATE-----/,""); print}' )
 
+    # The request body, composed by the operator with encoding/json and read from a QUOTED heredoc:
+    # the shell performs NO parameter expansion and NO command substitution inside it, so the admin
+    # identity is inert data — an apostrophe in a surname included. Only the certificate placeholder
+    # is substituted, from the base64 $CERT above.
+    read -r BODY <<'EOF'
+    {"username":"","firstName":"","email":"","enabled":true,"certificateData":"__ADMIN_CERT__"}
+    EOF
+    BODY=$(printf '%s' "$BODY" | sed "s|__ADMIN_CERT__|${CERT}|")
+
     curl -X POST \
       -H 'content-type: application/json' \
-      -d '
-      {
-        "username": "",
-        "firstName": "",
-        "email": "",
-        "enabled": true,
-        "certificateData": "'"$CERT"'"
-      }' \
+      -d "${BODY}" \
       http://localhost:8080/api/v1/local/admins
 kind: ConfigMap
 metadata:

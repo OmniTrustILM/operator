@@ -1261,6 +1261,124 @@ var _ = Describe("Platform Controller", func() {
 					"the running version must remain in effect when a downgrade is refused")
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
+
+		It("refuses upgrading a live platform onto a preview bundle, but allows a fresh preview install", func() {
+			By("reaching Running on the operator's newest (released) version")
+			const ns = "ilm-version-preview-upgrade"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
+			markRequiredDeploymentsReady(ns)
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion))
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("requesting an upgrade to the unreleased 2.19.0 preview bundle")
+			Eventually(func() error {
+				var got otilmv1alpha1.Platform
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
+					return err
+				}
+				got.Spec.Version = platformVersion219
+				return k8sClient.Update(ctx, &got)
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("verifying it goes Degraded/PreviewVersionUpgradeBlocked and the running version is NOT moved")
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, "Degraded")
+				g.Expect(cond).NotTo(BeNil(), "an upgrade onto a preview bundle must set a Degraded condition")
+				g.Expect(cond.Reason).To(Equal(reasonPreviewVersionUpgradeBlocked))
+				g.Expect(cond.Message).To(ContainSubstring(platformVersion219))
+				// status.observedVersion stays at the running (released) version — the platform is
+				// NOT upgraded onto the preview bundle.
+				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion),
+					"the running version must remain in effect when a preview upgrade is refused")
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("verifying the core Deployment is NOT re-rendered/rolled onto the blocked preview image")
+			Consistently(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &dep)).To(Succeed())
+				g.Expect(coreContainer(g, dep).Image).To(HaveSuffix(":"+bom.DefaultVersion),
+					"a blocked preview upgrade must not roll the core Deployment onto the preview version's image")
+			}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			By("creating a FRESH platform pinned directly to the same preview version")
+			const freshNS = "ilm-version-preview-fresh"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(freshNS, platformVersion219))).To(Succeed())
+			markRequiredDeploymentsReady(freshNS)
+
+			By("verifying the fresh install proceeds to Running, pinned to the preview version")
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: freshNS}, &got)).To(Succeed())
+				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
+				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion219))
+				cond := meta.FindStatusCondition(got.Status.Conditions, conditionDegraded)
+				if cond != nil {
+					g.Expect(cond.Reason).NotTo(Equal(reasonPreviewVersionUpgradeBlocked),
+						"a fresh preview install must not be blocked by the upgrade guard")
+				}
+			}, platformTimeout, platformInterval).Should(Succeed())
+		})
+
+		It("clears the stale Degraded condition once a refused spec.version is corrected", func() {
+			const ns = "ilm-version-degraded-cleared"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
+			markRequiredDeploymentsReady(ns)
+
+			By("reaching Running on the operator's newest (released) version")
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion))
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("requesting the blocked preview upgrade so the platform goes Degraded")
+			Eventually(func() error {
+				var got otilmv1alpha1.Platform
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
+					return err
+				}
+				got.Spec.Version = platformVersion219
+				return k8sClient.Update(ctx, &got)
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, conditionDegraded)).To(BeTrue())
+				g.Expect(meta.FindStatusCondition(got.Status.Conditions, conditionDegraded).Reason).
+					To(Equal(reasonPreviewVersionUpgradeBlocked))
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("reverting spec.version to the version actually running")
+			Eventually(func() error {
+				var got otilmv1alpha1.Platform
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
+					return err
+				}
+				got.Spec.Version = bom.DefaultVersion
+				return k8sClient.Update(ctx, &got)
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("verifying the stale Degraded is cleared (not left True forever) and the platform is Running again")
+			markRequiredDeploymentsReady(ns)
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
+				// Literal type/reason: the published contract, asserted independently of the
+				// production constants so a rename cannot silently keep this green.
+				cond := meta.FindStatusCondition(got.Status.Conditions, "Degraded")
+				g.Expect(cond).NotTo(BeNil(), "the condition stays visible, flipped to False")
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse),
+					"a corrected platform must not advertise Degraded=True forever")
+				g.Expect(cond.Reason).To(Equal("Reconciled"))
+			}, platformTimeout, platformInterval).Should(Succeed())
+		})
 	})
 })
 

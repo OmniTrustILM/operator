@@ -1771,8 +1771,15 @@ func rabbitMQClusterReady(g Gomega, name string) bool {
 // broker; a rejected or unappliable CR never reaches it. A read error (e.g. the CR not yet
 // created) reads as not-ready — not a hard failure — so the caller's Eventually keeps polling.
 func topologyObjectReady(g Gomega, kind, name string) bool {
+	return topologyObjectReadyInNS(g, platformManagedMQNamespace, kind, name)
+}
+
+// topologyObjectReadyInNS is topologyObjectReady parameterized by namespace, so the
+// version-matrix specs (which run in the namespace-scoped Keycloak Operator's namespace)
+// can reuse the topology readback.
+func topologyObjectReadyInNS(g Gomega, ns, kind, name string) bool {
 	cmd := exec.Command("kubectl", "get", kind+".rabbitmq.com", name,
-		"-n", platformManagedMQNamespace,
+		"-n", ns,
 		"-o", `jsonpath={.status.conditions[?(@.type=="Ready")].status}`,
 	)
 	output, err := utils.Run(cmd)
@@ -1784,6 +1791,33 @@ func topologyObjectReady(g Gomega, kind, name string) bool {
 		return false
 	}
 	return strings.TrimSpace(output) == conditionStatusTrue
+}
+
+// topologyObjectSpecName returns the BROKER-facing name a rabbitmq.com topology CR declares
+// (.spec.name) in the given namespace. That — not the Kubernetes metadata.name — is what the
+// messaging contract is about: the builder sanitizes every character outside [a-z0-9-] out of
+// metadata.name (so "provider.status-poll" and "provider_status_poll" would share ONE object
+// name) while spec.name carries the app-level name verbatim. It fails the surrounding Gomega
+// assertion if the CR cannot be read, so callers can use it directly inside an Eventually.
+func topologyObjectSpecName(g Gomega, ns, kind, name string) string {
+	output, err := utils.Run(exec.Command("kubectl", "get", kind+".rabbitmq.com", name,
+		"-n", ns, "-o", "jsonpath={.spec.name}"))
+	g.Expect(err).NotTo(HaveOccurred(),
+		"%s %q should exist (so its broker-facing spec.name can be read)", kind, name)
+	return strings.TrimSpace(output)
+}
+
+// topologyObjectAbsent reports whether the named rabbitmq.com topology CR is ABSENT from ns.
+// It distinguishes a real absence from an unreadable API: `--ignore-not-found -o name` exits 0
+// with EMPTY output when the object is gone, so the lookup itself is required to succeed (an
+// RBAC/discovery/API failure fails the assertion instead of masquerading as "the object is
+// gone") and only the empty result counts as absence.
+func topologyObjectAbsent(g Gomega, ns, kind, name string) bool {
+	output, err := utils.Run(exec.Command("kubectl", "get", kind+".rabbitmq.com", name,
+		"-n", ns, "--ignore-not-found", "-o", "name"))
+	g.Expect(err).NotTo(HaveOccurred(),
+		"the %s %q lookup must succeed (an error is not proof that the object is absent)", kind, name)
+	return strings.TrimSpace(output) == ""
 }
 
 // -------------------------------------------------------------------------
@@ -2673,21 +2707,37 @@ func noImagePullErrorForApp(g Gomega, ns, dep string) bool {
 // platformVersionMatrixSpecs registers the VERSION-MATRIX e2e: a MANAGED Platform pinned to
 // 2.17.0 (the pre-rebrand CZERTAINLY release) reaches Available with the 2.17.0 contract
 // (core:2.17.0, RABBITMQ_* broker env, single-user managed topology), then UPGRADES in place to
-// 2.18.0 (core:2.18.0, BROKER_* env, the five-user topology), then a DOWNGRADE is refused. It
-// proves the multi-version / upgrade story end-to-end on a real cluster.
+// 2.18.0 (core:2.18.0, BROKER_* env, the five-user topology), then a DOWNGRADE is refused, then
+// an upgrade onto the UNRELEASED 2.19.0 preview bundle is refused (the running 2.18.0 is
+// preserved) and the restore re-converges, and finally a FRESH platform pinned to 2.19.0 comes
+// up on the 2.19.0 contract (core:2.19.0, vhost "/", the ilm exchanges, provider.status-poll).
+// It proves the multi-version / upgrade / preview story end-to-end on a real cluster.
 //
 // Labelled "matrix" so it can run standalone (--ginkgo.label-filter='matrix'). Like the FULL
 // block it runs in the Keycloak Operator's namespace (managed Keycloak is namespace-scoped) and
-// installs its own upstream operators in BeforeAll; the drain barrier frees the node between the
-// (heavy) bring-ups so the single-node Kind cluster is never asked to hold two full stacks.
+// installs its own upstream operators in BeforeAll; a HARD teardown barrier frees the node
+// between the (heavy) bring-ups so the single-node Kind cluster is never asked to hold two full
+// stacks — the matrix platform carries deletionPolicy=Delete, and the 2.19.0 platform is brought
+// up only after its managed CRs are proven gone and the namespace has proven drained (each step
+// fails the spec rather than warning, so node exhaustion can never masquerade as a 2.19.0 bug).
 func platformVersionMatrixSpecs() {
-	Context("Platform VERSION MATRIX (managed 2.17.0 → 2.18.0 upgrade → downgrade refused)", Ordered, Label("managed", "matrix"), func() {
+	Context("Platform VERSION MATRIX (managed 2.17.0 → 2.18.0 → downgrade refused → 2.19.0 preview refused → fresh 2.19.0)", Ordered, Label("managed", "matrix"), func() {
 		ns := utils.KeycloakOperatorNamespace
 		const platformName = "ilm-matrix"
+		// mqClusterName is the RabbitmqCluster the operator renders for the matrix Platform
+		// ("<platform>-messaging"); its topology CRs are named off it (see managed_messaging.go).
+		const mqClusterName = platformName + "-messaging"
+		// previewPlatformName is the FRESH 2.19.0 platform. It gets its OWN name (and therefore its
+		// own managed-infra + topology CR names) so it never adopts — or collides with — the matrix
+		// platform's retained objects, whose Vhost spec.name the Topology Operator treats as
+		// immutable.
+		const previewPlatformName = "ilm-preview"
+		const previewMQClusterName = previewPlatformName + "-messaging"
 		const realmName = "ilm"
 		const coreUserSecret = "ilm-matrix-messaging-core-user-credentials"
 		const provisionerUserSecret = "ilm-matrix-messaging-provisioner-user-credentials"
 		const edgeHost = "ilm-matrix.e2e.local"
+		const previewEdgeHost = "ilm-preview.e2e.local"
 		var cnpgWasInstalled, clusterOpWasInstalled, topologyOpWasInstalled, keycloakOpWasInstalled bool
 
 		BeforeAll(func() {
@@ -2723,19 +2773,30 @@ func platformVersionMatrixSpecs() {
 			// Uninstalling first deadlocks: each operator-manifest delete removes the CRDs, whose
 			// instance cascade blocks on retained-CR finalizers that only the just-deleted operator
 			// could clear — that hang burned the rest of the suite budget (~77m) in this block.
-			By("best-effort deleting the Platform")
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "platform", platformName,
-				"-n", ns, "--ignore-not-found", "--timeout=60s"))
+			By("best-effort deleting the Platforms")
+			// Both the matrix platform and the fresh 2.19.0 one, in case a spec failed before its
+			// own teardown ran (the sequence deletes the matrix platform to free the node).
+			for _, name := range []string{platformName, previewPlatformName} {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "platform", name,
+					"-n", ns, "--ignore-not-found", "--timeout=60s"))
+			}
 
 			By("deleting the managed infra left behind by the Retain deletion policy")
-			for _, kindName := range []string{
-				"keycloak.k8s.keycloak.org/" + platformName + "-keycloak",
-				"keycloakrealmimport.k8s.keycloak.org/" + platformName + "-keycloak-realm",
-				"rabbitmqcluster.rabbitmq.com/" + platformName + "-messaging",
-				"cluster.postgresql.cnpg.io/" + platformName + "-db",
-			} {
-				_, _ = utils.Run(exec.Command("kubectl", "delete", kindName,
-					"-n", ns, "--ignore-not-found", "--timeout=120s"))
+			// The FRESH 2.19.0 platform keeps the default Retain, so its managed CRs outlive it;
+			// the matrix platform's deletionPolicy=Delete already reclaimed its own (these deletes
+			// are then no-ops via --ignore-not-found). The Pooler is listed with the Cluster: a
+			// managed database renders a PgBouncer Pooler by default (managed_database.go).
+			for _, name := range []string{platformName, previewPlatformName} {
+				for _, kindName := range []string{
+					"keycloak.k8s.keycloak.org/" + name + "-keycloak",
+					"keycloakrealmimport.k8s.keycloak.org/" + name + "-keycloak-realm",
+					"rabbitmqcluster.rabbitmq.com/" + name + "-messaging",
+					"cluster.postgresql.cnpg.io/" + name + "-db",
+					"pooler.postgresql.cnpg.io/" + name + "-db-pooler",
+				} {
+					_, _ = utils.Run(exec.Command("kubectl", "delete", kindName,
+						"-n", ns, "--ignore-not-found", "--timeout=120s"))
+				}
 			}
 
 			By("uninstalling the operators this run installed")
@@ -2757,8 +2818,10 @@ func platformVersionMatrixSpecs() {
 			if !CurrentSpecReport().Failed() {
 				return
 			}
-			if out, err := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns, "-o", "yaml")); err == nil {
-				_, _ = fmt.Fprintf(GinkgoWriter, "Platform %q:\n%s", platformName, out)
+			for _, name := range []string{platformName, previewPlatformName} {
+				if out, err := utils.Run(exec.Command("kubectl", "get", "platform", name, "-n", ns, "-o", "yaml")); err == nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "Platform %q:\n%s", name, out)
+				}
 			}
 			if out, err := utils.Run(exec.Command("kubectl", "get", "events", "-n", ns, "--sort-by=.lastTimestamp")); err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Events:\n%s", out)
@@ -2766,6 +2829,11 @@ func platformVersionMatrixSpecs() {
 		})
 
 		It("deploys a managed 2.17.0 Platform that reaches Available (core:2.17.0, RABBITMQ_*, single-user topology)", func() {
+			// deletionPolicy: Delete (the CRD default is Retain) so the operator's own finalizer
+			// reclaims every managed CR it rendered — the CNPG Cluster + Pooler, the RabbitmqCluster
+			// + its topology, the Keycloak CR + its realm import — when this Platform is deleted to
+			// free the single Kind node for the FRESH 2.19.0 bring-up in the last spec. Retaining
+			// them would leave the node holding a full stateful stack while the second one starts.
 			platformYAML := fmt.Sprintf(`
 apiVersion: otilm.com/v1alpha1
 kind: Platform
@@ -2774,6 +2842,7 @@ metadata:
   namespace: %s
 spec:
   version: "2.17.0"
+  deletionPolicy: Delete
   database:
     mode: managed
     managed:
@@ -2879,6 +2948,233 @@ spec:
 				ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
 					"-o", "jsonpath={.status.observedVersion}"))
 				g.Expect(strings.TrimSpace(ver)).To(Equal("2.18.0"), "the running version is NOT rolled back")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("refuses an upgrade onto the 2.19.0 preview bundle (PreviewVersionUpgradeBlocked; the running 2.18.0 is preserved)", func() {
+			By("setting spec.version to the unreleased 2.19.0 preview bundle")
+			_, err := utils.Run(exec.Command("kubectl", "patch", "platform", platformName, "-n", ns,
+				"--type=merge", "-p", `{"spec":{"version":"2.19.0"}}`))
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version to 2.19.0")
+
+			By("verifying the platform goes Degraded/PreviewVersionUpgradeBlocked and observedVersion stays 2.18.0")
+			Eventually(func(g Gomega) {
+				reason, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Degraded")].reason}`))
+				g.Expect(strings.TrimSpace(reason)).To(Equal("PreviewVersionUpgradeBlocked"),
+					"a live platform must not be upgraded onto an unreleased (preview) bundle")
+				ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
+					"-o", "jsonpath={.status.observedVersion}"))
+				g.Expect(strings.TrimSpace(ver)).To(Equal("2.18.0"), "the running version is NOT advanced onto the preview")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the running 2.18.0 workload + managed topology are left untouched (nothing 2.19.0 was rendered)")
+			// The guard is a terminal steady state BEFORE the render/apply, so the live objects must
+			// keep the 2.18.0 contract: Core stays on core:2.18.0 and the managed topology keeps the
+			// 2.18.0 vhost with none of the 2.19.0-only objects (the renamed "ilm" exchange, the new
+			// provider.status-poll queue) appearing alongside it.
+			Consistently(func(g Gomega) {
+				img, _ := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
+					"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].image}`))
+				g.Expect(img).To(ContainSubstring("/core:2.18.0"), "Core must keep running the 2.18.0 image")
+				g.Expect(topologyObjectSpecName(g, ns, "vhost", mqClusterName+"-vhost")).To(Equal("czertainly"),
+					"the managed vhost must stay the 2.18.0 one")
+				g.Expect(topologyObjectAbsent(g, ns, "exchange", mqClusterName+"-exchange-ilm")).To(BeTrue(),
+					"the 2.19.0 \"ilm\" exchange must NOT be rendered")
+				g.Expect(topologyObjectAbsent(g, ns, "queue", mqClusterName+"-queue-provider-status-poll")).To(BeTrue(),
+					"the 2.19.0 provider.status-poll queue must NOT be rendered")
+			}, 30*time.Second, 5*time.Second).Should(Succeed())
+
+			By("restoring spec.version to 2.18.0")
+			_, err = utils.Run(exec.Command("kubectl", "patch", "platform", platformName, "-n", ns,
+				"--type=merge", "-p", `{"spec":{"version":"2.18.0"}}`))
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version back to 2.18.0")
+
+			By("verifying the platform returns to Available with the blocked Degraded condition cleared")
+			// The successful pass clears the stale Degraded=True (reason Reconciled), so the platform
+			// stops advertising the refusal once the spec is corrected.
+			Eventually(func(g Gomega) {
+				avail, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`))
+				g.Expect(strings.TrimSpace(avail)).To(Equal(conditionStatusTrue), "the platform must be Available again")
+				degraded, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Degraded")].status}`))
+				g.Expect(strings.TrimSpace(degraded)).To(Equal("False"), "the stale Degraded must be cleared once the spec is corrected")
+				ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", platformName, "-n", ns,
+					"-o", "jsonpath={.status.observedVersion}"))
+				g.Expect(strings.TrimSpace(ver)).To(Equal("2.18.0"), "the restored version is the one that kept running")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("deploys a FRESH managed 2.19.0 Platform that reaches Available (core:2.19.0, vhost /, ilm exchanges, provider.status-poll)", func() {
+			By("deleting the matrix Platform so its deletionPolicy=Delete teardown reclaims the managed infra")
+			// The single-node Kind cluster cannot hold two full platform stacks, so freeing it is a
+			// PRECONDITION of this spec, not a courtesy: every step below is a HARD barrier that
+			// fails here rather than resurfacing as an unexplained node-exhaustion failure inside
+			// the 2.19.0 bring-up. The matrix Platform carries deletionPolicy=Delete, so its delete
+			// runs the operator's own finalizer teardown, reclaiming every managed CR WHILE the
+			// upstream operators still run (so their finalizers actually get cleared).
+			_, deleteErr := utils.Run(exec.Command("kubectl", "delete", "platform", platformName,
+				"-n", ns, "--ignore-not-found", "--timeout=180s"))
+			Expect(deleteErr).NotTo(HaveOccurred(),
+				"deleting the matrix Platform must SUCCEED (--ignore-not-found tolerates an already-deleted CR)")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "platform",
+					"-n", ns, "-o", "jsonpath={.items[*].metadata.name}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(strings.TrimSpace(out)).To(BeEmpty(),
+					"namespace must have no Platform before applying the 2.19.0 one (one Platform per namespace)")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying every managed workload CR the matrix Platform provisioned is really gone")
+			// The pod-bearing managed CRs this CR shape renders, per the managed builders: the CNPG
+			// Cluster AND its PgBouncer Pooler (ResolveManagedDatabase renders the Pooler for every
+			// managed database unless pgBouncer.managed=false — it is DEFAULT-ON, and this CR sets
+			// no pgBouncer block), the RabbitmqCluster (ResolveManagedMessaging), and the Keycloak
+			// CR + its realm import (ResolveManagedKeycloak). Each runs pods, so the node is only
+			// free once ALL of them are reclaimed — the Pooler included.
+			Eventually(func(g Gomega) {
+				for _, kindName := range []string{
+					"keycloak.k8s.keycloak.org/" + platformName + "-keycloak",
+					"keycloakrealmimport.k8s.keycloak.org/" + platformName + "-keycloak-realm",
+					"rabbitmqcluster.rabbitmq.com/" + mqClusterName,
+					"cluster.postgresql.cnpg.io/" + platformName + "-db",
+					"pooler.postgresql.cnpg.io/" + platformName + "-db-pooler",
+				} {
+					out, getErr := utils.Run(exec.Command("kubectl", "get", kindName, "-n", ns,
+						"--ignore-not-found", "-o", "name"))
+					g.Expect(getErr).NotTo(HaveOccurred(),
+						"the %q lookup must succeed (an error is not proof that the CR is gone)", kindName)
+					g.Expect(strings.TrimSpace(out)).To(BeEmpty(),
+						"managed CR %q must be reclaimed by the deletionPolicy=Delete teardown", kindName)
+				}
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("blocking until every workload pod but the Keycloak Operator has drained from the node")
+			// A REAL barrier: WaitForWorkloadsDrained is a best-effort teardown helper that only
+			// WARNS on timeout, so poll the same listing inside an Eventually — on the same
+			// 5-minute envelope — and FAIL here if pods still hold node resources.
+			Eventually(func(g Gomega) {
+				remaining, drainErr := utils.RemainingWorkloadPods(ns, "keycloak-operator")
+				g.Expect(drainErr).NotTo(HaveOccurred(),
+					"the pod listing must succeed (an error is not proof of a drained namespace)")
+				g.Expect(remaining).To(BeEmpty(),
+					"the node must be free of the matrix stack before the 2.19.0 stack is brought up")
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("creating a FRESH managed Platform pinned to 2.19.0 (a fresh install MAY name a preview bundle)")
+			// The same shape as the matrix CR — managed database + messaging + Keycloak, edge
+			// enabled with an internal (cert-manager) issuer, small footprint — with its own names
+			// and NO spec.messaging.virtualHost, so the vhost comes from the 2.19.0 bundle ("/")
+			// rather than the 2.18.0 "czertainly" the matrix CR pins.
+			platformYAML := fmt.Sprintf(`
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  version: "2.19.0"
+  database:
+    mode: managed
+    managed:
+      instances: 1
+      version: "16"
+      storage:
+        size: 1Gi
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 1
+      version: "4.0"
+      storage:
+        size: 1Gi
+  keycloak:
+    mode: managed
+    realm: %s
+    managed:
+      instances: 1
+      version: "%s"
+  edge:
+    enabled: true
+    host: %s
+    tls:
+      source: internal
+`, previewPlatformName, ns, realmName, utils.KeycloakOperatorVersion, previewEdgeHost)
+			tmpFile := writeTempYAML(platformYAML)
+			defer func() { _ = os.Remove(tmpFile) }()
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", tmpFile))
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply the 2.19.0 managed Platform")
+
+			By("waiting for Available=True with observedVersion 2.19.0 (the full 2.19.0 stack converges)")
+			Eventually(func(g Gomega) {
+				ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", previewPlatformName, "-n", ns,
+					"-o", "jsonpath={.status.observedVersion}"))
+				g.Expect(strings.TrimSpace(ver)).To(Equal("2.19.0"), "observedVersion pins the explicitly requested preview")
+				avail, _ := utils.Run(exec.Command("kubectl", "get", "platform", previewPlatformName, "-n", ns,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`))
+				g.Expect(strings.TrimSpace(avail)).To(Equal(conditionStatusTrue), "the 2.19.0 platform must reach Available")
+			}, 20*time.Minute, 15*time.Second).Should(Succeed())
+
+			By("verifying the 2.19.0 image set RUNS (core:2.19.0, auth:1.7.0, scheduler:1.1.1 all Available)")
+			// Each component's Deployment and its main container share the component name (see the
+			// FULL block's read-only-root checks), so one jsonpath shape reads every image back. The
+			// rendered image alone would be satisfied by a Deployment whose pods never start — the
+			// Platform's Available gates only Core and auth, so a scheduler stuck in ImagePullBackOff
+			// would slip through — hence each component must ALSO report Available. The image is
+			// matched as an exact tag SUFFIX so no coincidental substring can satisfy it.
+			for _, c := range []struct{ dep, image string }{
+				{"core", "/core:2.19.0"},
+				{"auth", "/auth:1.7.0"},
+				{"scheduler", "/scheduler:1.1.1"},
+			} {
+				Eventually(func(g Gomega) {
+					img, imgErr := utils.Run(exec.Command("kubectl", "get", "deployment", c.dep, "-n", ns,
+						"-o", fmt.Sprintf(`jsonpath={.spec.template.spec.containers[?(@.name==%q)].image}`, c.dep)))
+					g.Expect(imgErr).NotTo(HaveOccurred())
+					g.Expect(strings.TrimSpace(img)).To(HaveSuffix(c.image),
+						"%s must run the 2.19.0 bundle's image", c.dep)
+					g.Expect(deploymentAvailable(g, ns, c.dep)).To(BeTrue(),
+						"%s must actually roll out on that image, not merely be rendered with it", c.dep)
+				}, 10*time.Minute, 15*time.Second).Should(Succeed())
+			}
+
+			By("verifying Core uses the renamed LOGGING_LEVEL_COM_OTILM env (not the CZERTAINLY one)")
+			env, err := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
+				"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].env[*].name}`))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(env).To(ContainSubstring("LOGGING_LEVEL_COM_OTILM"), "2.19.0 Core uses the OTILM logging env")
+			Expect(env).NotTo(ContainSubstring("LOGGING_LEVEL_COM_CZERTAINLY"), "2.19.0 Core must NOT use the pre-rebrand logging env")
+
+			By("verifying the managed topology is the 2.19.0 one at the BROKER level (vhost /, ilm + ilm-proxy exchanges, provider.status-poll)")
+			// Read the topology back THROUGH the Messaging Topology Operator: each renamed/new CR
+			// must exist AND reach Ready, i.e. the operator really applied the 2.19.0 topology to
+			// the live broker (a rejected or unappliable CR never gets there). Readiness is asserted
+			// on the CR, but the 2.19.0 CONTRACT is the broker-facing spec.name — the Kubernetes
+			// metadata.name is sanitized ([a-z0-9-] only), so "provider.status-poll" and
+			// "provider_status_poll" would share the object name "...-queue-provider-status-poll"
+			// and only spec.name distinguishes them. Assert both.
+			const previewVhostCR = previewMQClusterName + "-vhost"
+			const previewStatusPollQueueCR = previewMQClusterName + "-queue-provider-status-poll"
+			Eventually(func(g Gomega) {
+				g.Expect(topologyObjectReadyInNS(g, ns, "vhost", previewVhostCR)).To(BeTrue(),
+					"the Vhost CR should be accepted and reach Ready")
+				g.Expect(topologyObjectSpecName(g, ns, "vhost", previewVhostCR)).To(Equal("/"),
+					"2.19.0 provisions the default \"/\" vhost")
+				for _, ex := range []struct{ cr, brokerName string }{
+					{previewMQClusterName + "-exchange-ilm", "ilm"},
+					{previewMQClusterName + "-exchange-ilm-proxy", "ilm-proxy"},
+				} {
+					g.Expect(topologyObjectReadyInNS(g, ns, "exchange", ex.cr)).To(BeTrue(),
+						"Exchange CR %q should be accepted and reach Ready (2.19.0 renamed both exchanges)", ex.cr)
+					g.Expect(topologyObjectSpecName(g, ns, "exchange", ex.cr)).To(Equal(ex.brokerName),
+						"Exchange CR %q must declare the broker-facing name %q (the 2.19.0 rename)", ex.cr, ex.brokerName)
+				}
+				g.Expect(topologyObjectReadyInNS(g, ns, "queue", previewStatusPollQueueCR)).To(BeTrue(),
+					"the 2.19.0-new provider.status-poll Queue CR should be accepted and reach Ready")
+				g.Expect(topologyObjectSpecName(g, ns, "queue", previewStatusPollQueueCR)).To(Equal("provider.status-poll"),
+					"the Queue CR must declare the broker-facing name \"provider.status-poll\" verbatim (dot, not dash)")
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 	})

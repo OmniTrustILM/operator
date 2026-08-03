@@ -26,6 +26,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
@@ -53,6 +56,126 @@ func TestEffectivePlatformVersion(t *testing.T) {
 	}
 }
 
+// TestTeardownPlatformVersion locks the DELETION precedence, deliberately the reverse of
+// effectivePlatformVersion: the running reality (status.observedVersion) wins over the
+// requested spec.version, so teardown renders the objects that actually exist.
+func TestTeardownPlatformVersion(t *testing.T) {
+	cases := []struct {
+		name, spec, observed, want string
+	}{
+		{"blocked upgrade: the running pin wins over the requested version", platformVersion219, platformVersion218, platformVersion218},
+		{"empty spec.version follows the pin, not the operator default", "", platformVersion219, platformVersion219},
+		{"no pin yet: fall back to the requested spec.version", platformVersion218, "", platformVersion218},
+		{"nothing set: empty (the bundle layer resolves the default)", "", "", ""},
+		{"agreeing spec and pin", platformVersion218, platformVersion218, platformVersion218},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &otilmv1alpha1.Platform{}
+			p.Spec.Version = c.spec
+			p.Status.ObservedVersion = c.observed
+			assert.Equal(t, c.want, teardownPlatformVersion(p))
+		})
+	}
+}
+
+// TestTeardownRenderPlatforms locks the version SET teardown renders against. The running
+// version is always first; the requested version is added ONLY when an upgrade is genuinely in
+// flight (set, resolvable, and different), because a released upgrade applies the new version's
+// managed objects before status.observedVersion is persisted — a crash in between would
+// otherwise orphan them (see handleDeletion).
+func TestTeardownRenderPlatforms(t *testing.T) {
+	cases := []struct {
+		name, spec, observed string
+		want                 []string
+	}{
+		{
+			name: "upgrade in flight: both the running and the requested version render",
+			spec: platformVersion218, observed: platformVersion217,
+			want: []string{platformVersion217, platformVersion218},
+		},
+		{
+			name: "agreeing spec and pin: one render",
+			spec: platformVersion218, observed: platformVersion218,
+			want: []string{platformVersion218},
+		},
+		{
+			name: "empty spec.version: the pin alone (nothing else was ever applied)",
+			spec: "", observed: platformVersion218,
+			want: []string{platformVersion218},
+		},
+		{
+			name: "unresolvable requested version rendered nothing, so it is skipped",
+			spec: "9.9.9", observed: platformVersion218,
+			want: []string{platformVersion218},
+		},
+		{
+			name: "no pin yet: the requested version alone",
+			spec: platformVersion218, observed: "",
+			want: []string{platformVersion218},
+		},
+		{
+			name: "nothing set: a single empty render (the bundle layer defaults it)",
+			spec: "", observed: "",
+			want: []string{""},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &otilmv1alpha1.Platform{}
+			p.Spec.Version = c.spec
+			p.Status.ObservedVersion = c.observed
+
+			got := teardownRenderPlatforms(p)
+			versions := make([]string, 0, len(got))
+			for _, rp := range got {
+				versions = append(versions, rp.Spec.Version)
+			}
+			assert.Equal(t, c.want, versions)
+			assert.Equal(t, c.spec, p.Spec.Version,
+				"the render pin must live on deep copies only — never on the stored spec")
+		})
+	}
+}
+
+// TestMergeManagedObjects locks the dedupe the teardown union relies on: objects the two version
+// renders share are deleted once, order is primary-first, and objects that differ in GVK,
+// namespace or name are all kept (dropping one would orphan it).
+func TestMergeManagedObjects(t *testing.T) {
+	obj := func(kind, ns, name string) client.Object {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{Group: "rabbitmq.com", Version: "v1beta1", Kind: kind})
+		u.SetNamespace(ns)
+		u.SetName(name)
+		return u
+	}
+	names := func(objs []client.Object) []string {
+		out := make([]string, 0, len(objs))
+		for _, o := range objs {
+			out = append(out, o.GetObjectKind().GroupVersionKind().Kind+"/"+o.GetNamespace()+"/"+o.GetName())
+		}
+		return out
+	}
+
+	primary := []client.Object{obj("Vhost", "ns", "vhost"), obj("Exchange", "ns", "czertainly")}
+	extra := []client.Object{
+		obj("Vhost", "ns", "vhost"),               // identical → deduped
+		obj("Exchange", "ns", "czertainly-proxy"), // new name → kept
+		obj("Queue", "ns", "czertainly"),          // same name, other kind → kept
+		obj("Exchange", "other-ns", "czertainly"), // same name, other namespace → kept
+	}
+
+	assert.Equal(t, []string{
+		"Vhost/ns/vhost",
+		"Exchange/ns/czertainly",
+		"Exchange/ns/czertainly-proxy",
+		"Queue/ns/czertainly",
+		"Exchange/other-ns/czertainly",
+	}, names(mergeManagedObjects(primary, extra)))
+
+	assert.Empty(t, mergeManagedObjects(nil, nil), "no renders, nothing to delete")
+}
+
 // TestIsPlatformDowngrade locks the downgrade predicate: strictly-older requested → true; same
 // or newer → false; an unparseable version is never treated as a downgrade (it is caught
 // separately as an unsupported version, and refusing to render on a parse quirk would be worse).
@@ -64,7 +187,7 @@ func TestIsPlatformDowngrade(t *testing.T) {
 		{"older major.minor is a downgrade", platformVersion217, platformVersion218, true},
 		{"older patch is a downgrade", platformVersion218, "2.18.1", true},
 		{"same version is not a downgrade", platformVersion218, platformVersion218, false},
-		{"newer is not a downgrade", "2.19.0", platformVersion218, false},
+		{"newer is not a downgrade", platformVersion219, platformVersion218, false},
 		{"unparseable requested → not blocked", "not-a-version", platformVersion218, false},
 		{"unparseable running → not blocked", platformVersion218, "not-a-version", false},
 	}

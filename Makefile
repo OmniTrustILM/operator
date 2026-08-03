@@ -172,8 +172,10 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PR
 	# Pass KIND through so the suite's image-load shells out to the SAME kind binary the
 	# Makefile manages ($(KIND), i.e. bin/kind) instead of a bare "kind" that may be absent.
 	# -timeout 20m: the fast tier only deploys the operator and reconciles external-mode/Connector
-	# CRs (no real stateful infra), so it finishes well within 20m.
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='!managed' -timeout 20m
+	# CRs (no real stateful infra), so it finishes well within 20m. --ginkgo.timeout=18m keeps
+	# Ginkgo's OWN suite timeout (1h by default) UNDER that ceiling, so a hung spec is reported by
+	# Ginkgo (with the spec tree + failure) instead of panicking as an opaque "test timed out".
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='!managed' --ginkgo.timeout=18m -timeout 20m
 	$(MAKE) cleanup-test-e2e
 
 # E2E_MANAGED_LABEL selects which managed Context(s) run. Defaults to the umbrella 'managed' (all
@@ -200,24 +202,30 @@ test-e2e-managed: setup-test-e2e manifests generate fmt vet ## Run the GATED man
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-matrix
-test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ONLY the version-matrix e2e (managed 2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused).
+test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ONLY the version-matrix e2e (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 preview upgrade refused -> fresh 2.19.0).
 	# FOCUSED VERSION-MATRIX run: the 'matrix' Ginkgo label selects only the version-matrix
 	# Context (which installs its own upstream operators), so it brings up ONE managed 2.17.0
-	# stack, upgrades it in place to 2.18.0, and proves the downgrade refusal — WITHOUT running
-	# the four per-infra managed blocks. -timeout 75m covers a cold image cache (fresh cluster
-	# re-pulls every image) plus the 2.17.0 bring-up and the in-place 2.18.0 re-roll.
-	# --ginkgo.timeout=70m: Ginkgo's own suite timeout defaults to 1h; the matrix's operator
-	# installs + the full 2.17.0 bring-up + the upgrade re-roll exceed that on a cold cache, so
-	# raise it (under the 75m go-test ceiling so Ginkgo reports before go-test panics).
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=70m -timeout 75m
+	# stack, upgrades it in place to 2.18.0, proves the downgrade refusal and the refusal to
+	# upgrade onto the unreleased 2.19.0 preview bundle, then drains the node and brings up a
+	# FRESH 2.19.0 platform — WITHOUT running the four per-infra managed blocks. The block measures
+	# ~21m locally on a warm-ish image cache; -timeout 90m keeps ~4x headroom for CI, where a fresh
+	# cluster re-pulls every image for BOTH full bring-ups (2.17.0 and 2.19.0) plus the in-place
+	# 2.18.0 re-roll.
+	# --ginkgo.timeout=85m: Ginkgo's own suite timeout defaults to 1h; the matrix's operator
+	# installs + the two full bring-ups + the upgrade re-roll can exceed that on a cold cache, so
+	# raise it (kept UNDER the 90m go-test ceiling so Ginkgo reports before go-test panics).
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=85m -timeout 90m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-all
-test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (fast + managed) in one cluster (~75min, full local run).
-	# Full local run: no label filter, so every spec (fast + managed) runs in one cluster.
-	# -timeout 75m covers the fast tier plus the full managed tier (real upstream operators + the
-	# whole ILM platform) end-to-end.
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v -timeout 75m
+test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (fast + managed) in one cluster (~2h, full local run).
+	# Full local run: no label filter, so every spec (fast + managed) runs SEQUENTIALLY in one
+	# cluster — the fast tier, the three per-infra managed blocks, the FULL platform block AND the
+	# version matrix (which alone measures ~21m locally for its two full bring-ups). -timeout 150m
+	# is the sum-of-blocks ceiling that replaces the old 75m, which predated the matrix block and
+	# could no longer cover the run. --ginkgo.timeout=145m raises Ginkgo's own 1h default to just
+	# under it, so Ginkgo reports the failing spec instead of go-test panicking mid-run.
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=145m -timeout 150m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

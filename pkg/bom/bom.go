@@ -37,20 +37,33 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	semver "github.com/Masterminds/semver/v3"
 )
 
-// DefaultVersion is the platform version the operator reconciles when spec.version
-// is empty: the NEWEST bundle the operator ships (the highest key in `bundles`).
+// DefaultVersion is the newest RELEASED bundle the operator ships — the FRESH-INSTALL
+// fallback, i.e. the version a brand-new Platform with an empty spec.version resolves to
+// (and then pins on status.observedVersion).
+//
+// It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
+// its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
+// bumping DefaultVersion in a new operator build never silently upgrades a running platform.
+//
+// Every bundle is keyed by its OWN version const — never by DefaultVersion — so flipping
+// DefaultVersion can never relabel a bundle or retag its images (the "demotion trap").
 const DefaultVersion = "2.18.0"
 
 // DefaultImageRegistry and DefaultImageRepository are the registry host and
 // repository the ILM component images ship under (the public registry the
 // platform components are published to). They are
-// versioned DATA: the platform builder defaults the effective shared ImageSpec to
-// these when spec.image.registry/repository are unset, so an out-of-the-box CR
-// resolves a component like "core" to hub.omnitrustregistry.com/ilm/core:<tag>
-// instead of the bare "core:<tag>" (which Docker would resolve to docker.io). A
-// user-set spec.image.registry/repository still wins (see ResolveImage precedence).
+// versioned DATA: the platform builder defaults the effective shared ImageSpec's
+// registry to DefaultImageRegistry when spec.image.registry is unset, so an
+// out-of-the-box CR resolves a component like "core" to
+// hub.omnitrustregistry.com/ilm/core:<tag> instead of the bare "core:<tag>" (which
+// Docker would resolve to docker.io). DefaultImageRepository is not spec-defaulted —
+// it resolves lazily inside image resolution (see ResolveImage), so a component's own
+// Image.Repository (e.g. "ilm-private") can still override it. A user-set
+// spec.image.registry/repository still wins (see ResolveImage precedence).
 //
 // These are SHARED across bundles today (every supported platform version ships from
 // the same public registry); a bundle that needs a different registry would carry its
@@ -61,9 +74,14 @@ const (
 )
 
 // Bundle version keys (also used as component tags for the version-aligned
-// components core + frontend-administrator). DefaultVersion (above) is the
-// newest key; version2170 is the pre-rebrand bundle.
-const version2170 = "2.17.0"
+// components core + frontend-administrator). Every bundle is keyed by its OWN
+// version const — never by DefaultVersion — so flipping DefaultVersion can never
+// relabel a bundle or retag its images (the "demotion trap").
+const (
+	version2170 = "2.17.0"
+	version2180 = "2.18.0"
+	version2190 = "2.19.0"
+)
 
 // componentAuthOPAPolicies is the operator's component identity for the
 // configured policies-server image (published as auth-opa-policies), reused as
@@ -76,10 +94,48 @@ const componentAuthOPAPolicies = "auth-opa-policies"
 // exists only in 2.18.0+ bundles (the component did not exist pre-rebrand).
 const ComponentProxy = "proxy"
 
-// Image is the per-component image coordinates from a bundle.
+// componentFeAdministrator is the operator's component identity (bundle map key) for
+// the administrator frontend; imageNameFeAdministrator is its PUBLISHED image name —
+// the two differ, like auth and scheduler.
+const (
+	componentFeAdministrator = "fe-administrator"
+	imageNameFeAdministrator = "frontend-administrator"
+)
+
+// componentUtils is the operator's component identity (bundle map key) for the utils
+// service; imageNameUtils is its PUBLISHED image name — the two differ.
+const (
+	componentUtils = "utils"
+	imageNameUtils = "utils-service"
+)
+
+// componentAPIGateway is the operator's component identity (bundle map key) for the
+// API gateway component, published under the "kong" image name (Kong is the
+// underlying gateway engine).
+const componentAPIGateway = "api-gateway"
+
+// componentKeycloakTheme is the operator's component identity for the ilm Keycloak
+// login theme, reused as both the bundle map key and the published image name (the
+// same pattern as componentAuthOPAPolicies above).
+const componentKeycloakTheme = "keycloak-theme"
+
+// Tags shared by every CURRENT bundle: opa and curl are third-party/base images
+// pinned identically across all supported platform versions today. This is a dedup of
+// today's data, not a promise of cross-version alignment — a bundle that needs a
+// different pin simply stops using the const and sets its own literal.
+const (
+	tagOpa1100Static = "1.10.0-static"
+	tagCurl8160      = "8.16.0"
+)
+
+// Image is the per-component image coordinates from a bundle. Repository is set only
+// for components published outside the default repository (e.g. ilm-private) — empty
+// means DefaultImageRepository applies (resolved lazily in the builder, never eagerly
+// on the CR).
 type Image struct {
-	Name string
-	Tag  string
+	Name       string
+	Tag        string
+	Repository string
 }
 
 // Bundle is everything version-specific for ONE platform version: the per-component
@@ -108,6 +164,14 @@ type Bundle struct {
 	// is portable across versions.
 	HasProvisioning bool
 
+	// Released marks a bundle whose platform artifacts are published. Unreleased
+	// (preview) bundles resolve ONLY via an explicit spec.version — they are excluded
+	// from the advertised SupportedVersions(), are not eligible to be DefaultVersion,
+	// and a LIVE platform cannot be upgraded onto one (see the controller's
+	// preview-upgrade guard). The release-day flip PR sets Released and moves
+	// DefaultVersion.
+	Released bool
+
 	// Managed-infrastructure default versions for this platform version. They are the
 	// engine versions the operator provisions when the managed block leaves version
 	// empty AND the upstream operator's own default is not desired. Today the managed
@@ -131,9 +195,10 @@ func (b Bundle) Lookup(name string) (Image, bool) {
 // bundles is the operator's full set of version-keyed bundles. Adding a supported
 // platform version is a DATA edit here (a new key) — the reconciler resolves the bundle
 // at runtime, so no code change is needed to carry an additional version. DefaultVersion
-// must equal the NEWEST key.
+// must name a RELEASED bundle (TestDefaultVersionIsReleased). Every bundle is keyed by
+// its own version const, never by DefaultVersion.
 var bundles = map[string]Bundle{
-	DefaultVersion: {
+	version2180: {
 		// The map KEY is the operator's component identity (clean Service name, labels);
 		// Image.Name is the PUBLISHED image repository name, which differs for several
 		// components (auth, scheduler, frontend-administrator). The published coordinates
@@ -141,16 +206,16 @@ var bundles = map[string]Bundle{
 		// full-managed e2e, which pulls them. auth-opa-policies is the configured policies
 		// server image (auth-opa-policies:1.4.1), distinct from the bare OPA engine sidecar (opa).
 		Components: map[string]Image{
-			"core":                   {Name: "core", Tag: DefaultVersion},
+			"core":                   {Name: "core", Tag: version2180},
 			"auth":                   {Name: "auth", Tag: "1.6.3"},
 			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
 			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
-			"opa":                    {Name: "opa", Tag: "1.10.0-static"},
-			"curl":                   {Name: "curl", Tag: "8.16.0"},
+			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
+			"curl":                   {Name: "curl", Tag: tagCurl8160},
 			"scheduler":              {Name: "scheduler", Tag: "1.1.0"},
-			"fe-administrator":       {Name: "frontend-administrator", Tag: DefaultVersion},
-			"utils":                  {Name: "utils-service", Tag: "1.0.2"},
-			"api-gateway":            {Name: "kong", Tag: "3.9.1"},
+			componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2180},
+			componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
+			componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
 			// provisioning is the bundled provisioning-rabbitmq service, rendered natively when
 			// provisioning.mode=deploy. It resolves to
 			// hub.omnitrustregistry.com/ilm/provisioning-rabbitmq:<tag> like every other ILM
@@ -163,11 +228,12 @@ var bundles = map[string]Bundle{
 			// hub.omnitrustregistry.com/ilm/keycloak-theme:<tag> like every other ILM component.
 			// A bundle that ships this key opts managed Keycloak into the theme; a bundle without
 			// it (e.g. the pre-rebrand 2.17.0) cleanly renders no theme.
-			"keycloak-theme": {Name: "keycloak-theme", Tag: "0.1.4"},
+			componentKeycloakTheme: {Name: componentKeycloakTheme, Tag: "0.1.4"},
 		},
 		Wiring:          wiring2180,
 		Messaging:       messagingTopology2180,
 		HasProvisioning: true, // provisioning-rabbitmq ships in 2.18.0
+		Released:        true,
 		// Managed-infra default engine versions for this bundle — the LATEST each upstream
 		// operator supports, validated end-to-end (a managed everything-deploy migrated Core
 		// 134/134 first-try, 0 restarts, with PostgreSQL 18.4, RabbitMQ 4.3.1, and Keycloak
@@ -176,6 +242,44 @@ var bundles = map[string]Bundle{
 		// upstream operator picks its own matched default (e.g. the RabbitMQ operator ships 4.2.6),
 		// so the quickstart PINS these to get the latest; these values also back the upgrade
 		// guard's per-bundle reasoning and document the validated set.
+		RabbitMQVersion: "4.3.1",
+		CNPGVersion:     "18",
+		KeycloakVersion: "26.6.3",
+	},
+	// 2.19.0 — PREVIEW until the operator ships it as default: resolvable only via
+	// explicit spec.version, excluded from SupportedVersions, not
+	// DefaultVersion-eligible, and live platforms cannot upgrade onto it
+	// (preview-upgrade guard) until the flip PR sets Released. Image coordinates
+	// verified against the released helm-charts 2.19.0 tag.
+	//
+	// COMPLETENESS: parts of this bundle are carried as version DATA that no builder reads
+	// yet. The wiring's TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and
+	// PlatformInstanceIDEnv (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image
+	// below, are recorded here so the version contract is complete and reviewable — but
+	// nothing renders them. A platform pinned to 2.19.0 today therefore comes up WITHOUT the
+	// time-quality integration, WITHOUT the time-quality-monitor sidecar, and WITHOUT the
+	// instance-id env var. The data stays: consuming it is the remaining work, and removing
+	// it would lose the verified coordinates.
+	version2190: {
+		Components: map[string]Image{
+			"core":                   {Name: "core", Tag: version2190},
+			"auth":                   {Name: "auth", Tag: "1.7.0"},
+			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
+			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
+			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
+			"curl":                   {Name: "curl", Tag: tagCurl8160},
+			"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
+			componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
+			componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
+			componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
+			"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+			componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
+			"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+		},
+		Wiring:          wiring2190,
+		Messaging:       messagingTopology2190,
+		HasProvisioning: true,
+		Released:        false,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
@@ -192,17 +296,18 @@ var bundles = map[string]Bundle{
 			"core":                   {Name: "core", Tag: version2170},
 			"auth":                   {Name: "auth", Tag: "1.6.3"},
 			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-			"opa":                    {Name: "opa", Tag: "1.10.0-static"},
-			"curl":                   {Name: "curl", Tag: "8.16.0"},
+			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
+			"curl":                   {Name: "curl", Tag: tagCurl8160},
 			"scheduler":              {Name: "scheduler", Tag: "1.0.5"},
-			"fe-administrator":       {Name: "frontend-administrator", Tag: version2170},
-			"utils":                  {Name: "utils-service", Tag: "1.0.2"},
-			"api-gateway":            {Name: "kong", Tag: "3.9.1"},
+			componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2170},
+			componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
+			componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
 			// No provisioning component in 2.17.0 (it arrived in 2.18.0).
 		},
 		Wiring:          wiring2170,
 		Messaging:       messagingTopology2170,
 		HasProvisioning: false,
+		Released:        true,
 		// Managed-infra engine versions for 2.17.0 — pinned to what THIS platform version
 		// (pre-rebrand core:2.17.0) was validated against. They are deliberately NOT bumped to
 		// 2.18.0's newer baseline (18/4.3.1/26.6.3): core 2.17.0 was not validated on those, and
@@ -217,7 +322,8 @@ var bundles = map[string]Bundle{
 }
 
 // BundleFor returns the bundle for a platform version. An empty version selects the
-// DefaultVersion bundle (the operator's newest). ok is false for an unknown version —
+// DefaultVersion bundle (the operator's newest RELEASED bundle — a preview is reachable
+// only by naming it explicitly). ok is false for an unknown version —
 // the caller (the reconciler) degrades with an actionable supported-versions message
 // rather than rendering against a non-existent bundle. The supported set grows over
 // time, so this is a RUNTIME check, not a frozen CEL enum.
@@ -229,16 +335,50 @@ func BundleFor(version string) (Bundle, bool) {
 	return b, ok
 }
 
-// SupportedVersions returns the platform versions this operator ships, sorted, for the
-// unknown-version degraded message. It is computed from the bundle keys so it can never
-// drift from what BundleFor accepts.
+// SupportedVersions returns the RELEASED platform versions this operator ships,
+// semver-ascending — the advertised set used in the unknown-version degraded message
+// and by the CLI. Preview bundles (Released=false) are excluded: they resolve only via
+// an explicit spec.version (see AllVersions for the full key set). Derived from the
+// bundle data so the advertised set can never list a version BundleFor rejects.
 func SupportedVersions() []string {
+	out := make([]string, 0, len(bundles))
+	for v, b := range bundles {
+		if b.Released {
+			out = append(out, v)
+		}
+	}
+	return sortVersions(out)
+}
+
+// AllVersions returns every bundle key (released and preview), semver-ascending.
+func AllVersions() []string {
 	out := make([]string, 0, len(bundles))
 	for v := range bundles {
 		out = append(out, v)
 	}
-	sort.Strings(out)
+	return sortVersions(out)
+}
+
+// sortVersions sorts a version list ASCENDING by semver IN PLACE and returns it. It is the
+// single ordering used by SupportedVersions and AllVersions, so the advertised set and the
+// full key set can never disagree on "newest is last" — the invariant the DefaultVersion
+// check and the CLI both rely on. Ordering is semver, never lexicographic (2.9.0 < 2.10.0).
+func sortVersions(out []string) []string {
+	sort.Slice(out, func(i, j int) bool { return semverLess(out[i], out[j]) })
 	return out
+}
+
+// semverLess orders two version strings numerically per segment via the module's
+// existing semver dependency — 2.9.0 < 2.10.0, which lexicographic sorting gets
+// wrong. Unparsable keys (never expected; bundle keys are controlled X.Y.Z data)
+// fall back to string ordering deterministically.
+func semverLess(a, b string) bool {
+	va, errA := semver.NewVersion(a)
+	vb, errB := semver.NewVersion(b)
+	if errA != nil || errB != nil {
+		return a < b
+	}
+	return va.LessThan(vb)
 }
 
 // defaultBundle returns the DefaultVersion bundle (which always exists). It backs the
@@ -314,6 +454,12 @@ type WiringProfile struct {
 	HTTPSProxyEnv      string
 	NoProxyEnv         string
 	ProvisioningURLEnv string
+	// TimeQualityEnabledEnv is the env var toggling Core's time-quality messaging
+	// integration (2.19.0+; empty in earlier bundles renders nothing).
+	TimeQualityEnabledEnv string
+	// PlatformInstanceIDEnv is the env var carrying Core's certificate-serial
+	// instance id (2.19.0+; empty in earlier bundles renders nothing).
+	PlatformInstanceIDEnv string
 
 	// Trusted-certificates and provisioning-API-key Secret keys (env names + the
 	// in-Secret keys). Values are always secret-backed, never inlined.
@@ -547,6 +693,21 @@ var wiring2170 = func() WiringProfile {
 	return w
 }()
 
+// wiring2190 is the 2.19.0 wiring: wiring2180 with the LOGGING_LEVEL rename (core,
+// scheduler, AND the provisioning service at the released 2.19.0 chart tag), the two
+// new 2.19.0 env vars, and the provisioning proxy-exchange rename. Plain value-copy
+// is a fully independent copy: WiringProfile and its nested structs contain only
+// value fields (no maps/slices).
+var wiring2190 = func() WiringProfile {
+	w := wiring2180
+	w.LoggingLevelEnv = "LOGGING_LEVEL_COM_OTILM"
+	w.TimeQualityEnabledEnv = "MESSAGING_TIME_QUALITY_ENABLED"
+	w.PlatformInstanceIDEnv = "PLATFORM_INSTANCE_ID"
+	w.Provisioning.DefaultExchange = exchangeIlmProxy
+	w.Provisioning.LoggingLevelEnv = "LOGGING_LEVEL_COM_OTILM"
+	return w
+}()
+
 // Wiring returns the DefaultVersion bundle's wiring profile. Prefer
 // Bundle.WiringProfileData on a version-resolved bundle; this wrapper resolves the
 // default version for version-agnostic callers.
@@ -639,23 +800,30 @@ type MessagingBinding struct {
 }
 
 // MessagingTopology is the full set of users, exchanges, queues, and bindings the
-// operator provisions on a managed RabbitMQ vhost, as versioned data. The vhost name is
-// NOT held here — it comes from spec.messaging.virtualHost (defaulting to
-// DefaultVirtualHost) so the operator can honor a configured vhost.
+// operator provisions on a managed RabbitMQ vhost, as versioned data. The default vhost
+// name IS held here (DefaultVirtualHost); spec.messaging.virtualHost overrides it per
+// platform.
 type MessagingTopology struct {
+	// DefaultVirtualHost is the broker vhost this version's platform provisions and
+	// connects to when spec.messaging.virtualHost is empty. It is per-bundle DATA
+	// (2.18.0: "czertainly"; 2.19.0: "/"); spec.messaging.virtualHost overrides it.
+	DefaultVirtualHost string
 	// Users are the platform broker users + their vhost permission regexes.
 	Users []MessagingUser
-	// Exchanges are the platform's exchanges (czertainly direct + czertainly-proxy topic).
+	// Exchanges are the platform's exchanges (per bundle: one direct + one proxy topic
+	// exchange, whose names the bundle carries — 2.19.0 renamed both).
 	Exchanges []MessagingExchange
 	// Queues are the platform's queues (the core.* set + the bare "core" queue, plus the
 	// time-quality.* monitor queues from 2.18.0).
 	Queues []MessagingQueue
-	// Bindings are the czertainly-exchange→queue bindings (one per queue's routing key).
+	// Bindings are the bundle's direct-exchange→queue bindings (one per queue's routing key).
 	Bindings []MessagingBinding
 }
 
-// DefaultVirtualHost is the messaging vhost name the operator provisions when
-// spec.messaging.virtualHost is empty.
+// DefaultVirtualHost is the pre-2.19 messaging vhost name.
+//
+// Deprecated: read the per-bundle MessagingTopology.DefaultVirtualHost instead; this
+// const remains only as the 2.17/2.18 data value and for module compatibility.
 const DefaultVirtualHost = "czertainly"
 
 // Exchange names used by the topology (app-level names, tied to the application naming).
@@ -680,10 +848,42 @@ const (
 	queueTimeQualityResults       = "time-quality.results"
 )
 
+// 2.19.0 renamed the exchanges (czertainly→ilm, czertainly-proxy→ilm-proxy) and moved
+// the default vhost to "/" — helm-charts commit 6aa78a4. provider.status-poll is the
+// 2.19.0-new provider status queue — helm-charts commit 55afa9b.
+const (
+	exchangeIlm      = "ilm"
+	exchangeIlmProxy = "ilm-proxy"
+
+	queueProviderStatusPoll = "provider.status-poll"
+)
+
+// Routing keys used by the czertainly/ilm-exchange→queue bindings (app-level publish
+// keys). They are unchanged by the 2.19.0 exchange rename and repeat once per topology
+// below, so they are named once here.
+const (
+	routingKeyAuditLogs    = "audit-logs"
+	routingKeyNotification = "notification"
+	routingKeyAction       = "action"
+	routingKeyScheduler    = "scheduler"
+	routingKeyValidation   = "validation"
+	routingKeyEvent        = "event"
+)
+
+// latestOnlyQueueArguments returns the RabbitMQ x-arguments for a "keep only the
+// latest message" queue (x-max-length 1, drop-head overflow) — the time-quality.config
+// and time-quality.config-request queues use this in every topology that carries them.
+// It returns a FRESH map on every call: MessagingQueue.Arguments is a reference type,
+// and map literals must never be shared between MessagingTopology values.
+func latestOnlyQueueArguments() map[string]interface{} {
+	return map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}
+}
+
 // messagingTopology2180 is the platform's RabbitMQ topology for platform version 2.18.0:
 // the user permission regexes, exchange/queue/binding names, and routing keys the platform
 // requires on its messaging vhost.
 var messagingTopology2180 = MessagingTopology{
+	DefaultVirtualHost: DefaultVirtualHost,
 	Users: []MessagingUser{
 		// administrator + provisioner have admin tags and full ".*" permissions.
 		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
@@ -714,22 +914,80 @@ var messagingTopology2180 = MessagingTopology{
 		// time-quality monitor queues (new in 2.18.0). config + config-request keep only the
 		// latest message (x-max-length 1, drop-head); results is a plain queue. Core publishes its
 		// config snapshot here at startup and consumes config-request/results.
-		{Name: queueTimeQualityConfig, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
-		{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
+		{Name: queueTimeQualityConfig, Durable: true, Arguments: latestOnlyQueueArguments()},
+		{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: latestOnlyQueueArguments()},
 		{Name: queueTimeQualityResults, Durable: true},
 	},
 	// Bindings from the czertainly direct exchange to each queue (routing key = the app's publish
 	// key). The time-quality.* bindings (routing key == queue name) are new in 2.18.0.
 	Bindings: []MessagingBinding{
-		{Source: exchangeCzertainly, Destination: queueCoreAuditLogs, RoutingKey: "audit-logs"},
-		{Source: exchangeCzertainly, Destination: queueCoreNotifications, RoutingKey: "notification"},
-		{Source: exchangeCzertainly, Destination: queueCoreActions, RoutingKey: "action"},
-		{Source: exchangeCzertainly, Destination: queueCoreScheduler, RoutingKey: "scheduler"},
-		{Source: exchangeCzertainly, Destination: queueCoreValidation, RoutingKey: "validation"},
-		{Source: exchangeCzertainly, Destination: queueCoreEvents, RoutingKey: "event"},
+		{Source: exchangeCzertainly, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
+		{Source: exchangeCzertainly, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
+		{Source: exchangeCzertainly, Destination: queueCoreActions, RoutingKey: routingKeyAction},
+		{Source: exchangeCzertainly, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
+		{Source: exchangeCzertainly, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
+		{Source: exchangeCzertainly, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
 		{Source: exchangeCzertainly, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
 		{Source: exchangeCzertainly, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
 		{Source: exchangeCzertainly, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},
+	},
+}
+
+// messagingTopology2190 is the 2.19.0 topology: vhost "/", ilm/ilm-proxy exchanges,
+// the 2.18.0 queue set plus provider.status-poll, and the user permission regexes
+// retargeted to the renamed exchanges (core additionally reads provider.status-poll).
+var messagingTopology2190 = MessagingTopology{
+	DefaultVirtualHost: "/",
+	Users: []MessagingUser{
+		// administrator + provisioner have admin tags and full ".*" permissions.
+		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		// proxy: no configure; write only to ilm-proxy; read only proxy.* queues.
+		{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
+		// core: no configure; write ilm or ilm-proxy; read core.* / core-* AND the 2.19.0-new
+		// provider.status-poll queue AND the time-quality monitor's request/result queues. Core
+		// consumes the monitor's config-request and results queues at startup — without this read
+		// grant the broker denies access and Core crash-loops ("read access ... refused").
+		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.status-poll$|^time-quality\.(config-request|results)$`},
+		// monitor (time-quality): publish on the ilm exchange; consume the time-quality.config
+		// queue. Provisioned for an external monitor; not deployed here.
+		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
+	},
+	Exchanges: []MessagingExchange{
+		{Name: exchangeIlm, Type: "direct", Durable: true},
+		{Name: exchangeIlmProxy, Type: "topic", Durable: true},
+	},
+	Queues: []MessagingQueue{
+		{Name: "core", Durable: true},
+		{Name: queueCoreAuditLogs, Durable: true},
+		{Name: queueCoreNotifications, Durable: true},
+		{Name: queueCoreScheduler, Durable: true},
+		{Name: queueCoreActions, Durable: true},
+		{Name: queueCoreValidation, Durable: true},
+		{Name: queueCoreEvents, Durable: true},
+		// provider.status-poll is the 2.19.0-new provider status queue.
+		{Name: queueProviderStatusPoll, Durable: true},
+		// time-quality monitor queues (carried over from 2.18.0). config + config-request keep
+		// only the latest message (x-max-length 1, drop-head); results is a plain queue. Core
+		// publishes its config snapshot here at startup and consumes config-request/results.
+		{Name: queueTimeQualityConfig, Durable: true, Arguments: latestOnlyQueueArguments()},
+		{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: latestOnlyQueueArguments()},
+		{Name: queueTimeQualityResults, Durable: true},
+	},
+	// Bindings from the renamed ilm direct exchange to each queue (routing key = the app's
+	// publish key). The provider.status-poll binding is new in 2.19.0; the rest carry over from
+	// 2.18.0 retargeted to the ilm exchange.
+	Bindings: []MessagingBinding{
+		{Source: exchangeIlm, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
+		{Source: exchangeIlm, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
+		{Source: exchangeIlm, Destination: queueCoreActions, RoutingKey: routingKeyAction},
+		{Source: exchangeIlm, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
+		{Source: exchangeIlm, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
+		{Source: exchangeIlm, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
+		{Source: exchangeIlm, Destination: queueProviderStatusPoll, RoutingKey: queueProviderStatusPoll},
+		{Source: exchangeIlm, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
+		{Source: exchangeIlm, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
+		{Source: exchangeIlm, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},
 	},
 }
 
@@ -741,6 +999,7 @@ var messagingTopology2180 = MessagingTopology{
 // direct exchange plus the core.* queues 2.17.0 Core uses; there is no czertainly-proxy
 // exchange (that is the 2.18.0 proxy/provisioning path).
 var messagingTopology2170 = MessagingTopology{
+	DefaultVirtualHost: DefaultVirtualHost,
 	Users: []MessagingUser{
 		{Role: MessagingUserCore, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
 	},
@@ -757,12 +1016,12 @@ var messagingTopology2170 = MessagingTopology{
 		{Name: queueCoreEvents, Durable: true},
 	},
 	Bindings: []MessagingBinding{
-		{Source: exchangeCzertainly, Destination: queueCoreAuditLogs, RoutingKey: "audit-logs"},
-		{Source: exchangeCzertainly, Destination: queueCoreNotifications, RoutingKey: "notification"},
-		{Source: exchangeCzertainly, Destination: queueCoreActions, RoutingKey: "action"},
-		{Source: exchangeCzertainly, Destination: queueCoreScheduler, RoutingKey: "scheduler"},
-		{Source: exchangeCzertainly, Destination: queueCoreValidation, RoutingKey: "validation"},
-		{Source: exchangeCzertainly, Destination: queueCoreEvents, RoutingKey: "event"},
+		{Source: exchangeCzertainly, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
+		{Source: exchangeCzertainly, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
+		{Source: exchangeCzertainly, Destination: queueCoreActions, RoutingKey: routingKeyAction},
+		{Source: exchangeCzertainly, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
+		{Source: exchangeCzertainly, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
+		{Source: exchangeCzertainly, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
 	},
 }
 

@@ -8,7 +8,7 @@
 
 ## 1. Problem (validated against `helm-charts` 2.17.0 → 2.18.0)
 
-The operator ships a **single** BOM bundle (`internal/bom/bom.go`) keyed `"2.17.0"` that pins
+The operator ships a **single** BOM bundle (`pkg/bom/bom.go`) keyed `"2.17.0"` that pins
 2.17.0 image tags **but emits the 2.18.0 configuration contract**. Confirmed against the
 published charts (`git diff 2.17.0..2.18.0` in `OmniTrustILM/helm-charts`):
 

@@ -227,6 +227,34 @@ var _ = Describe("Platform deletion safety", func() {
 			}, platformTimeout, platformInterval).Should(BeTrue(),
 				"Retain must not block deletion of the operator's own children (owner-ref GC)")
 		})
+
+		// Defaulting must never leak into the stored object: after the first reconcile
+		// (which adds the finalizer via a full Update), the persisted spec.common.image
+		// must be exactly what the user submitted — empty. This guards against the
+		// registry/repository defaults (applied in-memory before render) being written
+		// back to the stored spec by the finalizer-add Update.
+		It("does not persist the defaulted image registry/repository", func() {
+			const ns = "ilm-finalizer-no-image-defaults"
+			p := lifecyclePlatform(ns, nil) // spec.common.image is left entirely unset
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+
+			key := types.NamespacedName{Name: "ilm", Namespace: ns}
+			By("waiting for the finalizer to be added (the first reconcile's persisting Update)")
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, key, &got)).To(Succeed())
+				g.Expect(controllerutil.ContainsFinalizer(&got, platformFinalizer)).To(BeTrue())
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			By("verifying the persisted spec.common.image is exactly what was submitted: empty")
+			fetched := &otilmv1alpha1.Platform{}
+			Expect(k8sClient.Get(ctx, key, fetched)).To(Succeed())
+			Expect(fetched.Finalizers).NotTo(BeEmpty())
+			Expect(fetched.Spec.Common.Image.Registry).To(BeEmpty(),
+				"the registry default must never be persisted into the stored spec")
+			Expect(fetched.Spec.Common.Image.Repository).To(BeEmpty(),
+				"the repository default must never be persisted into the stored spec")
+		})
 	})
 })
 

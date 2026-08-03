@@ -30,6 +30,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// testRegistry is the shared registry host used across the repository-precedence
+// test cases below.
+const testRegistry = "reg.example.com"
+
 func TestResolveImagePrefersComponentOverShared(t *testing.T) {
 	shared := otilmv1alpha1.ImageSpec{Registry: "shared.io", Repository: "ilm", PullPolicy: "IfNotPresent"}
 	comp := otilmv1alpha1.ImageSpec{Name: "core", Repository: "team", Tag: "9.9.9"}
@@ -126,4 +130,62 @@ func TestBuildDeploymentTerminationGracePeriod(t *testing.T) {
 	}
 
 	assert.Nil(t, BuildDeployment(Component{Name: "x"}).Spec.Template.Spec.TerminationGracePeriodSeconds)
+}
+
+// TestResolveImageRepositoryPrecedence pins the repository chain introduced for
+// ilm-private components: component CR > bundle Repository (when shared is empty or
+// the stock default) > shared CR > bom default — and proves the Connector path (nil
+// lookup) and the lookup-miss path keep their no-default behavior.
+func TestResolveImageRepositoryPrecedence(t *testing.T) {
+	lookup := func(name string) (bom.Image, bool) {
+		switch name {
+		case "monitor":
+			return bom.Image{Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"}, true
+		case "core":
+			return bom.Image{Name: "core", Tag: "2.18.0"}, true
+		}
+		return bom.Image{}, false
+	}
+	reg := otilmv1alpha1.ImageSpec{Registry: testRegistry}
+
+	tests := []struct {
+		name      string
+		component string
+		shared    otilmv1alpha1.ImageSpec
+		comp      otilmv1alpha1.ImageSpec
+		lookup    func(string) (bom.Image, bool)
+		wantRef   string
+	}{
+		{"bundle repository wins when shared unset", "monitor", reg, otilmv1alpha1.ImageSpec{}, lookup,
+			"reg.example.com/ilm-private/time-quality-monitor:1.0.0"},
+		{"bundle repository wins over persisted/typed stock default", "monitor",
+			otilmv1alpha1.ImageSpec{Registry: testRegistry, Repository: "ilm"}, otilmv1alpha1.ImageSpec{}, lookup,
+			"reg.example.com/ilm-private/time-quality-monitor:1.0.0"},
+		{"explicit non-default shared repository beats bundle", "monitor",
+			otilmv1alpha1.ImageSpec{Registry: testRegistry, Repository: "mirror"}, otilmv1alpha1.ImageSpec{}, lookup,
+			"reg.example.com/mirror/time-quality-monitor:1.0.0"},
+		{"per-component repository beats everything", "monitor", reg, otilmv1alpha1.ImageSpec{Repository: "override"}, lookup,
+			"reg.example.com/override/time-quality-monitor:1.0.0"},
+		{"bom default fills bundle component without Repository", "core", reg, otilmv1alpha1.ImageSpec{}, lookup,
+			"reg.example.com/ilm/core:2.18.0"},
+		{"lookup miss keeps bare-name behavior", "absent", otilmv1alpha1.ImageSpec{Name: "x", Tag: "1"}, otilmv1alpha1.ImageSpec{}, lookup,
+			"x:1"},
+		{"nil lookup (Connector) keeps no repository default", "anything",
+			otilmv1alpha1.ImageSpec{Name: "conn", Tag: "1"}, otilmv1alpha1.ImageSpec{}, nil,
+			"conn:1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ref, _ := ResolveImage(tt.lookup, tt.component, tt.shared, tt.comp)
+			assert.Equal(t, tt.wantRef, ref)
+		})
+	}
+}
+
+// TestMergePullSecrets pins the pod-level union: order-preserving, first occurrence
+// wins, empties dropped — shared secrets first, per-component appended.
+func TestMergePullSecrets(t *testing.T) {
+	assert.Equal(t, []string{"a", "b", "c"}, MergePullSecrets([]string{"a", "b"}, []string{"b", "c", ""}))
+	assert.Nil(t, MergePullSecrets(nil, nil))
+	assert.Equal(t, []string{"x"}, MergePullSecrets(nil, []string{"x"}))
 }

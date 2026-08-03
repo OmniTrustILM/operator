@@ -33,18 +33,30 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// ResolveImage composes a component's image reference, applying per-field
-// precedence (per-component value > shared value > version-bundle default) and
-// joining only the non-empty registry/repository/name segments before ":tag".
-// This serves a full Platform image (registry/repository/name:tag) and a
-// Connector-style image (repository:tag, no registry/name) alike.
+// ResolveImage composes a component's image reference and joins only the non-empty
+// registry/repository/name segments before ":tag". It serves a full Platform image
+// (registry/repository/name:tag) and a Connector-style image (repository:tag, no
+// registry/name) alike.
+//
+// Precedence is per-field, and the REPOSITORY is the one field that does not follow the
+// plain component>shared>bundle chain:
+//
+//   - registry / name / tag / digest: per-component value > shared value > version-bundle
+//     default (name/tag only; see below);
+//   - repository (see resolveRepository): per-component value > the bundle's per-component
+//     Repository whenever the shared value is empty OR is the stock default > shared value >
+//     the stock default. The bundle beating a stock-default shared value is what lets a
+//     component published to a different repository (e.g. "ilm-private") resolve correctly
+//     even on CRs that carry the stock "ilm" — typed, or persisted by the old eager
+//     defaulting. All of it applies to BUNDLE-BACKED lookups only: a nil lookup or a lookup
+//     MISS gets no repository default at all, preserving the Connector's bare-name behavior.
 //
 // bundleLookup resolves a component name to the selected version bundle's image
-// coordinates (name/tag). The PLATFORM passes the bundle selected by spec.version
-// (bundle.Lookup), so the bundle default tracks the chosen platform version; the
-// version-agnostic CONNECTOR passes nil (it has no bundle), which — like an empty
-// component name — skips the bundle fallback. common stays version-agnostic: it knows
-// only "given a lookup, fill a missing name/tag", never which versions exist.
+// coordinates (name, tag, and optional Repository). The PLATFORM passes the bundle selected
+// by spec.version (bundle.Lookup), so the bundle default tracks the chosen platform version;
+// the version-agnostic CONNECTOR passes nil (it has no bundle), which — like an empty
+// component name — skips the bundle fallback. common stays version-agnostic: it knows only
+// "given a lookup, fill a missing name/tag/repository", never which versions exist.
 //
 // A digest takes precedence over a tag (per-component digest > shared digest): when
 // present the reference is pinned as registry/repository/name@digest and the tag is
@@ -52,11 +64,25 @@ import (
 // the version bundle (the bundle carries tags only); it is purely a user override.
 func ResolveImage(bundleLookup func(string) (bom.Image, bool), component string, shared, comp otilmv1alpha1.ImageSpec) (string, corev1.PullPolicy) {
 	registry := pickImageField(comp.Registry, shared.Registry)
-	repository := pickImageField(comp.Repository, shared.Repository)
 	name := pickImageField(comp.Name, shared.Name)
 	tag := pickImageField(comp.Tag, shared.Tag)
 	digest := pickImageField(comp.Digest, shared.Digest)
-	name, tag = fillFromBundle(bundleLookup, component, name, tag, digest)
+
+	var bimg bom.Image
+	var bundleBacked bool
+	if bundleLookup != nil {
+		bimg, bundleBacked = bundleLookup(component)
+	}
+	if bundleBacked {
+		if name == "" {
+			name = bimg.Name
+		}
+		if tag == "" && digest == "" {
+			tag = bimg.Tag
+		}
+	}
+	repository := resolveRepository(comp.Repository, shared.Repository, bimg.Repository, bundleBacked)
+
 	ref := joinImageRef(registry, repository, name, tag, digest)
 	policy := corev1.PullPolicy(pickImageField(comp.PullPolicy, shared.PullPolicy))
 	if policy == "" {
@@ -74,24 +100,27 @@ func pickImageField(a, b string) string {
 	return b
 }
 
-// fillFromBundle defaults a missing name/tag from the selected version bundle. The bundle
-// carries no digest, so when a digest pins the image the tag is irrelevant and is left
-// untouched. A nil bundleLookup (Connector) or empty component skips the fallback.
-func fillFromBundle(bundleLookup func(string) (bom.Image, bool), component, name, tag, digest string) (string, string) {
-	if bundleLookup == nil || (name != "" && (tag != "" || digest != "")) {
-		return name, tag
+// resolveRepository picks the image repository lazily (never mutating the CR):
+// per-component CR value first; then the bundle's per-component Repository — which
+// also beats a shared value equal to the STOCK default, so CRs that had "ilm"
+// persisted by the old eager defaulting (or typed it) still resolve ilm-private
+// components correctly; then the shared CR value; then the stock default for
+// bundle-backed components. Non-bundle paths (Connector, lookup miss) get no default,
+// preserving their bare-name behavior.
+func resolveRepository(comp, shared, bundle string, bundleBacked bool) string {
+	if comp != "" {
+		return comp
 	}
-	b, ok := bundleLookup(component)
-	if !ok {
-		return name, tag
+	if bundleBacked && bundle != "" && (shared == "" || shared == bom.DefaultImageRepository) {
+		return bundle
 	}
-	if name == "" {
-		name = b.Name
+	if shared != "" {
+		return shared
 	}
-	if tag == "" {
-		tag = b.Tag
+	if bundleBacked {
+		return bom.DefaultImageRepository
 	}
-	return name, tag
+	return ""
 }
 
 // joinImageRef joins the non-empty registry/repository/name segments with "/" and pins the
@@ -114,6 +143,29 @@ func joinImageRef(registry, repository, name, tag, digest string) string {
 		ref += ":" + tag
 	}
 	return ref
+}
+
+// MergePullSecrets unions image pull-secret name lists pod-level: order-preserving,
+// first occurrence wins, empty names dropped. Callers pass the shared list first so
+// per-component (and, later, sidecar) additions append rather than reorder. Returns
+// nil for an empty union so rendered pods stay byte-identical when no secrets are
+// configured.
+func MergePullSecrets(lists ...[]string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, l := range lists {
+		for _, s := range l {
+			if s == "" {
+				continue
+			}
+			if _, dup := seen[s]; dup {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // EnvPair is a non-sensitive inline env var; sensitive values are projected via SecretEnv (secretKeyRef) or EnvFrom (envFrom), never inlined here.

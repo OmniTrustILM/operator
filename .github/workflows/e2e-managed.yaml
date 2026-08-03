@@ -15,18 +15,30 @@ on:
   pull_request:
     branches: [ main ]
     paths:
-      - 'internal/builder/platform/managed_*.go'
-      - 'internal/controller/platform/gate_*.go'
-      - 'internal/bom/bom.go'
+      - 'pkg/bom/**'
+      - 'pkg/capabilities/**'
+      - 'api/v1alpha1/platform_types.go'
+      - 'api/v1alpha1/common_types.go'
+      - 'internal/builder/common/**'
+      - 'internal/builder/platform/**'
+      - 'internal/controller/platform/**'
       - 'test/e2e/**'
+      - 'test/utils/**'
+      - 'Makefile'
       - '.github/workflows/e2e-managed.yaml'
   push:
     branches: [ main ]
     paths:
-      - 'internal/builder/platform/managed_*.go'
-      - 'internal/controller/platform/gate_*.go'
-      - 'internal/bom/bom.go'
+      - 'pkg/bom/**'
+      - 'pkg/capabilities/**'
+      - 'api/v1alpha1/platform_types.go'
+      - 'api/v1alpha1/common_types.go'
+      - 'internal/builder/common/**'
+      - 'internal/builder/platform/**'
+      - 'internal/controller/platform/**'
       - 'test/e2e/**'
+      - 'test/utils/**'
+      - 'Makefile'
       - '.github/workflows/e2e-managed.yaml'
 
 concurrency:
@@ -43,8 +55,12 @@ jobs:
     # Each managed block runs in its OWN job on its OWN fresh Kind cluster (matrix below), so the
     # blocks no longer share a cluster: no install/uninstall collisions, and they run in PARALLEL
     # (wall-clock ≈ the slowest block, not the sum). fail-fast: false so one block's failure still
-    # lets the others report. The per-job ceiling stays generous for a cold image cache.
-    timeout-minutes: 90
+    # lets the others report.
+    # timeout-minutes must sit ABOVE the go-test ceiling the step's `make test-e2e-managed` sets
+    # (-timeout 90m, with --ginkgo.timeout=85m under it) PLUS this job's Kind cluster creation,
+    # operator image build, kind-load and deploy (~10-15m on a cold cache) — otherwise the job is
+    # killed before Ginkgo/go-test can report which spec hung. 110m keeps that ordering.
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:

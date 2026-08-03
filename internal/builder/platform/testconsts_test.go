@@ -89,14 +89,19 @@ const (
 	testGlobalSidecar        = "global-sidecar"
 
 	// resolve_test.go.
-	testNamespace         = "ilm-system"
-	testDBCreds           = "db-creds"
-	testMQCreds           = "mq-creds"
-	testRegistry          = "registry.example.com"
-	testProvSecret        = "prov-secret"
-	testAdminCert         = "my-admin-cert"
-	testTLSCrt            = "tls.crt"
-	testWaitForAuth       = "wait-for-auth"
+	testNamespace        = "ilm-system"
+	testDBCreds          = "db-creds"
+	testMQCreds          = "mq-creds"
+	testRegistry         = "registry.example.com"
+	testMQHost           = "mq.example.com"
+	testProvSecret       = "prov-secret"
+	testAdminCert        = "my-admin-cert"
+	testTLSCrt           = "tls.crt"
+	testWaitForAuth      = "wait-for-auth"
+	testWaitForMessaging = "wait-for-messaging-service"
+	// testMQWaitLoop is the broker-reachability poll the wait loops must render: the
+	// coordinates come from QUOTED env expansions, never from interpolated script text.
+	testMQWaitLoop        = `while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done`
 	testCurlImage         = "hub.omnitrustregistry.com/ilm/curl:8.16.0"
 	testProvInstanceQueue = "provision-instance-queue"
 	testTrustedCerts      = "trusted-certificates"
@@ -112,4 +117,11 @@ const (
 
 	// version_test.go.
 	testVersion218 = "2.18.0"
+	testVersion219 = "2.19.0"
+
+	// resolve_test.go — the per-bundle proxy exchange names (2.19.0 renamed them).
+	testExchangeCzertainlyProxy = "czertainly-proxy"
+	testExchangeIlmProxy        = "ilm-proxy"
+	testCustomProxyExchange     = "custom-proxy"
+	testQueueArgExpires         = "x-expires"
 )

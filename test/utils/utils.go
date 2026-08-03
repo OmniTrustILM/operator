@@ -283,17 +283,8 @@ func DeleteNamespace(name string) {
 func WaitForWorkloadsDrained(ns string, keepPrefixes ...string) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; ns is a hardcoded test constant
-			"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+		remaining, err := RemainingWorkloadPods(ns, keepPrefixes...)
 		if err == nil {
-			var remaining []string
-			for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
-				name = strings.TrimSpace(name)
-				if name == "" || hasAnyPrefix(name, keepPrefixes) {
-					continue
-				}
-				remaining = append(remaining, name)
-			}
 			if len(remaining) == 0 {
 				return
 			}
@@ -306,6 +297,29 @@ func WaitForWorkloadsDrained(ns string, keepPrefixes ...string) {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// RemainingWorkloadPods returns the names of the pods in ns whose name does not start with one
+// of keepPrefixes — the pods still holding node resources. It is the single listing both drain
+// paths share: WaitForWorkloadsDrained polls it best-effort (warning on timeout), while a spec
+// that must NOT bring up its own stack until the node is free polls it inside an Eventually so
+// the drain becomes a HARD barrier. The error is returned rather than swallowed so a caller can
+// tell an unreadable API apart from a genuinely drained namespace.
+func RemainingWorkloadPods(ns string, keepPrefixes ...string) ([]string, error) {
+	out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; ns is a hardcoded test constant
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+	if err != nil {
+		return nil, err
+	}
+	var remaining []string
+	for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" || hasAnyPrefix(name, keepPrefixes) {
+			continue
+		}
+		remaining = append(remaining, name)
+	}
+	return remaining, nil
 }
 
 // hasAnyPrefix reports whether s starts with any of the given prefixes.

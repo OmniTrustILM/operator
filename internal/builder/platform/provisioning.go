@@ -133,7 +133,7 @@ func ResolveProvisioning(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: provisioningName, Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, d.Image.PullSecrets),
 		Replicas: 1, Port: provisioningPort, ServiceType: corev1.ServiceTypeClusterIP,
 		Command: imageCommand(p.Spec.Common.Image, d.Image),
 		Args:    imageArgs(p.Spec.Common.Image, d.Image),

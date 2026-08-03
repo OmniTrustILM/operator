@@ -135,16 +135,18 @@ internal/
     connector/         - Connector-specific builders (Deployment, Service, SA, PDB, ServiceMonitor)
     platform/          - Platform-specific builders (component resolution, edge, managed-infra CRs)
     proxy/             - Proxy-specific builders (token-only Deployment, Service with http+api ports, SA, PDB, ServiceMonitor at /metrics)
-  bom/                 - Versioned bill-of-materials: per-component image coordinates + the wiring profile (env-var names, connection-string template, Secret-key names) + managed topology, as data
   checksum/            - Configuration checksum utility for drift detection
   controller/
     connector/         - Connector reconciler (+ watches)
     platform/          - Platform reconciler (capability gates, prune, OIDC wiring, lifecycle, the managed-infra upgrade guard)
     proxy/             - Proxy reconciler — pure consumer of the provisioning-issued config token; no platform calls
   monitoring/          - Prometheus metrics registration + event recorder helpers
-  platform/            - capabilities/ holds the generic RESTMapper-based upstream-CRD detector (reused by the Platform controller's managed-infra gates)
   registration/        - ILM platform registration client (connector → platform) + OIDC wiring
   version/             - Build version info (injected via ldflags)
+pkg/                   - Importable packages (the operator's public surface, also consumed by the CLI)
+  bom/                 - Versioned bill-of-materials: per-component image coordinates + the wiring profile (env-var names, connection-string template, Secret-key names) + managed topology, as data
+  capabilities/        - Generic RESTMapper-based upstream-CRD detector (reused by the Platform controller's managed-infra gates)
+  convert/             - Helm-values → Platform CR conversion used by cmd/values2platform
 config/
   crd/bases/           - Generated CRD YAML (connectors + platforms + proxies)
   rbac/                - Generated RBAC roles
@@ -180,8 +182,18 @@ The operator manages the **ILM platform itself** via the `Platform` CRD, alongsi
 - **SCC-clean pods (OpenShift `restricted-v2`).** `runAsNonRoot: true`, **no hard-coded `runAsUser`**, drop **all** capabilities, `seccompProfile: RuntimeDefault`, no privilege escalation.
 - **Deletion safety.** Add the finalizer first; `spec.deletionPolicy` (default `Retain`) must leave managed (upstream-operator) infrastructure and its data intact. Clean cluster-scoped artifacts (webhook config, ClusterRoles) via finalizer/labels — not owner-reference GC (cross-namespace ownerRefs are invalid).
 - **Stateful infra is delegated** to upstream operators (CloudNativePG; RabbitMQ Cluster + Messaging Topology; Keycloak) when `managed`, or referenced when `external` — never re-templated in Go, never via the Helm SDK.
-- **Upstream-operator dependencies are detected (RESTMapper) and gated, never assumed.** A required upstream CRD that is not served means skip the dependent objects, surface a non-fatal `False` condition with an actionable reason, and requeue to self-heal — not a cryptic apply failure or a whole-Platform `Degraded`. cert-manager is external/prerequisite (cluster-singleton, never installed by the operator) and required only for cert-managed edge modes (`tls.source` `internal`/`letsEncrypt`); Gateway API CRDs only for `type=gatewayAPI`; BYO `tls.source=secret` needs neither. The detector (`internal/platform/capabilities`) is generic and reused for the managed-infra (CNPG/RabbitMQ/Keycloak) checks.
+- **Upstream-operator dependencies are detected (RESTMapper) and gated, never assumed.** A required upstream CRD that is not served means skip the dependent objects, surface a non-fatal `False` condition with an actionable reason, and requeue to self-heal — not a cryptic apply failure or a whole-Platform `Degraded`. cert-manager is external/prerequisite (cluster-singleton, never installed by the operator) and required only for cert-managed edge modes (`tls.source` `internal`/`letsEncrypt`); Gateway API CRDs only for `type=gatewayAPI`; BYO `tls.source=secret` needs neither. The detector (`pkg/capabilities`) is generic and reused for the managed-infra (CNPG/RabbitMQ/Keycloak) checks.
 - **Admission validation.** The CRD's CEL `XValidation` rules are the create-time guard today (e.g. an external DB missing host/credentials, an enabled edge missing host, `provisioning.mode=deploy` on a non-rabbitmq broker); the per-namespace `Platform` singleton is a runtime guard (`AnotherPlatformExists`). A validating webhook that also rejects inline secrets and enforces the singleton at create-time (self-managed serving cert, `failurePolicy: Fail`) is future work — keep CR-level invariants enforced by CEL until then.
+
+### Released vs preview version bundles
+
+Each platform version is a bundle in `pkg/bom/bom.go` carrying a `Released` flag. A **preview** bundle (`Released: false`) is one whose platform artifacts are not published yet: it exists so the version contract can land, be reviewed and be rendered ahead of release day, and it is deliberately hard to reach.
+
+- It resolves **only** via an explicit `spec.version`; `SupportedVersions()` excludes it, so it never appears in advertised or defaulted output.
+- `DefaultVersion` must name a **released** bundle (`TestDefaultVersionIsReleased` enforces this) — an empty `spec.version` can never land on a preview.
+- A **live** platform cannot be upgraded onto a preview: the controller's guard goes `Degraded` with reason `PreviewVersionUpgradeBlocked`, keeps the running version, and does not re-render. A *fresh* platform pinned to a preview is fine.
+
+Release day is a data-only flip: set `Released: true` on the bundle and move `DefaultVersion` to it. Treat a preview bundle as opt-in, maintainer-facing surface — samples that use one must say so.
 
 ## Quality Requirements
 
@@ -190,7 +202,7 @@ The operator manages the **ILM platform itself** via the `Platform` CRD, alongsi
   - `internal/checksum/` — target 95%+ (pure functions)
   - `internal/controller/` — target 80%+ (envtest-based)
   - `internal/registration/` — target 90%+ (mocked HTTP)
-  - `internal/platform/capabilities` — target 90%+ (RESTMapper-based, not HTTP)
+  - `pkg/capabilities` — target 90%+ (RESTMapper-based, not HTTP)
 - **Code duplication:** less than 3% (enforced by SonarCloud/SonarQube)
 - **Linting:** zero warnings from `make lint`
 - **SonarQube:** Quality Gate must pass (0 issues target)
@@ -206,7 +218,7 @@ The operator is structured so a new Kind follows the same shape as `Connector`, 
 2. **Builders** — put pure, unit-tested builder functions under `internal/builder/<kind>/`, composing the CRD-agnostic primitives in `internal/builder/common/` (the Component render model, `ResolveImage`, the Deployment/StatefulSet/Service/SA/PDB/HPA/ServiceMonitor builders, SCC-clean pod security). Builders take a spec and return a K8s object — no client calls.
 3. **Controller** — add `internal/controller/<kind>/` with a thin reconciler: `For(<Kind>)`, `Owns(...)` the children, `Watches(Secret/ConfigMap)` for config-drift. Delegate all rendering to the builders; use `meta.SetStatusCondition` (with `observedGeneration`) for status.
 4. **Apply strategy** — prefer **Server-Side Apply** (stable field manager `ilm-operator`, `ForceOwnership`) for a render-then-apply, multi-child or co-owned model; `controllerutil.CreateOrUpdate` is fine for a simple single-owner case.
-5. **Capabilities** — gate any dependency on an upstream CRD through the generic detector in `internal/platform/capabilities` (skip + non-fatal condition + requeue, never assume-and-fail).
+5. **Capabilities** — gate any dependency on an upstream CRD through the generic detector in `pkg/capabilities` (skip + non-fatal condition + requeue, never assume-and-fail).
 6. **Wire it up** — register the scheme and the reconciler in `cmd/main.go`; add RBAC markers; add samples under `config/samples/`.
 7. **Tests** — table-driven builder unit tests (target 90%+) and an envtest controller suite (reconcile, drift, watch, finalizer, conditions). `make test` is the loop; the Kind e2e is the gate.
 

@@ -670,8 +670,10 @@ spec:
 	platformFullManagedSpecs()
 
 	// VERSION-MATRIX specs (defined in platform_test.go): a managed Platform pinned to 2.17.0
-	// reaches Available, UPGRADES in place to 2.18.0, then a downgrade is refused — proving the
-	// multi-version / upgrade story end-to-end. Labelled "matrix" so it can also run standalone
+	// reaches Available, UPGRADES in place to 2.18.0, then a downgrade is refused, then an upgrade
+	// onto the unreleased 2.19.0 preview bundle is refused, and finally a FRESH 2.19.0 platform
+	// comes up on the 2.19.0 contract — proving the multi-version / upgrade / preview story
+	// end-to-end. Labelled "matrix" so it can also run standalone
 	// (`--ginkgo.label-filter=matrix`); it installs its own upstream operators and, like the FULL
 	// block, runs in the namespace-scoped Keycloak Operator's namespace, draining the node first.
 	platformVersionMatrixSpecs()

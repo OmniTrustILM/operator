@@ -24,6 +24,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -51,6 +52,10 @@ type DatabaseSpec struct {
 	Mode string `json:"mode,omitempty"`
 	// Host is the database server hostname (external mode). Ignored when mode=managed
 	// (the operator resolves the host from the generated CloudNativePG Service).
+	// It is constrained to the hostname/IP charset (letters, digits, dot, underscore and
+	// hyphen, plus colon and square brackets for IPv6 literals, up to 253 characters) —
+	// defence in depth for the generated wiring the operator renders it into.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._:\[\]-]{1,253}$`
 	Host string `json:"host,omitempty"`
 	// Port is the database server port.
 	// +kubebuilder:default=5432
@@ -196,15 +201,22 @@ type MessagingSpec struct {
 	BrokerType string `json:"brokerType,omitempty"`
 	// Host is the message broker hostname (external mode). Ignored when mode=managed
 	// (the operator resolves the host from the generated RabbitMQ Service).
+	// It is constrained to the hostname/IP charset (letters, digits, dot, underscore and
+	// hyphen, plus colon and square brackets for IPv6 literals, up to 253 characters) —
+	// defence in depth for the broker-reachability wait loops the operator renders on Core
+	// and scheduler, which receive it as an environment value.
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._:\[\]-]{1,253}$`
 	Host string `json:"host,omitempty"`
 	// Port is the message broker port.
 	// +kubebuilder:default=5672
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
-	// VirtualHost is the broker virtual host or namespace. For a managed broker it is the
-	// vhost the operator provisions on the RabbitmqCluster (defaults to "czertainly" when
-	// empty).
+	// VirtualHost is the broker vhost. In MANAGED mode an empty value selects the platform
+	// version's default vhost, which the operator then provisions and connects to (2.18.0:
+	// "czertainly"; 2.19.0+: "/"). In EXTERNAL mode the value is passed through verbatim and
+	// no version default is applied — an empty value stays empty, so set it explicitly to the
+	// vhost your broker serves.
 	VirtualHost string `json:"virtualHost,omitempty"`
 	// Credentials references the Secret holding the broker username/password and lets the
 	// user map the in-Secret keys (usernameKey/passwordKey, defaulting to username/password).
@@ -304,7 +316,11 @@ type KeycloakSpec struct {
 	Mode string `json:"mode,omitempty"`
 	// Realm is the realm name the platform uses (defaults to "ilm"). For a managed Keycloak
 	// it names the realm the platform's clients live in; the optional realm import seeds it.
+	// It is constrained to the safe realm-name charset (letters, digits, dot, underscore and
+	// hyphen, up to 255 characters) because the operator renders it into the OIDC provider URLs
+	// of the in-pod registration request Core issues at startup.
 	// +kubebuilder:default=ilm
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]{1,255}$`
 	Realm string `json:"realm,omitempty"`
 	// Managed configures the operator-provisioned Keycloak instance (Keycloak Operator).
 	// Required when mode=managed; ignored otherwise.
@@ -519,14 +535,69 @@ type ProvisioningDeploySpec struct {
 	// mode: spec.messaging.credentials). Consumed by reference only.
 	// +optional
 	ProxyCredentials *CredentialsRef `json:"proxyCredentials,omitempty"`
-	// Exchange is the proxy exchange the service bootstraps and binds per-proxy queues to.
-	// When empty it defaults to the platform version bundle's value ("czertainly-proxy").
+	// Exchange overrides the proxy exchange name; when empty, the selected platform
+	// version's default applies (2.18.0: czertainly-proxy; 2.19.0+: ilm-proxy).
+	// It is constrained to the safe RabbitMQ exchange-name charset (letters, digits, dot,
+	// underscore, colon and hyphen, up to 255 characters) because the operator renders it into
+	// the queue-registration request Core issues at startup.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._:-]{1,255}$`
 	Exchange string `json:"exchange,omitempty"`
+	// RoutingKey overrides the binding routing key of the per-instance queue Core registers
+	// at startup; when empty the operator's default "proxymessage.*.${HOSTNAME}" applies.
+	// The literal ${HOSTNAME} token is substituted with the POD NAME at runtime (the init
+	// container resolves it from `hostname`), so each replica binds its own queue.
+	//
+	// The charset is the AMQP binding-key charset — letters, digits, dot, underscore,
+	// hyphen, colon and the topic wildcards * and # — plus exactly the three characters the
+	// ${HOSTNAME} token needs ($, { and }). Allowing those three in the Pattern is simpler
+	// and stricter than a CEL rule that special-cases the token, and it stays safe because
+	// the value is JSON-encoded into a QUOTED heredoc the shell never expands (shell
+	// metacharacters, quotes and whitespace remain rejected outright).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._:*#${}-]{1,255}$`
+	RoutingKey string `json:"routingKey,omitempty"`
+	// QueueArguments are the queue arguments forwarded verbatim to the provisioning API in
+	// the per-instance queue-registration request. The operator does not interpret them; the
+	// set of valid arguments is defined by the provisioning service implementation in use.
+	//
+	// When empty the operator's default (x-expires: 1800000) applies. Setting this REPLACES
+	// the default outright rather than merging with it: a service ignores arguments it does
+	// not recognise and falls back to its own defaults, so a deployment running a different
+	// provisioning service should state its own full set here. The arguments are sent only
+	// when the queue is created and are not reconciled afterwards.
+	//
+	// The list is KEYED BY NAME (a list-map), so the apiserver rejects a repeated argument
+	// name outright — a duplicate is a configuration mistake whose outcome would otherwise be
+	// a silent last-one-wins. A CEL uniqueness rule would express the same thing, but its
+	// O(n²) comparison blows the CRD's rule-cost budget; the keyed list costs nothing and
+	// additionally gives server-side apply a per-argument merge key.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	// +listType=map
+	// +listMapKey=name
+	QueueArguments []QueueArgument `json:"queueArguments,omitempty"`
 	// ResponseQueue is the response queue name the service bootstraps for proxy replies.
 	// When empty it defaults to the platform version bundle's value ("core").
 	// +optional
 	ResponseQueue string `json:"responseQueue,omitempty"`
+}
+
+// QueueArgument is a name/value queue argument of the per-instance queue-registration
+// request the operator renders into Core's provision-instance-queue init container. The
+// value is arbitrary JSON (numbers, strings, booleans, objects) because the provisioning
+// service — not the operator — defines what each argument means.
+type QueueArgument struct {
+	// Name is the argument name (for example "x-expires"). It is constrained to the
+	// conventional AMQP argument charset because the operator renders it into the
+	// queue-registration request Core issues at startup, and it is the list's merge key,
+	// so it must be unique across queueArguments.
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9._-]{1,255}$`
+	Name string `json:"name"`
+
+	// Value is the arbitrary JSON value of the argument, forwarded verbatim.
+	Value apiextensionsv1.JSON `json:"value"`
 }
 
 // CoreSpec configures the ILM Core component. It embeds the shared ComponentSpec
@@ -921,7 +992,11 @@ type EdgeSpec struct {
 	// selects its class via gatewayAPI.gatewayClassName instead.
 	ClassName *string `json:"className,omitempty"`
 	// Host is the external hostname the edge serves and the TLS host. When empty it
-	// falls back to the canonical spec.common.hostName.
+	// falls back to the canonical spec.common.hostName. It is constrained to the hostname
+	// charset (letters, digits, dot, underscore and hyphen, up to 253 characters), optionally
+	// with a leading "*." wildcard label as Ingress rules and Gateway API listeners accept —
+	// defence in depth for the browser-facing URLs the operator derives from it.
+	// +kubebuilder:validation:Pattern=`^(\*\.)?[a-zA-Z0-9._-]{1,253}$`
 	Host string `json:"host,omitempty"`
 	// Annotations are extra annotations merged onto the Ingress (e.g. the nginx
 	// auth-tls and backend-protocol settings). They apply to the Ingress edge only.
@@ -1197,7 +1272,13 @@ type CommonSpec struct {
 	//
 	// NOTE: the fe-administrator runtime URLs are intentionally host-RELATIVE paths
 	// (/api, /login, /logout) served from the same origin, so they do not embed hostName.
+	//
+	// It is constrained to the hostname charset (letters, digits, dot, underscore and hyphen,
+	// up to 253 characters), optionally with a leading "*." wildcard label as Ingress rules and
+	// Gateway API listeners accept — defence in depth for the browser-facing URLs the operator
+	// derives from it, including the in-pod OIDC registration request.
 	// +optional
+	// +kubebuilder:validation:Pattern=`^(\*\.)?[a-zA-Z0-9._-]{1,253}$`
 	HostName string `json:"hostName,omitempty"`
 	// Proxy configures outbound HTTP(S) proxy support for all components.
 	// +optional

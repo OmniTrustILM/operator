@@ -89,7 +89,7 @@ func ResolveGateway(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: gatewayName, Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Gateway.Image.PullSecrets),
 		Replicas: 1, ServiceType: corev1.ServiceTypeClusterIP,
 		Command: imageCommand(p.Spec.Common.Image, p.Spec.Gateway.Image),
 		Args:    imageArgs(p.Spec.Common.Image, p.Spec.Gateway.Image),

@@ -23,6 +23,8 @@ SOFTWARE.
 package platform
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -32,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -67,7 +70,7 @@ func basePlatform() *otilmv1alpha1.Platform {
 				Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testDBCreds},
 			},
 			Messaging: otilmv1alpha1.MessagingSpec{
-				Mode: "external", BrokerType: "rabbitmq", Host: "mq.example.com", Port: 5672,
+				Mode: "external", BrokerType: "rabbitmq", Host: testMQHost, Port: 5672,
 				VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testMQCreds},
 			},
 		},
@@ -237,22 +240,25 @@ func TestResolveCoreImageComponentOverride(t *testing.T) {
 
 func TestDefaultImageRegistryUnsetResolvesToPublicRegistry(t *testing.T) {
 	// An out-of-the-box CR with NO spec.image set at all: after DefaultImageRegistry,
-	// the shared registry/repository default to the public ILM coordinates, so Core
-	// resolves to the full hub.omnitrustregistry.com/ilm/core:<tag> reference (name +
-	// tag from the bundle) — not the bare "core:<tag>" Docker would treat as docker.io.
+	// only the shared registry is defaulted onto the CR (the repository resolves
+	// lazily in ResolveImage and is never persisted), so Core resolves to the full
+	// hub.omnitrustregistry.com/ilm/core:<tag> reference (name + tag from the bundle)
+	// — not the bare "core:<tag>" Docker would treat as docker.io.
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
 			Database:  otilmv1alpha1.DatabaseSpec{Host: "pg", Port: 5432, Name: "ilmdb"},
 			Messaging: otilmv1alpha1.MessagingSpec{Host: "rabbit", VirtualHost: "ilm"},
 		},
 	}
-	// Before defaulting, the bare name resolves with no registry/repository segment.
-	assert.Equal(t, "core:"+bom.DefaultVersion, ResolveCore(p).Image,
-		"sanity: an undefaulted unset image resolves to the bare name:tag")
+	// Before defaulting, the repository already resolves lazily from the bundle/bom
+	// default — only the registry segment is missing.
+	assert.Equal(t, "ilm/core:"+bom.DefaultVersion, ResolveCore(p).Image,
+		"sanity: an undefaulted image resolves repository lazily, registry absent")
 
 	DefaultImageRegistry(p)
 	assert.Equal(t, bom.DefaultImageRegistry, p.Spec.Common.Image.Registry)
-	assert.Equal(t, bom.DefaultImageRepository, p.Spec.Common.Image.Repository)
+	assert.Equal(t, "", p.Spec.Common.Image.Repository,
+		"DefaultImageRegistry no longer touches the repository (defaults are lazy, never persisted)")
 	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:"+bom.DefaultVersion, ResolveCore(p).Image,
 		"unset spec.image must resolve Core to the public registry after defaulting")
 }
@@ -272,15 +278,18 @@ func TestDefaultImageRegistryUserOverrideWins(t *testing.T) {
 	assert.Equal(t, "registry.example.com/myteam/core:"+bom.DefaultVersion, ResolveCore(p).Image)
 }
 
-func TestDefaultImageRegistryPartialOverrideFillsOnlyEmpty(t *testing.T) {
-	// A user who sets only the registry keeps it and gets the default repository (and
-	// vice-versa) — DefaultImageRegistry fills only the empty field.
+func TestDefaultImageRegistryFillsOnlyRegistry(t *testing.T) {
+	// DefaultImageRegistry only ever fills the registry — the repository defaults
+	// lazily in ResolveImage and the CR field stays untouched.
 	p := &otilmv1alpha1.Platform{Spec: otilmv1alpha1.PlatformSpec{
-		Common: otilmv1alpha1.CommonSpec{Image: otilmv1alpha1.ImageSpec{Registry: testRegistry}},
+		Common:    otilmv1alpha1.CommonSpec{Image: otilmv1alpha1.ImageSpec{Registry: testRegistry}},
+		Database:  otilmv1alpha1.DatabaseSpec{Host: "pg", Port: 5432, Name: "ilmdb"},
+		Messaging: otilmv1alpha1.MessagingSpec{Host: "rabbit", VirtualHost: "ilm"},
 	}}
 	DefaultImageRegistry(p)
 	assert.Equal(t, testRegistry, p.Spec.Common.Image.Registry)
-	assert.Equal(t, bom.DefaultImageRepository, p.Spec.Common.Image.Repository, "empty repository filled from the default")
+	assert.Equal(t, "", p.Spec.Common.Image.Repository, "repository stays unset on the CR")
+	assert.Contains(t, ResolveCore(p).Image, "/ilm/", "resolved reference still gets the default repository")
 }
 
 func TestResolveCoreEnvOverrideShadowsProfile(t *testing.T) {
@@ -619,11 +628,134 @@ func TestResolveCoreWaitForAuthInitContainer(t *testing.T) {
 	assert.Equal(t, testCurlImage, init.Image)
 	require.Len(t, init.Command, 3)
 	script := init.Command[2]
-	// Waits on each dependency by its clean Service name / broker coordinates.
+	// The three operator-owned dependencies are waited on by their clean Service names
+	// (compile-time constants, safe to interpolate).
 	assert.Contains(t, script, "nc -z auth 8080")
 	assert.Contains(t, script, "nc -z auth-opa-policies 8080")
-	assert.Contains(t, script, "nc -z mq.example.com 5672")
 	assert.Contains(t, script, "nc -z scheduler 8080")
+	// The broker loop reads the CR-supplied coordinates from QUOTED env vars instead.
+	assert.Contains(t, script, testMQWaitLoop)
+	host, ok := initEnvValue(init, mqWaitHostEnv)
+	require.True(t, ok, "the broker host must be passed as an env value")
+	assert.Equal(t, testMQHost, host)
+	port, ok := initEnvValue(init, mqWaitPortEnv)
+	require.True(t, ok, "the broker port must be passed as an env value")
+	assert.Equal(t, "5672", port)
+}
+
+// hostileHosts is the shared hostile-value table for the broker wait loops: shell
+// metacharacters that, in the earlier shape (the host interpolated UNQUOTED into `nc -z %s`),
+// would have run a command in the waiting container on every poll iteration.
+func hostileHosts() []struct {
+	name string
+	host string
+} {
+	return []struct {
+		name string
+		host string
+	}{
+		{name: "command substitution", host: "$(id)"},
+		{name: "backtick command substitution", host: "`id`"},
+		{name: "embedded double quote", host: `a"b`},
+		{name: "embedded single quote", host: `a'b`},
+		{name: "embedded newline", host: "a\nb"},
+		{name: "variable reference", host: "a$VAR"},
+		{name: "command separator", host: "a;b"},
+		{name: "pipeline", host: "a|b"},
+		{name: "the original report's payload", host: "x; touch /tmp/pwned"},
+	}
+}
+
+// TestWaitLoopsNeverInterpolateTheBrokerHost is the structural regression guard for the
+// broker-reachability wait loops on BOTH Core (wait-for-auth) and scheduler
+// (wait-for-messaging-service).
+//
+// The property under test: an external broker's spec.messaging.host NEVER appears in the
+// generated script text at all. It reaches the container only as a Kubernetes env VALUE (which
+// kubelet sets verbatim — no shell involved) and is read back as a QUOTED parameter expansion,
+// which the shell never re-parses as syntax. So no host value, however hostile, can reach a
+// shell command position.
+func TestWaitLoopsNeverInterpolateTheBrokerHost(t *testing.T) {
+	waiters := []struct {
+		name      string
+		container func(*otilmv1alpha1.Platform) (corev1.Container, bool)
+	}{
+		{
+			name: testWaitForAuth,
+			container: func(p *otilmv1alpha1.Platform) (corev1.Container, bool) {
+				return containerByName(ResolveCore(p).InitContainers, testWaitForAuth)
+			},
+		},
+		{
+			name: testWaitForMessaging,
+			container: func(p *otilmv1alpha1.Platform) (corev1.Container, bool) {
+				return containerByName(ResolveScheduler(p).InitContainers, testWaitForMessaging)
+			},
+		},
+	}
+	for _, w := range waiters {
+		for _, tc := range hostileHosts() {
+			t.Run(w.name+"/"+tc.name, func(t *testing.T) {
+				p := basePlatform()
+				p.Spec.Messaging.Host = tc.host
+				init, ok := w.container(p)
+				require.True(t, ok, "%s init container must be present", w.name)
+				require.Len(t, init.Command, 3)
+				script := init.Command[2]
+
+				// STRUCTURE: the loop reads the coordinates from quoted expansions, and the
+				// host value appears nowhere in the script the shell executes.
+				assert.Contains(t, script, testMQWaitLoop,
+					"the broker loop must read the coordinates from QUOTED env vars")
+				assert.NotContains(t, script, tc.host,
+					"the broker host must never be interpolated into shell source")
+
+				// DELIVERY: the raw value reaches the container as an env value, unmangled.
+				host, ok := initEnvValue(init, mqWaitHostEnv)
+				require.True(t, ok, "%s must carry the broker host as an env value", mqWaitHostEnv)
+				assert.Equal(t, tc.host, host, "the env value carries the host verbatim")
+				port, ok := initEnvValue(init, mqWaitPortEnv)
+				require.True(t, ok, "%s must carry the broker port as an env value", mqWaitPortEnv)
+				assert.Equal(t, "5672", port)
+
+				// The wait-loop env is script-local and must never carry a credential.
+				for _, e := range init.Env {
+					assert.Nil(t, e.ValueFrom, "the wait-loop env must be plain values only")
+				}
+			})
+		}
+	}
+}
+
+// TestWaitLoopsCarryManagedBrokerCoordinates locks that the env-var indirection is
+// mode-agnostic: a MANAGED broker's generated Service name and port travel the same path.
+func TestWaitLoopsCarryManagedBrokerCoordinates(t *testing.T) {
+	p := basePlatform()
+	p.Spec.Messaging.Mode = "managed"
+	p.Spec.Messaging.Managed = &otilmv1alpha1.ManagedMessagingSpec{Replicas: 1}
+
+	mq := ResolveMessagingConnection(p)
+	require.NotEmpty(t, mq.Host, "a managed broker resolves to the generated Service name")
+
+	for name, init := range map[string]corev1.Container{
+		testWaitForAuth:      mustContainer(t, ResolveCore(p).InitContainers, testWaitForAuth),
+		testWaitForMessaging: mustContainer(t, ResolveScheduler(p).InitContainers, testWaitForMessaging),
+	} {
+		host, ok := initEnvValue(init, mqWaitHostEnv)
+		require.True(t, ok, "%s must carry the broker host", name)
+		assert.Equal(t, mq.Host, host, "%s waits on the managed broker Service", name)
+		port, ok := initEnvValue(init, mqWaitPortEnv)
+		require.True(t, ok, "%s must carry the broker port", name)
+		assert.Equal(t, strconv.Itoa(int(mq.Port)), port)
+	}
+}
+
+// mustContainer returns the named container or fails the test.
+func mustContainer(t *testing.T, cs []corev1.Container, name string) corev1.Container {
+	t.Helper()
+	c, ok := containerByName(cs, name)
+	require.True(t, ok, "container %q must be present", name)
+	return c
 }
 
 // ---- provision-instance-queue init container (proxy path) ------------------
@@ -655,14 +787,22 @@ func TestResolveCoreProvisionQueueInitRenderedWhenProxyAndProvisioning(t *testin
 
 	require.Len(t, init.Command, 3)
 	script := init.Command[2]
-	// Per-pod queue named after the pod hostname; self-idempotent retry-until-success.
+	// Per-pod queue named after the pod hostname; self-idempotent retry on transient failures.
 	assert.Contains(t, script, "HOSTNAME=$(hostname)", "queue is named per-pod from the hostname")
 	assert.Contains(t, script, "/api/v1/queues", "POSTs to the provisioning queues endpoint")
 	assert.Contains(t, script, "-X POST", "registers the queue via POST")
-	assert.Contains(t, script, "until", "retries until the call succeeds")
+	assert.Contains(t, script, "while true; do", "the request is issued in a retry loop")
 	assert.Contains(t, script, "sleep 5", "retry loop backs off between attempts")
-	assert.Contains(t, script, `\"name\": \"${HOSTNAME}\"`, "queue name is the pod hostname")
+	assert.Contains(t, script, `"name":"${HOSTNAME}"`, "queue name is the pod hostname placeholder")
+	assert.Contains(t, script, `sed "s/\${HOSTNAME}/${HOSTNAME}/g"`,
+		"the placeholder is substituted at runtime from the pod hostname")
 	assert.Contains(t, script, "X-API-Key: ${PROVISIONING_API_KEY}", "sends the API key header when present")
+	// The endpoint is CR-derived (spec.provisioning.apiURL), so it is passed with curl's --url
+	// flag: an apiURL beginning with "-" is then taken as a URL, not parsed as a curl option.
+	assert.Equal(t, 2, strings.Count(script, `--url "${PROVISIONING_API_URL}/api/v1/queues"`),
+		"both curl branches must pass the CR-derived endpoint via --url")
+	assert.NotContains(t, script, `-X POST "${PROVISIONING_API_URL}`,
+		"a CR-derived URL must never sit in curl's bare-argument position")
 
 	// PROVISIONING_API_URL is inline; the API key is secretKeyRef'd (never inline).
 	url, urlInline := initEnvValue(init, w.ProvisioningURLEnv)
@@ -676,6 +816,454 @@ func TestResolveCoreProvisionQueueInitRenderedWhenProxyAndProvisioning(t *testin
 	assert.Equal(t, testProvSecret, keyRef.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, w.ProvisioningAPIKey.Key, keyRef.ValueFrom.SecretKeyRef.Key)
 	assert.Empty(t, keyRef.Value, "API key must not be inlined; only the reference is set")
+}
+
+// provisionQueueBody is the parsed shape of the request body the provision-instance-queue
+// script POSTs. Declared here (not reused from production) so the JSON contract is asserted
+// independently of the builder's own struct.
+type provisionQueueBody struct {
+	Name       string           `json:"name"`
+	Exchange   string           `json:"exchange"`
+	RoutingKey string           `json:"routingKey"`
+	Properties map[string]int64 `json:"properties"`
+}
+
+// deployOverride returns a platform mutation switching provisioning to deploy mode and
+// applying apply to the deploy block, so the queue-request trio
+// (exchange / routingKey / queueArguments) is exercised on its real spec path.
+func deployOverride(apply func(*otilmv1alpha1.ProvisioningDeploySpec)) func(*otilmv1alpha1.Platform) {
+	return func(p *otilmv1alpha1.Platform) {
+		d := &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: testProvBootstrap}
+		apply(d)
+		p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{Mode: "deploy", Deploy: d}
+	}
+}
+
+// exchangeOverride returns a platform mutation pinning spec.provisioning.deploy.exchange to v
+// (deploy mode, so the override path is the one under test).
+func exchangeOverride(v string) func(*otilmv1alpha1.Platform) {
+	return deployOverride(func(d *otilmv1alpha1.ProvisioningDeploySpec) { d.Exchange = v })
+}
+
+// provisionQueueScript renders p and returns the provision-instance-queue init container's
+// script, failing the test when the proxy path did not render the container at all.
+func provisionQueueScript(t *testing.T, p *otilmv1alpha1.Platform) string {
+	t.Helper()
+	init, ok := containerByName(ResolveCore(p).InitContainers, testProvInstanceQueue)
+	require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+	require.Len(t, init.Command, 3)
+	return init.Command[2]
+}
+
+// heredocParts splits a rendered init-container script at its QUOTED heredoc, returning the
+// heredoc body (inert data the shell never expands) and the surrounding text (everything the
+// shell actually executes). It fails the test unless the script uses a quoted heredoc, which
+// is the property that makes a hostile value harmless.
+func heredocParts(t *testing.T, script string) (body, outside string) {
+	t.Helper()
+	const openTok, closeTok = "<<'EOF'\n", "\nEOF\n"
+	i := strings.Index(script, openTok)
+	require.GreaterOrEqual(t, i, 0, "the request body must be emitted inside a QUOTED heredoc (<<'EOF')")
+	rest := script[i+len(openTok):]
+	j := strings.Index(rest, closeTok)
+	require.GreaterOrEqual(t, j, 0, "the quoted heredoc must be terminated")
+	return rest[:j], script[:i+len(openTok)] + rest[j:]
+}
+
+// TestResolveCoreProvisionQueueInitExchangeIsVersionResolved proves two things about the
+// exchange the provision-instance-queue script binds the pod's queue to.
+//
+// RESOLUTION: it is the SAME proxy exchange the provisioning builder declares — the selected
+// bundle's default (2.18.0: czertainly-proxy; 2.19.0: ilm-proxy) or the
+// spec.provisioning.deploy.exchange override. A hard-coded exchange would make Core's
+// registration retry forever on a platform whose bundle renamed it.
+//
+// SAFETY: whatever the value, it reaches the container as JSON DATA inside a quoted heredoc —
+// never as shell command text. The hostile cases below (command substitution, backticks, a
+// quote, a newline, a variable reference) are the regression guard for the earlier shape, which
+// interpolated the value into a DOUBLE-quoted shell assignment (%q) and an unencoded JSON body:
+// there, `$(id)` would have executed in an init container holding the provisioning API key.
+func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*otilmv1alpha1.Platform)
+		want    string
+		notWant string
+	}{
+		{
+			name: "default version (2.18.0) uses the czertainly proxy exchange",
+			mutate: func(_ *otilmv1alpha1.Platform) {
+				// no extra spec setup: default version resolves without explicit mutation
+			},
+			want: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "explicit 2.18.0 uses the czertainly proxy exchange",
+			mutate:  func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion218 },
+			want:    testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
+		},
+		{
+			name:    "explicit 2.19.0 uses the renamed ilm proxy exchange",
+			mutate:  func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion219 },
+			want:    testExchangeIlmProxy,
+			notWant: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "spec.provisioning.deploy.exchange overrides the bundle default",
+			mutate:  exchangeOverride(testCustomProxyExchange),
+			want:    testCustomProxyExchange,
+			notWant: testExchangeCzertainlyProxy,
+		},
+		// Hostile values. None can be STORED any more (the CRD constrains the field's charset),
+		// so these prove the CONSTRUCTION is safe regardless — the value stays inert JSON data
+		// even if one somehow reaches the builder.
+		{
+			name:    "command substitution stays inert data",
+			mutate:  exchangeOverride("$(id)"),
+			want:    "$(id)",
+			notWant: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "backtick command substitution stays inert data",
+			mutate:  exchangeOverride("`id`"),
+			want:    "`id`",
+			notWant: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "an embedded double quote cannot reshape the JSON",
+			mutate:  exchangeOverride(`a"b`),
+			want:    `a"b`,
+			notWant: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "an embedded newline cannot break out of the heredoc",
+			mutate:  exchangeOverride("a\nb"),
+			want:    "a\nb",
+			notWant: testExchangeCzertainlyProxy,
+		},
+		{
+			name:    "a variable reference is not expanded",
+			mutate:  exchangeOverride("a$VAR"),
+			want:    "a$VAR",
+			notWant: testExchangeCzertainlyProxy,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := proxyProvisioningPlatform()
+			tc.mutate(p)
+			c := ResolveCore(p)
+
+			init, ok := containerByName(c.InitContainers, testProvInstanceQueue)
+			require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+			require.Len(t, init.Command, 3)
+			script := init.Command[2]
+
+			// STRUCTURE: the body is emitted inside a QUOTED heredoc (the shell expands nothing
+			// in it), and the old double-quoted shell assignment is gone for good.
+			body, outside := heredocParts(t, script)
+			assert.Contains(t, script, "<<'EOF'", "the heredoc delimiter must be QUOTED")
+			assert.NotContains(t, script, "PROXY_EXCHANGE=",
+				"the value must never be assigned into a double-quoted shell variable again")
+			assert.NotContains(t, body, "\n",
+				"the JSON body is one line, so no value can forge the heredoc terminator")
+
+			// ROUND-TRIP: the heredoc body is valid JSON and carries the resolved exchange EXACTLY.
+			var got provisionQueueBody
+			require.NoError(t, json.Unmarshal([]byte(body), &got),
+				"the heredoc body must be valid JSON (encoding/json composed it)")
+			assert.Equal(t, tc.want, got.Exchange, "the exchange must round-trip through JSON unchanged")
+			assert.Equal(t, "${HOSTNAME}", got.Name, "the queue name is the runtime hostname placeholder")
+			assert.Equal(t, "proxymessage.*.${HOSTNAME}", got.RoutingKey,
+				"the routing key keeps its hostname placeholder")
+			assert.Equal(t, map[string]int64{testQueueArgExpires: 1800000}, got.Properties)
+
+			// INERTNESS: the value appears ONLY in the heredoc body — never in text the shell
+			// executes, so command substitution, backticks and quotes have nothing to escape.
+			assert.NotContains(t, outside, tc.want,
+				"the exchange value must not appear anywhere the shell evaluates it")
+
+			// Both curl branches send the one composed body.
+			assert.Equal(t, 2, strings.Count(script, `-d "${BODY}"`),
+				"both curl branches must send the same composed JSON body")
+			if tc.notWant != "" {
+				assert.NotContains(t, script, tc.notWant,
+					"no other exchange name may appear in the script")
+			}
+		})
+	}
+}
+
+// ---- provision-instance-queue: failure classification + timeouts -----------
+
+// caseBlock returns the body of the shell `case` statement the rendered script dispatches on
+// expr (e.g. `"$RC"`) — the text between `case <expr> in` and its `esac`. Asserting on the
+// two classifier BLOCKS keeps these tests structural: they check that each outcome has a
+// branch and that the branch does the right thing, without pasting the whole script.
+func caseBlock(t *testing.T, script, expr string) string {
+	t.Helper()
+	open := "case " + expr + " in\n"
+	i := strings.Index(script, open)
+	require.GreaterOrEqual(t, i, 0, "the script must classify outcomes with `case %s in`", expr)
+	rest := script[i+len(open):]
+	j := strings.Index(rest, "esac")
+	require.GreaterOrEqual(t, j, 0, "the `case %s` statement must be terminated with esac", expr)
+	return rest[:j]
+}
+
+// caseBranch returns the body of the branch a case block dispatches on for pattern — the text
+// between "<pattern>)" and the branch terminator ";;". It fails the test when the block has no
+// such branch, so a classifier that silently drops an outcome is caught rather than passing
+// vacuously.
+func caseBranch(t *testing.T, block, pattern string) string {
+	t.Helper()
+	open := pattern + ")\n"
+	i := strings.Index(block, open)
+	require.GreaterOrEqual(t, i, 0, "the classifier must have a %q branch", pattern)
+	rest := block[i+len(open):]
+	j := strings.Index(rest, ";;")
+	require.GreaterOrEqual(t, j, 0, "the %q branch must be terminated with ;;", pattern)
+	return rest[:j]
+}
+
+// exitStatus returns the status a shell branch terminates the init container with, and
+// whether it terminates at all. It matches an `exit` STATEMENT (a line of its own), so a
+// diagnostic message that merely mentions the word "exit" is not mistaken for one.
+func exitStatus(branch string) (string, bool) {
+	for _, line := range strings.Split(branch, "\n") {
+		if code, ok := strings.CutPrefix(strings.TrimSpace(line), "exit "); ok {
+			return code, true
+		}
+	}
+	return "", false
+}
+
+// TestResolveCoreProvisionQueueInitClassifiesOutcomes is the regression guard for the
+// init container's central robustness property: it must RETRY only transient outcomes and
+// FAIL FAST on permanent ones.
+//
+// The previous shape wrapped `curl -sf` in an until-loop, so `-f`'s single non-zero exit made
+// 400/401/404 indistinguishable from "API not up yet": a wrong API key or URL retried forever
+// behind a misleading "Waiting for provisioning API" message, an init container that never
+// terminates and blocks Core's startup silently. The script now classifies the curl exit code
+// and the HTTP status separately, mirroring the released platform chart's
+// ilm.initContainer.provisionQueue.
+func TestResolveCoreProvisionQueueInitClassifiesOutcomes(t *testing.T) {
+	script := provisionQueueScript(t, proxyProvisioningPlatform())
+	transport := caseBlock(t, script, `"$RC"`)
+	status := caseBlock(t, script, `"$CODE"`)
+
+	tests := []struct {
+		name string
+		// block is the classifier the outcome is dispatched by, pattern its case label.
+		block, pattern string
+		// permanent outcomes exit non-zero without sleeping; transient ones sleep and loop.
+		permanent bool
+		// diagnostics are the fragments the branch must print, so the failure is actionable
+		// in `kubectl logs` rather than a bare exit code.
+		diagnostics []string
+	}{
+		{
+			name:  "permanent transport failures (unsupported protocol, malformed URL, TLS) fail fast",
+			block: transport, pattern: "1|3|60", permanent: true,
+			diagnostics: []string{"failed permanently", "curl exit ${RC}", "not retrying"},
+		},
+		{
+			name:  "any other transport failure is transient and retried",
+			block: transport, pattern: "*", permanent: false,
+			diagnostics: []string{"curl exit ${RC}", "retrying in 5s"},
+		},
+		{
+			name:  "408, 429 and 5xx are transient and retried",
+			block: status, pattern: "408|429|5??", permanent: false,
+			diagnostics: []string{"not ready (HTTP ${CODE})", "retrying in 5s"},
+		},
+		{
+			name:  "any other 4xx is permanent and prints the status AND the response body",
+			block: status, pattern: "*", permanent: true,
+			diagnostics: []string{"Queue provisioning failed (HTTP ${CODE})", "${RESPONSE}"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			branch := caseBranch(t, tc.block, tc.pattern)
+			for _, d := range tc.diagnostics {
+				assert.Contains(t, branch, d, "the branch must print an actionable diagnostic")
+			}
+			code, terminates := exitStatus(branch)
+			if tc.permanent {
+				require.True(t, terminates, "a permanent failure must terminate the init container")
+				assert.Equal(t, "1", code, "a permanent failure must exit non-zero")
+				assert.NotContains(t, branch, "sleep", "a permanent failure must not sleep and retry")
+				return
+			}
+			assert.False(t, terminates, "a transient failure must not terminate the init container")
+			assert.Contains(t, branch, "sleep 5", "a transient failure must back off before retrying")
+		})
+	}
+
+	// The success branch keeps its exit status and its original message.
+	success := caseBranch(t, status, "2??")
+	assert.Contains(t, success, `echo "Instance queue provisioned for ${HOSTNAME}"`)
+	code, terminates := exitStatus(success)
+	require.True(t, terminates, "a 2xx must terminate the init container")
+	assert.Equal(t, "0", code, "a 2xx must succeed the init container")
+
+	// The status and body are captured from one response: -w appends the code on its own
+	// line, which the script then splits off the body.
+	assert.Contains(t, script, `CODE=$(printf '%s' "$OUT" | tail -n 1)`, "the HTTP status is the last line")
+	assert.Contains(t, script, `RESPONSE=$(printf '%s' "$OUT" | sed '$d')`, "the response body is everything before it")
+}
+
+// TestResolveCoreProvisionQueueInitCurlOptions locks the per-request curl options both
+// branches must carry: the chart's connect/total timeouts (so a black-holed endpoint cannot
+// wedge an attempt indefinitely), the status write-out the classifier reads, and the ABSENCE
+// of -f, whose collapse of every HTTP error into one exit code is exactly what made a
+// permanent failure indistinguishable from a transient one.
+func TestResolveCoreProvisionQueueInitCurlOptions(t *testing.T) {
+	script := provisionQueueScript(t, proxyProvisioningPlatform())
+	assert.Equal(t, 2, strings.Count(script, "--connect-timeout 5 --max-time 30"),
+		"both curl branches must bound connect and total time")
+	assert.Equal(t, 2, strings.Count(script, `-w '\n%{http_code}'`),
+		"both curl branches must write out the HTTP status for the classifier")
+	assert.Equal(t, 2, strings.Count(script, "curl -sS "),
+		"both curl branches must stay quiet about progress but loud about errors")
+	assert.NotContains(t, script, "curl -sf",
+		"-f collapses every HTTP error into one exit code and defeats the classifier")
+}
+
+// ---- provision-instance-queue: configurable request body -------------------
+
+// testDefaultQueueBody is the request body the operator composes when
+// spec.provisioning.deploy leaves the queue trio unset. It is asserted VERBATIM so an
+// unintended change to the default contract (which existing platforms depend on) cannot slip
+// through as an incidental diff.
+const testDefaultQueueBody = `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+	`"routingKey":"proxymessage.*.${HOSTNAME}","properties":{"x-expires":1800000}}`
+
+// jsonValue wraps a raw JSON literal as a queue-argument value, the way the apiserver
+// delivers spec.provisioning.deploy.queueArguments[].value.
+func jsonValue(raw string) apiextensionsv1.JSON { return apiextensionsv1.JSON{Raw: []byte(raw)} }
+
+// queueArgs builds the deploy-block mutation setting queueArguments to the given name/raw-JSON
+// pairs in order.
+func queueArgs(pairs ...[2]string) func(*otilmv1alpha1.Platform) {
+	return deployOverride(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+		for _, kv := range pairs {
+			d.QueueArguments = append(d.QueueArguments,
+				otilmv1alpha1.QueueArgument{Name: kv[0], Value: jsonValue(kv[1])})
+		}
+	})
+}
+
+// TestResolveCoreProvisionQueueBodyIsConfigurable proves the operator's half of the released
+// chart's global.provisioning.queue.{exchange,routingKey,properties} contract: each field is
+// overridable at spec.provisioning.deploy, an UNSET field renders exactly the bytes it
+// rendered before the field existed, and setting queueArguments REPLACES the default set
+// outright (chart semantics — a provisioning service ignores arguments it does not recognise,
+// so a deployment running a different service states its own full set).
+func TestResolveCoreProvisionQueueBodyIsConfigurable(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+		want   string
+	}{
+		{
+			name: "defaults render the pre-existing bytes verbatim",
+			mutate: deployOverride(func(*otilmv1alpha1.ProvisioningDeploySpec) {
+				// intentionally empty: leave the deploy spec untouched to test default behavior
+			}),
+			want: testDefaultQueueBody,
+		},
+		{
+			name: "routingKey overrides the default binding key",
+			mutate: deployOverride(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+				d.RoutingKey = "events.#"
+			}),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"events.#","properties":{"x-expires":1800000}}`,
+		},
+		{
+			name: "a routingKey may carry the ${HOSTNAME} token itself",
+			mutate: deployOverride(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+				d.RoutingKey = "proxymessage.custom.${HOSTNAME}"
+			}),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.custom.${HOSTNAME}","properties":{"x-expires":1800000}}`,
+		},
+		{
+			name:   "a single queueArgument REPLACES the default x-expires",
+			mutate: queueArgs([2]string{"x-message-ttl", "60000"}),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}","properties":{"x-message-ttl":60000}}`,
+		},
+		{
+			name: "multiple queueArguments render in a stable, spec-order-independent order",
+			mutate: queueArgs(
+				[2]string{"x-queue-type", `"quorum"`},
+				[2]string{testQueueArgExpires, "900000"},
+				[2]string{"x-max-length", "5000"},
+			),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}",` +
+				`"properties":{"x-expires":900000,"x-max-length":5000,"x-queue-type":"quorum"}}`,
+		},
+		{
+			name: "non-string JSON values (boolean, object) are forwarded verbatim",
+			mutate: queueArgs(
+				[2]string{"x-single-active-consumer", "true"},
+				[2]string{"x-overflow", `{"strategy":"reject-publish","limit":10}`},
+			),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}",` +
+				`"properties":{"x-overflow":{"strategy":"reject-publish","limit":10},` +
+				`"x-single-active-consumer":true}}`,
+		},
+		{
+			name:   "an unusable value degrades to JSON null rather than corrupting the body",
+			mutate: queueArgs([2]string{"x-broken", ""}),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}","properties":{"x-broken":null}}`,
+		},
+		{
+			name: "a repeated name (rejected at admission) still renders deterministically",
+			mutate: queueArgs(
+				[2]string{testQueueArgExpires, "1"},
+				[2]string{testQueueArgExpires, "2"},
+			),
+			want: `{"name":"${HOSTNAME}","exchange":"czertainly-proxy",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}","properties":{"` + testQueueArgExpires + `":2}}`,
+		},
+		{
+			name: "the whole trio can be overridden together",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				deployOverride(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+					d.Exchange = testCustomProxyExchange
+					d.RoutingKey = "proxymessage.*.${HOSTNAME}.eu"
+					d.QueueArguments = []otilmv1alpha1.QueueArgument{
+						{Name: testQueueArgExpires, Value: jsonValue("60000")},
+					}
+				})(p)
+			},
+			want: `{"name":"${HOSTNAME}","exchange":"` + testCustomProxyExchange + `",` +
+				`"routingKey":"proxymessage.*.${HOSTNAME}.eu","properties":{"` + testQueueArgExpires + `":60000}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := proxyProvisioningPlatform()
+			tc.mutate(p)
+			body, outside := heredocParts(t, provisionQueueScript(t, p))
+
+			assert.Equal(t, tc.want, body, "the composed request body must match byte-for-byte")
+			assert.NotContains(t, body, "\n",
+				"the body stays one line so no value can forge the heredoc terminator")
+			require.True(t, json.Valid([]byte(body)), "the composed body must be valid JSON")
+			assert.NotContains(t, outside, "\"properties\"",
+				"the body must live only in the heredoc, never in text the shell evaluates")
+		})
+	}
 }
 
 func TestResolveCoreProvisionQueueInitOmittedWithoutProxy(t *testing.T) {
@@ -927,12 +1515,19 @@ func TestResolveSchedulerCredentialsAreSecretBacked(t *testing.T) {
 
 func TestResolveSchedulerInitContainer(t *testing.T) {
 	c := ResolveScheduler(basePlatform())
-	init, ok := containerByName(c.InitContainers, "wait-for-messaging-service")
+	init, ok := containerByName(c.InitContainers, testWaitForMessaging)
 	require.True(t, ok, "wait-for-messaging-service init container must be present")
 	assert.Equal(t, testCurlImage, init.Image)
 	require.Len(t, init.Command, 3)
 	script := init.Command[2]
-	assert.Contains(t, script, "nc -z mq.example.com 5672")
+	// The broker coordinates arrive as env values and are read back QUOTED.
+	assert.Contains(t, script, testMQWaitLoop)
+	host, ok := initEnvValue(init, mqWaitHostEnv)
+	require.True(t, ok, "the broker host must be passed as an env value")
+	assert.Equal(t, testMQHost, host)
+	port, ok := initEnvValue(init, mqWaitPortEnv)
+	require.True(t, ok, "the broker port must be passed as an env value")
+	assert.Equal(t, "5672", port)
 }
 
 func TestResolveSchedulerProbes(t *testing.T) {
@@ -1459,4 +2054,100 @@ func TestTrustedCertsSecretKeyComposedUsesOutputKey(t *testing.T) {
 		"composed bundle is read under the fixed OUTPUT key, not the user input mapping")
 	// The user's input mapping still governs the READ of the user Secret during composition.
 	assert.Equal(t, testTLSCA, TrustedCertsInputKey(p))
+}
+
+// TestComponentPullSecretsUnion proves per-component pull secrets reach the pod alongside the
+// shared ones (they were silently DROPPED before the union fix) for EVERY component whose
+// resolver merges them — one case per resolver, so a newly added component that forgets the
+// union is not covered by a core-only test. The shared list comes first (order-preserving
+// union), and duplicates collapse.
+func TestComponentPullSecretsUnion(t *testing.T) {
+	const shared, own = "shared-cred", "own-cred"
+	tests := []struct {
+		name    string
+		set     func(*otilmv1alpha1.Platform, []string)
+		resolve func(*otilmv1alpha1.Platform) common.Component
+	}{
+		{
+			name:    "core",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.Core.Image.PullSecrets = s },
+			resolve: ResolveCore,
+		},
+		{
+			name:    "scheduler",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.Scheduler.Image.PullSecrets = s },
+			resolve: ResolveScheduler,
+		},
+		{
+			name:    "utils",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.Utils.Image.PullSecrets = s },
+			resolve: ResolveUtils,
+		},
+		{
+			name:    "auth-opa-policies",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.AuthOpaPolicies.Image.PullSecrets = s },
+			resolve: ResolveAuthOpaPolicies,
+		},
+		{
+			name:    "auth",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.Auth.Image.PullSecrets = s },
+			resolve: ResolveAuth,
+		},
+		{
+			name:    "fe-administrator",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.FeAdministrator.Image.PullSecrets = s },
+			resolve: ResolveFeAdministrator,
+		},
+		{
+			name:    "gateway",
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.Gateway.Image.PullSecrets = s },
+			resolve: ResolveGateway,
+		},
+		{
+			name: "provisioning",
+			set: func(p *otilmv1alpha1.Platform, s []string) {
+				p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
+					Mode: "deploy",
+					Deploy: &otilmv1alpha1.ProvisioningDeploySpec{
+						BootstrapSecretRef: "prov-bootstrap",
+						ComponentSpec: otilmv1alpha1.ComponentSpec{
+							Image: otilmv1alpha1.ImageSpec{PullSecrets: s},
+						},
+					},
+				}
+			},
+			resolve: ResolveProvisioning,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Shared + per-component: the union carries both, shared first.
+			p := basePlatform()
+			p.Spec.Common.Image.PullSecrets = []string{shared}
+			tc.set(p, []string{own})
+			assert.Equal(t, []string{shared, own}, tc.resolve(p).PullSecrets,
+				"%s must union the shared and per-component pull secrets", tc.name)
+
+			// Per-component only: it still reaches the pod.
+			only := basePlatform()
+			tc.set(only, []string{own})
+			assert.Equal(t, []string{own}, tc.resolve(only).PullSecrets,
+				"%s must carry a per-component-only pull secret", tc.name)
+
+			// A duplicate collapses to one entry.
+			dup := basePlatform()
+			dup.Spec.Common.Image.PullSecrets = []string{shared}
+			tc.set(dup, []string{shared})
+			assert.Equal(t, []string{shared}, tc.resolve(dup).PullSecrets,
+				"%s must not duplicate a pull secret listed twice", tc.name)
+
+			// Neither set: nil, so rendered pods stay byte-identical when none are configured.
+			// set(nil) still installs whatever scaffolding the resolver requires (the
+			// provisioning deploy block), just with no pull secrets.
+			none := basePlatform()
+			tc.set(none, nil)
+			assert.Nil(t, tc.resolve(none).PullSecrets,
+				"%s must render no pull secrets when none are configured", tc.name)
+		})
+	}
 }
