@@ -23,13 +23,30 @@ SOFTWARE.
 package platform
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+)
+
+const (
+	// testBootstrapSecretName is the provisioning bootstrap Secret name these CEL cases
+	// reference; the Secret itself is never read, only the reference is validated.
+	testBootstrapSecretName = "prov-bootstrap"
+	// testPatternRejection is the fragment the apiserver includes when a field fails its
+	// charset Pattern, as opposed to a cross-field XValidation rule.
+	testPatternRejection = "should match"
+	// testDuplicateRejection is the fragment the apiserver includes when a list-map receives
+	// two entries sharing a merge key.
+	testDuplicateRejection = "Duplicate value"
+	// testQueueArgExpires is the standard queue-argument name for message expiration.
+	testQueueArgExpires = "x-expires"
 )
 
 // These specs exercise the field-level CEL (XValidation) on the Platform CRD at
@@ -415,7 +432,7 @@ var _ = Describe("Platform CEL validation", func() {
 			}
 			p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
 				Mode:   "deploy",
-				Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: "prov-bootstrap"},
+				Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: testBootstrapSecretName},
 			}
 			err := k8sClient.Create(ctx, p)
 			Expect(err).To(HaveOccurred())
@@ -426,7 +443,7 @@ var _ = Describe("Platform CEL validation", func() {
 			p := platformIn(ns) // validMessaging is rabbitmq
 			p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
 				Mode:   "deploy",
-				Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: "prov-bootstrap"},
+				Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: testBootstrapSecretName},
 			}
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
 		})
@@ -435,6 +452,233 @@ var _ = Describe("Platform CEL validation", func() {
 			p := platformIn(ns)
 			p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
 				Mode: "external", APIURL: "https://prov.example.com", APIKeySecretRef: "prov-secret",
+			}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	// The exchange name is rendered into the queue-registration request Core issues at startup,
+	// so the field is charset-constrained at ADMISSION as defence in depth: a shell/JSON
+	// metacharacter can never be stored, on top of the builder composing the request body with
+	// encoding/json inside a quoted heredoc.
+	Context("provisioning deploy exchange charset", func() {
+		provisioningWith := func(exchange string) *otilmv1alpha1.ProvisioningSpec {
+			return &otilmv1alpha1.ProvisioningSpec{
+				Mode: "deploy",
+				Deploy: &otilmv1alpha1.ProvisioningDeploySpec{
+					BootstrapSecretRef: testBootstrapSecretName, Exchange: exchange,
+				},
+			}
+		}
+		for i, bad := range []string{"$(id)", "`id`", `a"b`, "a\nb", "a$VAR", "a b", "a;b"} {
+			exchange := bad
+			It("rejects a shell/JSON metacharacter in the exchange name: "+exchange, func() {
+				ns := freshNS(fmt.Sprintf("cel-prov-exchange-bad-%d", i))
+				p := platformIn(ns)
+				p.Spec.Provisioning = provisioningWith(exchange)
+				err := k8sClient.Create(ctx, p)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+			})
+		}
+		It("accepts a conventional exchange name", func() {
+			ns := freshNS("cel-prov-exchange-good")
+			p := platformIn(ns)
+			p.Spec.Provisioning = provisioningWith("ilm-proxy_2.v1:alt")
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	// The routing key completes the configurable queue-request trio (exchange / routingKey /
+	// queueArguments) and lands in the same rendered request, so it carries the same charset
+	// discipline — widened by exactly two things a binding key legitimately needs: the AMQP
+	// topic wildcards * and #, and the three characters of the literal ${HOSTNAME} token the
+	// init container substitutes with the pod name at runtime. Shell metacharacters, quotes,
+	// whitespace and newlines stay rejected.
+	Context("provisioning deploy routingKey charset", func() {
+		deployWith := func(apply func(*otilmv1alpha1.ProvisioningDeploySpec)) *otilmv1alpha1.ProvisioningSpec {
+			d := &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: testBootstrapSecretName}
+			apply(d)
+			return &otilmv1alpha1.ProvisioningSpec{Mode: "deploy", Deploy: d}
+		}
+		routingKeyWith := func(key string) *otilmv1alpha1.ProvisioningSpec {
+			return deployWith(func(d *otilmv1alpha1.ProvisioningDeploySpec) { d.RoutingKey = key })
+		}
+
+		for i, good := range []string{
+			"proxymessage.*.${HOSTNAME}", // the shipped default: both a wildcard and the token
+			"proxymessage.#",             // an AMQP multi-word topic wildcard
+			"events.*.eu-west_1:v2",      // the plain binding-key charset
+			"${HOSTNAME}",                // the token alone
+		} {
+			key := good
+			It("accepts a legitimate binding key: "+key, func() {
+				ns := freshNS(fmt.Sprintf("cel-prov-rk-good-%d", i))
+				p := platformIn(ns)
+				p.Spec.Provisioning = routingKeyWith(key)
+				Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			})
+		}
+
+		for i, bad := range []string{"$(id)", "`id`", `a"b`, "a\nb", "a b", "a;b", "a|b", "a&b"} {
+			key := bad
+			It("rejects a shell/JSON metacharacter in the routing key: "+key, func() {
+				ns := freshNS(fmt.Sprintf("cel-prov-rk-bad-%d", i))
+				p := platformIn(ns)
+				p.Spec.Provisioning = routingKeyWith(key)
+				err := k8sClient.Create(ctx, p)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+			})
+		}
+
+		// queueArguments replaces the operator's default argument set outright, so a repeated
+		// name is a configuration mistake with a silently-wins outcome; the field is a
+		// list-map keyed by name, so the apiserver rejects it at the door instead.
+		It("accepts distinct queue-argument names with arbitrary JSON values", func() {
+			ns := freshNS("cel-prov-qargs-good")
+			p := platformIn(ns)
+			p.Spec.Provisioning = deployWith(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+				d.QueueArguments = []otilmv1alpha1.QueueArgument{
+					{Name: testQueueArgExpires, Value: apiextensionsv1.JSON{Raw: []byte("1800000")}},
+					{Name: "x-queue-type", Value: apiextensionsv1.JSON{Raw: []byte(`"quorum"`)}},
+					{Name: "x-overflow", Value: apiextensionsv1.JSON{Raw: []byte(`{"strategy":"drop-head"}`)}},
+				}
+			})
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("rejects a repeated queue-argument name", func() {
+			ns := freshNS("cel-prov-qargs-dup")
+			p := platformIn(ns)
+			p.Spec.Provisioning = deployWith(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+				d.QueueArguments = []otilmv1alpha1.QueueArgument{
+					{Name: testQueueArgExpires, Value: apiextensionsv1.JSON{Raw: []byte("1")}},
+					{Name: testQueueArgExpires, Value: apiextensionsv1.JSON{Raw: []byte("2")}},
+				}
+			})
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(testDuplicateRejection))
+		})
+		It("rejects a shell/JSON metacharacter in a queue-argument name", func() {
+			ns := freshNS("cel-prov-qargs-bad-name")
+			p := platformIn(ns)
+			p.Spec.Provisioning = deployWith(func(d *otilmv1alpha1.ProvisioningDeploySpec) {
+				d.QueueArguments = []otilmv1alpha1.QueueArgument{
+					{Name: "$(id)", Value: apiextensionsv1.JSON{Raw: []byte("1")}},
+				}
+			})
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+		})
+	})
+
+	// The broker/database hosts, the Keycloak realm and the platform/edge hostnames are all
+	// rendered into generated wiring (the broker-reachability wait loops, the in-pod OIDC
+	// registration request), so each is charset-constrained at ADMISSION as defence in depth:
+	// a shell/JSON metacharacter can never be STORED. The structural fixes in the builders —
+	// env-var indirection for the wait loops, encoding/json plus quoted heredocs for the request
+	// bodies — are what make those renders safe regardless; this layer just stops the value at
+	// the door. spec.registerAdmin.{username,name,lastName,email} deliberately carry NO pattern:
+	// apostrophes and unicode are legitimate in human names and addresses, and the JSON encoding
+	// is what makes them safe.
+	Context("host / realm charsets", func() {
+		badValues := []string{"$(id)", "`id`", `a"b`, "a'b", "a\nb", "a$VAR", "a;b", "a|b", "a b"}
+		fields := []struct {
+			name string
+			set  func(*otilmv1alpha1.Platform, string)
+			good string
+		}{
+			{
+				name: "messaging.host",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Messaging.Host = v
+				},
+				good: "rabbitmq.example.com",
+			},
+			{
+				name: "database.host",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Database.Host = v
+				},
+				good: "postgres.example.com",
+			},
+			{
+				name: "keycloak.realm",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external", Realm: v}
+				},
+				good: "ilm_realm-2.0",
+			},
+			{
+				name: "common.hostName",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Common.HostName = v
+				},
+				good: "ilm.example.com",
+			},
+			{
+				name: "edge.host",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: true, Host: v}
+				},
+				good: "ilm.example.com",
+			},
+		}
+		for fi, f := range fields {
+			field := f
+			for vi, bad := range badValues {
+				value := bad
+				It("rejects a shell metacharacter in "+field.name+": "+value, func() {
+					ns := freshNS(fmt.Sprintf("cel-charset-%d-%d", fi, vi))
+					p := platformIn(ns)
+					field.set(p, value)
+					err := k8sClient.Create(ctx, p)
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+				})
+			}
+			It("accepts a conventional value for "+field.name, func() {
+				ns := freshNS(fmt.Sprintf("cel-charset-good-%d", fi))
+				p := platformIn(ns)
+				field.set(p, field.good)
+				Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			})
+		}
+		It("accepts an IPv6 literal as the broker and database host", func() {
+			ns := freshNS("cel-charset-ipv6")
+			p := platformIn(ns)
+			p.Spec.Messaging.Host = "[fd00::1]"
+			p.Spec.Database.Host = "[fd00::2]"
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts a wildcard public host on the edge and common hostName", func() {
+			// Ingress rules and Gateway API listeners both accept a leading "*." label, so the
+			// charset guard must not reject the wildcard form a real edge may legitimately serve.
+			ns := freshNS("cel-charset-wildcard")
+			p := platformIn(ns)
+			p.Spec.Common.HostName = "*.example.com"
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: true, Type: "ingress", Host: "*.apps.example.com"}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("rejects a wildcard star outside the leading label", func() {
+			ns := freshNS("cel-charset-wildcard-bad")
+			p := platformIn(ns)
+			p.Spec.Common.HostName = "app.*.example.com"
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+		})
+		It("accepts an admin identity carrying an apostrophe and unicode (no pattern applies)", func() {
+			ns := freshNS("cel-charset-admin-apostrophe")
+			p := platformIn(ns)
+			p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{
+				Enabled:  true,
+				Username: "o'brien",
+				Name:     "Séamus",
+				LastName: "O'Brien",
+				Email:    "seamus.o'brien@example.com",
 			}
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
 		})

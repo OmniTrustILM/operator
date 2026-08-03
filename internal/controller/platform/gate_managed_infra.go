@@ -299,6 +299,48 @@ func (r *Reconciler) prereqNotReady(ctx context.Context, p *otilmv1alpha1.Platfo
 	return true
 }
 
+// teardownGate builds the managed-infra gate the DELETION path acts on: build is the
+// per-component gate constructor (databaseGate / messagingGate / keycloakDeletionGate), and it
+// is called once per teardown-render version (teardownRenderPlatforms) with the object sets
+// merged into their DEDUPLICATED UNION.
+//
+// The union is what makes a partially applied upgrade safe to delete: the new version's managed
+// objects are applied BEFORE status.observedVersion is persisted, so a failure in between leaves
+// objects from BOTH topologies live, and a single-version render would orphan one set. Every
+// non-object field (managed, kind, name, the Event labels) comes from the RUNNING version's
+// gate, which is the reality the deletion Events describe.
+func (r *Reconciler) teardownGate(p *otilmv1alpha1.Platform, build func(*otilmv1alpha1.Platform) managedInfraGate) managedInfraGate {
+	renders := teardownRenderPlatforms(p)
+	g := build(renders[0])
+	for _, extra := range renders[1:] {
+		g.objects = mergeManagedObjects(g.objects, build(extra).objects)
+	}
+	return g
+}
+
+// mergeManagedObjects concatenates two rendered managed-object sets, dropping duplicates —
+// objects the two renders have in common (same GVK, namespace and name), which is most of a
+// topology when a version bump renames only part of it. Order is preserved (primary set first)
+// so teardown still deletes in the rendered order.
+func mergeManagedObjects(primary, extra []client.Object) []client.Object {
+	out := make([]client.Object, 0, len(primary)+len(extra))
+	seen := make(map[string]struct{}, len(primary)+len(extra))
+	for _, set := range [][]client.Object{primary, extra} {
+		for _, obj := range set {
+			// The Go type is part of the identity so a typed object whose TypeMeta is empty
+			// (only the unstructured renders carry a GVK) can never collide with another kind.
+			key := fmt.Sprintf("%s|%T|%s/%s", obj.GetObjectKind().GroupVersionKind(), obj,
+				obj.GetNamespace(), obj.GetName())
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
 // handleManagedInfraDeletion enforces the deletion-safety contract for one managed-
 // infrastructure component on Platform deletion, shared by the database/broker handlers:
 //

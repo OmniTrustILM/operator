@@ -378,6 +378,34 @@ func TestSetReadinessStatus(t *testing.T) {
 		assert.True(t, meta.IsStatusConditionFalse(p.Status.Conditions, conditionAvailable))
 		assert.True(t, meta.IsStatusConditionTrue(p.Status.Conditions, conditionProgressing))
 	})
+
+	// A success pass must CLEAR a Degraded recorded by an earlier failing pass — otherwise a
+	// corrected platform (e.g. a reverted spec.version) advertises Degraded=True forever.
+	t.Run("stale Degraded=True is cleared on a successful pass", func(t *testing.T) {
+		for _, ready := range []bool{true, false} {
+			p := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Generation: 4}}
+			meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+				Type: conditionDegraded, Status: metav1.ConditionTrue,
+				Reason: reasonPreviewVersionUpgradeBlocked, Message: "blocked", ObservedGeneration: 3,
+			})
+			r.setReadinessStatus(p, ready)
+			// The condition type and reason are stated LITERALLY: they are the published
+			// contract, so a rename of the production constants must fail this test rather
+			// than move implementation and expectation together.
+			cond := meta.FindStatusCondition(p.Status.Conditions, "Degraded")
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionFalse, cond.Status, "ready=%v must clear the stale Degraded", ready)
+			assert.Equal(t, "Reconciled", cond.Reason)
+			assert.Equal(t, int64(4), cond.ObservedGeneration, "the cleared condition carries this generation")
+		}
+	})
+
+	t.Run("a never-degraded platform gains no Degraded condition", func(t *testing.T) {
+		p := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+		r.setReadinessStatus(p, true)
+		assert.Nil(t, meta.FindStatusCondition(p.Status.Conditions, conditionDegraded),
+			"the clear is a no-op when nothing degraded")
+	})
 }
 
 // TestHandleDeletion asserts the deletion handler honors deletionPolicy (defaulting to

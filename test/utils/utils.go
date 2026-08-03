@@ -167,7 +167,7 @@ func CreateNamespaceIdempotent(name string) error {
 
 	// `kubectl create ... --dry-run=client -o yaml` renders the Namespace manifest without
 	// touching the cluster; `kubectl apply -f -` then creates-or-no-ops it.
-	create := exec.Command("kubectl", "create", "namespace", name, //nolint:gosec // test utility; name is a hardcoded test constant
+	create := exec.Command("kubectl", "create", "namespace", name, //nolint:gosec // test utility; exec.Command passes argv directly, so name is never shell-interpreted
 		"--dry-run=client", "-o", "yaml")
 	apply := exec.Command("kubectl", "apply", "-f", "-")
 	create.Dir, apply.Dir = dir, dir
@@ -223,7 +223,7 @@ func ApplyResource(createArgs ...string) error {
 	// cluster; `kubectl apply -f -` then creates-or-no-ops it.
 	args := append([]string{"create"}, createArgs...)
 	args = append(args, "--dry-run=client", "-o", "yaml")
-	create := exec.Command("kubectl", args...) //nolint:gosec // test utility; args are hardcoded test constants
+	create := exec.Command("kubectl", args...) //nolint:gosec // test utility; exec.Command passes argv directly, so args are never shell-interpreted
 	apply := exec.Command("kubectl", "apply", "-f", "-")
 	create.Dir, apply.Dir = dir, dir
 	create.Env, apply.Env = env, env
@@ -261,7 +261,7 @@ func ApplyResource(createArgs ...string) error {
 // `--ignore-not-found` (so a re-run on a cluster where teardown already removed the namespace
 // is a no-op) and only warns on any other error, so suite/spec teardown never fails the run.
 func DeleteNamespace(name string) {
-	cmd := exec.Command("kubectl", "delete", "ns", name, "--ignore-not-found") //nolint:gosec // test utility; name is a hardcoded test constant
+	cmd := exec.Command("kubectl", "delete", "ns", name, "--ignore-not-found") //nolint:gosec // test utility; exec.Command passes argv directly, so name is never shell-interpreted
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -283,17 +283,8 @@ func DeleteNamespace(name string) {
 func WaitForWorkloadsDrained(ns string, keepPrefixes ...string) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; ns is a hardcoded test constant
-			"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+		remaining, err := RemainingWorkloadPods(ns, keepPrefixes...)
 		if err == nil {
-			var remaining []string
-			for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
-				name = strings.TrimSpace(name)
-				if name == "" || hasAnyPrefix(name, keepPrefixes) {
-					continue
-				}
-				remaining = append(remaining, name)
-			}
 			if len(remaining) == 0 {
 				return
 			}
@@ -306,6 +297,29 @@ func WaitForWorkloadsDrained(ns string, keepPrefixes ...string) {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// RemainingWorkloadPods returns the names of the pods in ns whose name does not start with one
+// of keepPrefixes — the pods still holding node resources. It is the single listing both drain
+// paths share: WaitForWorkloadsDrained polls it best-effort (warning on timeout), while a spec
+// that must NOT bring up its own stack until the node is free polls it inside an Eventually so
+// the drain becomes a HARD barrier. The error is returned rather than swallowed so a caller can
+// tell an unreadable API apart from a genuinely drained namespace.
+func RemainingWorkloadPods(ns string, keepPrefixes ...string) ([]string, error) {
+	out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; exec.Command passes argv directly, so ns is never shell-interpreted
+		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
+	if err != nil {
+		return nil, err
+	}
+	var remaining []string
+	for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" || hasAnyPrefix(name, keepPrefixes) {
+			continue
+		}
+		remaining = append(remaining, name)
+	}
+	return remaining, nil
 }
 
 // hasAnyPrefix reports whether s starts with any of the given prefixes.
@@ -769,11 +783,26 @@ func crdsPresent(want []string) bool {
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
+	return kindLoad("docker-image", name)
+}
+
+// LoadImageArchiveToKindCluster loads a `docker save` image archive (a tarball carrying the
+// image AND its tags) into the Kind cluster. This is the CI path: the operator image is built
+// ONCE in a shared workflow job, published as a workflow artifact, and every e2e job imports
+// that archive instead of rebuilding the same image on its own runner.
+func LoadImageArchiveToKindCluster(path string) error {
+	return kindLoad("image-archive", path)
+}
+
+// kindLoad shells out to `kind load <source> <ref>` against the cluster the e2e run targets
+// (KIND_CLUSTER, defaulting to kind's own default name), using the same kind binary the
+// Makefile manages (see kindBinary).
+func kindLoad(source, ref string) error {
 	cluster := "kind"
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
 	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	kindOptions := []string{"load", source, ref, "--name", cluster}
 	cmd := exec.Command(kindBinary(), kindOptions...) //nolint:gosec // test utility with trusted input
 	_, err := Run(cmd)
 	return err

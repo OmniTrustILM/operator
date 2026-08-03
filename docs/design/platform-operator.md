@@ -455,7 +455,7 @@ False`** condition with reason `CertManagerNotInstalled` or `GatewayAPINotInstal
 actionable message. It then **requeues** so the edge self-heals once the operator is installed —
 the dynamic `RESTMapper` re-discovers the newly served CRD without an operator restart. A missing
 edge prerequisite never flips the whole `Platform` to `Degraded`. The detector
-(`internal/platform/capabilities`) is generic (it takes any `GroupKind`) and is the **reusable
+(`pkg/capabilities`) is generic (it takes any `GroupKind`) and is the **reusable
 basis for the managed-infra availability checks** (CNPG / RabbitMQ / Keycloak).
 
 ### Infrastructure (`external` or `managed`) — `curated + overrides`

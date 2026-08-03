@@ -388,7 +388,7 @@ Printer columns: `Phase`, `Version` (observedVersion), `Age`.
 
 ### Version resolution (BOM)
 
-The proxy image joins the BOM (`internal/bom`) as a per-component coordinate. With no
+The proxy image joins the BOM (`pkg/bom`) as a per-component coordinate. With no
 `Platform` CR on the restricted-zone cluster to anchor `spec.version`, the rule is:
 **resolve from the operator's active default bundle**, record the result in
 `status.observedVersion`. Operator upgrades may therefore roll the proxy image to the
@@ -424,7 +424,7 @@ workload; revisit if proxy/platform version skew ever becomes breaking.)
   platform calls on deletion**: the platform notices a deleted proxy by its queues
   going idle, and broker topology lifecycle is owned by the platform UI. Children are
   cleaned by ownerRef GC (the user-applied Secret is not owned and not touched).
-- Capability gate: `ServiceMonitor` only, via `internal/platform/capabilities` —
+- Capability gate: `ServiceMonitor` only, via `pkg/capabilities` —
   skip + adjunct `ServiceMonitorReady: False` + requeue when the CRD is absent. This
   follows the Platform controller's `gateServiceMonitors` precedent (and improves on
   Connector's current log-and-skip handling). No other upstream CRDs are involved.

@@ -32,6 +32,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// testNamespace is the target namespace used across the Convert() call sites below.
+const testNamespace = "ilm-ns"
+
 // decode parses an inline YAML values document into the loosely-typed tree the converter
 // consumes, failing the test on a parse error.
 func decode(t *testing.T, doc string) vals {
@@ -100,14 +103,14 @@ letsEncrypt:
   email: ops@example.com
   environment: staging
 `)
-	r := Convert(values, "ilm", "ilm-ns")
+	r := Convert(values, "ilm", testNamespace)
 	spec := r.Platform.Spec
 
 	// metadata
 	assert.Equal(t, "Platform", r.Platform.Kind)
 	assert.Equal(t, "otilm.com/v1alpha1", r.Platform.APIVersion)
 	assert.Equal(t, "ilm", r.Platform.Name)
-	assert.Equal(t, "ilm-ns", r.Platform.Namespace)
+	assert.Equal(t, testNamespace, r.Platform.Namespace)
 
 	// shared image
 	assert.Equal(t, "harbor.example.com", spec.Common.Image.Registry)
@@ -173,7 +176,7 @@ global:
     pgBouncer:
       enabled: true
 `)
-	spec := Convert(values, "ilm", "ilm-ns").Platform.Spec
+	spec := Convert(values, "ilm", testNamespace).Platform.Spec
 	require.NotNil(t, spec.Database.PgBouncer, "an enabled Helm pgBouncer must produce a pgBouncer block")
 	assert.True(t, spec.Database.PgBouncer.Managed,
 		"Helm pgBouncer.enabled must map to CR pgBouncer.managed=true (pooler ON)")

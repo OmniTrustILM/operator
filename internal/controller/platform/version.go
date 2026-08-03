@@ -26,11 +26,17 @@ import (
 	"github.com/Masterminds/semver/v3"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 // reasonDowngradeForbidden is the Degraded condition reason when an explicit spec.version is
 // older than the version already running (status.observedVersion).
 const reasonDowngradeForbidden = "DowngradeForbidden"
+
+// reasonPreviewVersionUpgradeBlocked is the Degraded condition reason when an explicit
+// spec.version resolves to an unreleased (preview) bundle while a different version is
+// already running: a live platform cannot be upgraded onto a preview bundle.
+const reasonPreviewVersionUpgradeBlocked = "PreviewVersionUpgradeBlocked"
 
 // effectivePlatformVersion implements the PIN-ON-CREATE policy: the version the operator
 // reconciles a Platform against, in precedence order, is
@@ -52,6 +58,62 @@ func effectivePlatformVersion(p *otilmv1alpha1.Platform) string {
 		return p.Spec.Version
 	}
 	return p.Status.ObservedVersion
+}
+
+// teardownPlatformVersion resolves the version the DELETION teardown renders against, with the
+// precedence DELIBERATELY REVERSED from effectivePlatformVersion: the RUNNING reality wins over
+// the requested version, i.e. status.observedVersion when pinned, else spec.version.
+//
+// Teardown must reclaim the objects that actually EXIST, and those were rendered from the
+// running version. Two cases make the requested version wrong:
+//
+//   - a blocked upgrade (spec.version names a bundle the version guards refused, e.g. an
+//     unreleased preview) left the platform running the OLD topology, whose object names the
+//     new bundle may have renamed;
+//   - an empty spec.version on a pinned platform would resolve to the operator's built-in
+//     default, which is not necessarily the running version.
+//
+// In both, rendering teardown from spec.version would delete nothing and ORPHAN the live
+// upstream-operator CRs under deletionPolicy=Delete.
+func teardownPlatformVersion(p *otilmv1alpha1.Platform) string {
+	if p.Status.ObservedVersion != "" {
+		return p.Status.ObservedVersion
+	}
+	return p.Spec.Version
+}
+
+// teardownRenderPlatforms returns the platform copies the DELETION teardown renders against —
+// DEEP COPIES with spec.version pinned for rendering only, so the finalizer-removal Update that
+// follows never persists a spec change.
+//
+// The RUNNING version (teardownPlatformVersion) always comes first: it names the objects that
+// certainly exist. A second copy pinned to the REQUESTED spec.version is appended when an
+// upgrade is in flight — spec.version is set, resolves to a known bundle, and differs from the
+// running version — because a released upgrade APPLIES the new version's managed objects BEFORE
+// status.observedVersion is persisted. If reconcile (or that status write) fails in between and
+// the Platform is then deleted with deletionPolicy=Delete, rendering only the running version
+// would ORPHAN the new-version-only upstream CRs, which are prune-excluded by design and so are
+// reclaimed by nothing else.
+//
+// Rendering the UNION is safe in the other direction too: deleting an object that was never
+// created is a no-op (handleManagedInfraDeletion tolerates NotFound), and an unresolvable or
+// equal requested version falls back to the single effective render.
+func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platform {
+	running := p.DeepCopy()
+	running.Spec.Version = teardownPlatformVersion(p)
+	out := []*otilmv1alpha1.Platform{running}
+
+	requested := p.Spec.Version
+	if requested == "" || requested == running.Spec.Version {
+		return out
+	}
+	if _, ok := bom.BundleFor(requested); !ok {
+		// An unsupported version rendered nothing, so there is nothing extra to reclaim.
+		return out
+	}
+	inFlight := p.DeepCopy()
+	inFlight.Spec.Version = requested
+	return append(out, inFlight)
 }
 
 // isPlatformDowngrade reports whether requested is strictly OLDER (by semver) than running.

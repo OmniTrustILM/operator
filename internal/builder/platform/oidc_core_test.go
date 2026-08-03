@@ -23,6 +23,7 @@ SOFTWARE.
 package platform
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -152,10 +153,11 @@ func TestBuildCoreScriptsConfigMapManaged(t *testing.T) {
 	assert.Contains(t, script, "http://ilm-keycloak-service.ns:8080/kc/realms/ilm/protocol/openid-connect/certs")
 
 	// clientId ilm + audiences ["ilm"]; the secret comes from $1 (never inlined).
-	assert.Contains(t, script, `"clientId": "ilm"`)
-	assert.Contains(t, script, `"audiences": ["ilm"]`)
+	assert.Contains(t, script, `"clientId":"ilm"`)
+	assert.Contains(t, script, `"audiences":["ilm"]`)
 	assert.Contains(t, script, "CLIENT_SECRET=$1", "the client secret must be the positional $1, never inlined")
-	assert.Contains(t, script, `"clientSecret": "'"$CLIENT_SECRET"'"`, "the secret is interpolated at runtime from $1")
+	assert.Contains(t, script, `-d "${BODY_HEAD}${CLIENT_SECRET}${BODY_TAIL}"`,
+		"the secret is concatenated at runtime inside ONE double-quoted expansion")
 
 	// The empty-secret branch SKIPS gracefully (exit 0) and never `exit 1`: during early
 	// bring-up $INTERNAL_OAUTH_SECRET resolves empty (the operator relays the Secret only after
@@ -271,10 +273,10 @@ func TestRegisterAdminScriptContent(t *testing.T) {
 	require.NotNil(t, cm)
 	s := cm.Data[adminScriptName]
 	assert.Contains(t, s, "http://localhost:8080/api/v1/local/admins", "must POST to Core's localhost local-admin API")
-	assert.Contains(t, s, `"username": "admin"`)
-	assert.Contains(t, s, `"firstName": "Platform Administrator"`)
-	assert.Contains(t, s, `"lastName": "Admin"`)
-	assert.Contains(t, s, `"email": "admin@example.com"`)
+	assert.Contains(t, s, `"username":"admin"`)
+	assert.Contains(t, s, `"firstName":"Platform Administrator"`)
+	assert.Contains(t, s, `"lastName":"Admin"`)
+	assert.Contains(t, s, `"email":"admin@example.com"`)
 	assert.Contains(t, s, "$ADMIN_CERT", "must read the admin cert from the ADMIN_CERT env")
 	assert.Contains(t, s, "echo $ADMIN_CERT", "echo must be UNQUOTED to flatten the multi-line PEM — a quoted echo leaves embedded newlines that break the JSON body")
 	assert.Contains(t, s, "BEGINCERTIFICATE", "must strip the PEM armor")
@@ -286,4 +288,244 @@ func TestRegisterAdminScriptContent(t *testing.T) {
 func TestBuildCoreScriptsConfigMapNeitherNil(t *testing.T) {
 	assert.Nil(t, BuildCoreScriptsConfigMap(basePlatform()),
 		"no cert admin + no managed Keycloak → no scripts ConfigMap")
+}
+
+// ---- in-pod script request bodies: JSON-composed, heredoc-delivered ---------
+
+// quotedHeredocBodies returns the bodies of every QUOTED heredoc (<<'EOF') in a rendered script
+// plus "outside" — the concatenation of everything else, i.e. the text the shell actually
+// executes. It fails the test unless at least one quoted heredoc is present, which is the
+// property that makes a CR-supplied value inert.
+func quotedHeredocBodies(t *testing.T, script string) (bodies []string, outside string) {
+	t.Helper()
+	const openTok, closeTok = "<<'EOF'\n", "\nEOF\n"
+	rest := script
+	for {
+		i := strings.Index(rest, openTok)
+		if i < 0 {
+			outside += rest
+			break
+		}
+		outside += rest[:i+len(openTok)]
+		rest = rest[i+len(openTok):]
+		j := strings.Index(rest, closeTok)
+		require.GreaterOrEqual(t, j, 0, "a quoted heredoc was opened but never terminated")
+		bodies = append(bodies, rest[:j])
+		rest = rest[j:]
+	}
+	require.NotEmpty(t, bodies, "the request body must be emitted inside a QUOTED heredoc (<<'EOF')")
+	return bodies, outside
+}
+
+// shellStatements returns a script with its comment lines removed, so an assertion about the
+// COMMANDS a script runs is not confounded by prose in the surrounding comments.
+func shellStatements(script string) string {
+	var out []string
+	for _, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// hostileValues is the shared table of values that, in the earlier shape (interpolated into a
+// SINGLE-quoted `curl -d '...'` body), would have closed the quote and handed the remainder to
+// the shell. The last entry is not an attack at all: an apostrophe is legitimate in a human name
+// and the old shape broke on it, so O'Brien is a regression test for real user data.
+func hostileValues() []struct {
+	name  string
+	value string
+} {
+	return []struct {
+		name  string
+		value string
+	}{
+		{name: "command substitution", value: "$(id)"},
+		{name: "backtick command substitution", value: "`id`"},
+		{name: "embedded double quote", value: `a"b`},
+		{name: "embedded single quote", value: `a'b`},
+		{name: "embedded newline", value: "a\nb"},
+		{name: "variable reference", value: "a$VAR"},
+		{name: "command separator", value: "a;b"},
+		{name: "pipeline", value: "a|b"},
+		{name: "the legitimate surname O'Brien", value: "O'Brien"},
+	}
+}
+
+// TestRegisterAdminScriptBodyIsJSONEncoded is the structural guard for register-admin.sh's
+// request body. For each hostile (or merely apostrophe-bearing) value placed in EVERY
+// CR-supplied identity field it asserts:
+//
+//   - the body is emitted inside a QUOTED heredoc, so the shell expands nothing in it;
+//   - the value never appears in text the shell executes;
+//   - the heredoc body round-trips through json.Unmarshal with the field values EXACTLY equal to
+//     the inputs — so O'Brien reaches Core as O'Brien instead of breaking the request;
+//   - no single-quoted `-d '...'` body carrying CR data remains.
+func TestRegisterAdminScriptBodyIsJSONEncoded(t *testing.T) {
+	for _, tc := range hostileValues() {
+		t.Run(tc.name, func(t *testing.T) {
+			p := adminPlatform(&otilmv1alpha1.RegisterAdminSpec{
+				Enabled:     true,
+				Username:    tc.value,
+				Name:        tc.value,
+				LastName:    tc.value,
+				Email:       tc.value,
+				Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
+			})
+			cm := BuildCoreScriptsConfigMap(p)
+			require.NotNil(t, cm)
+			script := cm.Data[adminScriptName]
+
+			// STRUCTURE: one quoted heredoc holds the whole body; the old single-quoted
+			// `-d '...'` construction is gone for good.
+			bodies, outside := quotedHeredocBodies(t, script)
+			require.Len(t, bodies, 1, "register-admin.sh emits exactly one heredoc body")
+			assert.Contains(t, script, "<<'EOF'", "the heredoc delimiter must be QUOTED")
+			assert.Contains(t, script, `-d "${BODY}"`, "curl must send the composed body")
+			assert.NotContains(t, script, "-d '", "no single-quoted body may carry CR data")
+			assert.NotContains(t, bodies[0], "\n",
+				"the JSON body is one line, so no value can forge the heredoc terminator")
+
+			// ROUND-TRIP: the body is valid JSON and every field equals its input exactly.
+			var got adminRequest
+			require.NoError(t, json.Unmarshal([]byte(bodies[0]), &got),
+				"the heredoc body must be valid JSON (encoding/json composed it)")
+			assert.Equal(t, tc.value, got.Username)
+			assert.Equal(t, tc.value, got.FirstName)
+			assert.Equal(t, tc.value, got.LastName)
+			assert.Equal(t, tc.value, got.Email)
+			assert.True(t, got.Enabled, "the admin is registered enabled")
+			assert.Equal(t, adminCertPlaceholder, got.CertificateData,
+				"the certificate slot stays a placeholder the pod fills in at runtime")
+
+			// INERTNESS: the value appears ONLY in the heredoc body.
+			assert.NotContains(t, outside, tc.value,
+				"the identity value must not appear anywhere the shell evaluates it")
+		})
+	}
+}
+
+// TestRegisterAdminScriptOmitsUnsetLastName locks the optional-surname behaviour through the
+// JSON path: an unset spec.registerAdmin.lastName omits the KEY entirely (omitempty) rather than
+// POSTing an empty "lastName" to Core.
+func TestRegisterAdminScriptOmitsUnsetLastName(t *testing.T) {
+	p := adminPlatform(&otilmv1alpha1.RegisterAdminSpec{
+		Enabled: true, Username: "admin", Name: "Platform Administrator", Email: "admin@example.com",
+		Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
+	})
+	cm := BuildCoreScriptsConfigMap(p)
+	require.NotNil(t, cm)
+	bodies, _ := quotedHeredocBodies(t, cm.Data[adminScriptName])
+	require.Len(t, bodies, 1)
+	assert.NotContains(t, bodies[0], "lastName", "an unset surname must omit the JSON field entirely")
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(bodies[0]), &raw))
+	assert.NotContains(t, raw, "lastName")
+}
+
+// TestRegisterAdminScriptCertSubstitutionIsBase64Safe locks the ONE runtime substitution in
+// register-admin.sh: the base64 $CERT replaces the placeholder via sed with a "|" delimiter.
+// Base64's charset (A-Za-z0-9+/=) contains neither the delimiter nor sed's "&" nor a backslash,
+// so the certificate's contents cannot subvert the substitution.
+func TestRegisterAdminScriptCertSubstitutionIsBase64Safe(t *testing.T) {
+	cm := BuildCoreScriptsConfigMap(adminCertPlatform())
+	require.NotNil(t, cm)
+	script := cm.Data[adminScriptName]
+	assert.Contains(t, script, `sed "s|`+adminCertPlaceholder+`|${CERT}|"`,
+		"the cert substitution must use a | delimiter, which base64 cannot contain")
+	assert.NotContains(t, script, `"'"$CERT"'"`,
+		"the cert must no longer be spliced into a single-quoted shell body")
+}
+
+// TestRegisterInternalKeycloakScriptBodyIsJSONEncoded is the structural guard for
+// register-internal-keycloak.sh's request body. spec.keycloak.realm and the platform hostname
+// both reach it through composed URLs, so each is driven with every hostile value and the
+// assertions mirror the admin script's: quoted heredocs, the value never in executable text, and
+// a body that round-trips through json.Unmarshal with the URLs exactly as composed.
+func TestRegisterInternalKeycloakScriptBodyIsJSONEncoded(t *testing.T) {
+	fields := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform, string)
+	}{
+		{
+			name: "keycloak realm",
+			mutate: func(p *otilmv1alpha1.Platform, v string) {
+				p.Spec.Keycloak.Realm = v
+			},
+		},
+		{
+			name: "platform hostName",
+			mutate: func(p *otilmv1alpha1.Platform, v string) {
+				p.Spec.Common.HostName = v
+			},
+		},
+		{
+			name: "edge host",
+			mutate: func(p *otilmv1alpha1.Platform, v string) {
+				p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: true, Host: v}
+			},
+		},
+	}
+	for _, f := range fields {
+		for _, tc := range hostileValues() {
+			t.Run(f.name+"/"+tc.name, func(t *testing.T) {
+				p := managedKCPlatform(nil)
+				f.mutate(p, tc.value)
+				cm := BuildCoreScriptsConfigMap(p)
+				require.NotNil(t, cm)
+				script := cm.Data[oidcScriptName]
+
+				// STRUCTURE: two quoted heredocs (the body split at the secret slot), and no
+				// single-quoted body carrying CR data.
+				bodies, outside := quotedHeredocBodies(t, script)
+				require.Len(t, bodies, 2, "the body is split at the clientSecret slot")
+				assert.Contains(t, script, "<<'EOF'", "the heredoc delimiters must be QUOTED")
+				assert.NotContains(t, script, "-d '", "no single-quoted body may carry CR data")
+				for _, b := range bodies {
+					assert.NotContains(t, b, "\n",
+						"each half is one line, so no value can forge the heredoc terminator")
+				}
+
+				// ROUND-TRIP: rejoining the halves around a secret yields valid JSON whose URLs
+				// carry the value verbatim.
+				const secret = "s3cr3t-from-keycloak"
+				var got oidcProviderRequest
+				require.NoError(t, json.Unmarshal([]byte(bodies[0]+secret+bodies[1]), &got),
+					"the rejoined body must be valid JSON (encoding/json composed it)")
+				assert.Equal(t, secret, got.ClientSecret,
+					"the runtime secret lands in the clientSecret slot")
+				assert.Contains(t, got.IssuerURL, tc.value, "the issuer URL carries the value verbatim")
+				assert.Equal(t, OIDCClientID, got.ClientID)
+				assert.Equal(t, []string{oidcScopeOpenID}, got.Scope)
+				assert.Equal(t, []string{OIDCClientID}, got.Audiences)
+				assert.Equal(t, oidcSkewSeconds, got.Skew)
+
+				// INERTNESS: the value appears ONLY inside the heredoc bodies.
+				assert.NotContains(t, outside, tc.value,
+					"the value must not appear anywhere the shell evaluates it")
+			})
+		}
+	}
+}
+
+// TestRegisterInternalKeycloakScriptKeepsSecretOutOfExtraArgv locks the secret-handling
+// invariant of the split-body shape: the secret is concatenated inside ONE double-quoted
+// expansion in curl's -d argument (its exposure is unchanged from before), and it never enters a
+// sed program or any other command.
+func TestRegisterInternalKeycloakScriptKeepsSecretOutOfExtraArgv(t *testing.T) {
+	cm := BuildCoreScriptsConfigMap(managedKCPlatform(nil))
+	require.NotNil(t, cm)
+	script := cm.Data[oidcScriptName]
+
+	assert.Contains(t, script, `-d "${BODY_HEAD}${CLIENT_SECRET}${BODY_TAIL}"`,
+		"the secret must be concatenated inside ONE double-quoted expansion")
+	assert.NotContains(t, shellStatements(script), "sed",
+		"the client secret must never enter a sed program")
+	assert.Equal(t, 1, strings.Count(script, "${CLIENT_SECRET}"),
+		"the secret is referenced exactly once, in curl's -d argument")
+	assert.NotContains(t, script, clientSecretPlaceholder,
+		"the placeholder is consumed by the split; it must not survive into the script")
 }

@@ -539,3 +539,26 @@ func TestManagedMessagingTopologyIsBOMData(t *testing.T) {
 	assert.Len(t, findManagedObjs(objs, rmqKindQueue), len(topo.Queues))
 	assert.Len(t, findManagedObjs(objs, rmqKindBinding), len(topo.Bindings))
 }
+
+// TestResolveManagedMessaging2190 proves a spec.version 2.19.0 platform renders the
+// renamed topology: vhost "/", 35 objects (1 cluster + 1 vhost + 5 users + 5
+// permissions + 2 exchanges + 11 queues + 10 bindings), and the status-poll queue.
+func TestResolveManagedMessaging2190(t *testing.T) {
+	p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = "2.19.0" })
+	objs := ResolveManagedMessaging(p)
+	assert.Len(t, objs, 35)
+
+	vhost := findManagedObj(objs, rmqKindVhost)
+	require.NotNil(t, vhost)
+	name, _, _ := unstructured.NestedString(vhost.Object, "spec", "name")
+	assert.Equal(t, "/", name)
+
+	queues := findManagedObjs(objs, rmqKindQueue)
+	require.Len(t, queues, 11)
+	var queueNames []string
+	for _, q := range queues {
+		n, _, _ := unstructured.NestedString(q.Object, "spec", "name")
+		queueNames = append(queueNames, n)
+	}
+	assert.Contains(t, queueNames, "provider.status-poll")
+}

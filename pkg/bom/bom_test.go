@@ -26,6 +26,30 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Test-local version literals. These are DELIBERATELY independent of the production
+// version2170/version2180/version2190 consts in bom.go: this suite is a full-matrix
+// characterization of the bundle DATA, and reusing the production consts here would let
+// a bundle's key silently drift with its own const instead of being pinned by an
+// independent literal.
+const (
+	testVersion2170 = "2.17.0"
+	testVersion2180 = "2.18.0"
+	testVersion2190 = "2.19.0"
+	testVersion2100 = "2.10.0"
+	testVersion290  = "2.9.0"
+)
+
+// Test-local literals for the 2.19.0 time-quality/provider queue names, independent of
+// the production queue name consts in bom.go for the same reason as the version
+// literals above.
+const (
+	testQueueProviderStatusPoll       = "provider.status-poll"
+	testQueueTimeQualityConfig        = "time-quality.config"
+	testQueueTimeQualityConfigRequest = "time-quality.config-request"
+	testQueueTimeQualityResults       = "time-quality.results"
 )
 
 func TestLookupReturnsComponentImageForVersion(t *testing.T) {
@@ -58,8 +82,11 @@ func TestWiringProfileRendersDatabaseURL(t *testing.T) {
 		w.DatabaseURL("db.example.com", 5432, "ilmdb"))
 }
 
+// TestDefaultVersionMatchesCoreTag pins a release invariant: the DEFAULT bundle's
+// version-aligned core tag must equal DefaultVersion. The tag is a literal in the
+// bundle data (see TestBundleIdentityImmuneToDefaultVersion) — this test is what
+// forces the release-day flip PR to retag core when it moves DefaultVersion.
 func TestDefaultVersionMatchesCoreTag(t *testing.T) {
-	// The operator's platform version tracks the core image tag; keep them in lockstep.
 	core, ok := Lookup("core")
 	assert.True(t, ok)
 	assert.Equal(t, DefaultVersion, core.Tag)
@@ -156,11 +183,11 @@ func TestBundleForEmptyResolvesDefault(t *testing.T) {
 // TestBundleForKnownVersion proves the shipped version resolves and carries the expected
 // version-specific data (the core image tag + the infra defaults the upgrade guard reads).
 func TestBundleForKnownVersion(t *testing.T) {
-	b, ok := BundleFor("2.18.0")
+	b, ok := BundleFor(testVersion2180)
 	assert.True(t, ok)
 	img, found := b.Lookup("core")
 	assert.True(t, found)
-	assert.Equal(t, "2.18.0", img.Tag)
+	assert.Equal(t, testVersion2180, img.Tag)
 	// Infra default versions live in the bundle (Phase-2 upgrade guard reads them).
 	// Pin all three exactly so a silent regression of the managed PostgreSQL / RabbitMQ /
 	// Keycloak default fails the fast `make test` loop instead of only the managed e2e.
@@ -192,11 +219,74 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 	}
 }
 
-// TestDefaultVersionIsNewest pins the invariant DefaultVersion must hold: it equals the
-// HIGHEST (newest) bundle key, so an unset spec.version resolves the operator's newest.
-func TestDefaultVersionIsNewest(t *testing.T) {
-	vs := SupportedVersions() // sorted ascending
-	assert.Equal(t, vs[len(vs)-1], DefaultVersion, "DefaultVersion must be the newest shipped bundle")
+// TestSupportedVersionsExplicit pins the advertised (released) version set exactly —
+// adding a preview bundle must NOT change this list until the release-day flip PR
+// marks it Released and updates this expectation.
+func TestSupportedVersionsExplicit(t *testing.T) {
+	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+}
+
+// TestDefaultVersionIsReleased replaces the old "newest key" invariant: DefaultVersion
+// must be a RELEASED bundle (the release-day flip is what makes a preview eligible), and
+// must be the NEWEST released one — SupportedVersions is semver-ascending, so the default
+// is its last entry. That second assertion is the guard against a release-day flip that
+// marks a newer bundle Released but forgets to move DefaultVersion, which would leave fresh
+// installs silently landing on the older release.
+func TestDefaultVersionIsReleased(t *testing.T) {
+	b, ok := BundleFor(DefaultVersion)
+	assert.True(t, ok)
+	assert.True(t, b.Released, "DefaultVersion must point at a released bundle")
+
+	released := SupportedVersions()
+	require.NotEmpty(t, released)
+	assert.Equal(t, released[len(released)-1], DefaultVersion,
+		"DefaultVersion must be the NEWEST released version (the last SupportedVersions entry)")
+}
+
+// TestVersionOrderingIsSemver proves ordering is numeric per segment, not lexicographic
+// (lexicographic would sort 2.9.0 after 2.10.0).
+func TestVersionOrderingIsSemver(t *testing.T) {
+	assert.True(t, semverLess(testVersion290, testVersion2100))
+	assert.True(t, semverLess(testVersion2180, testVersion2190))
+	assert.False(t, semverLess(testVersion2190, testVersion2180))
+	assert.False(t, semverLess(testVersion2180, testVersion2180))
+}
+
+// TestSortVersionsIsSemverNotLexicographic exercises the ONE sort both SupportedVersions and
+// AllVersions run, with ADVERSARIAL keys that lexicographic ordering gets wrong (2.10.0 <
+// 2.9.0 as strings). Swapping sortVersions' comparison for sort.Strings must fail here.
+func TestSortVersionsIsSemverNotLexicographic(t *testing.T) {
+	cases := []struct {
+		name     string
+		in, want []string
+	}{
+		{"double-digit minor sorts after single-digit", []string{testVersion2100, testVersion290}, []string{testVersion290, testVersion2100}},
+		{"double-digit patch sorts after single-digit", []string{"2.18.10", "2.18.9"}, []string{"2.18.9", "2.18.10"}},
+		{"already ascending is preserved", []string{testVersion290, testVersion2100, "3.0.0"}, []string{testVersion290, testVersion2100, "3.0.0"}},
+		{"mixed majors", []string{"10.0.0", "9.9.9", "2.100.0"}, []string{"2.100.0", "9.9.9", "10.0.0"}},
+		{"single element", []string{testVersion2190}, []string{testVersion2190}},
+		{"empty", []string{}, []string{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, sortVersions(c.in))
+		})
+	}
+}
+
+// TestVersionListsShareTheSemverSort proves the public lists go through that same helper: both
+// come back ascending, and AllVersions is a superset of SupportedVersions (the previews are the
+// difference), so "newest is last" holds for both.
+func TestVersionListsShareTheSemverSort(t *testing.T) {
+	for _, vs := range [][]string{SupportedVersions(), AllVersions()} {
+		require.NotEmpty(t, vs)
+		assert.Equal(t, sortVersions(append([]string{}, vs...)), vs, "the list must already be semver-ascending")
+	}
+	for _, v := range SupportedVersions() {
+		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
+	}
+	assert.Equal(t, testVersion2190, AllVersions()[len(AllVersions())-1],
+		"the preview bundle is the newest key, and only AllVersions carries it")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -223,8 +313,121 @@ func TestDefaultBundleHasProxyComponent(t *testing.T) {
 }
 
 func TestPreRebrandBundleHasNoProxyComponent(t *testing.T) {
-	b, ok := BundleFor("2.17.0")
+	b, ok := BundleFor(testVersion2170)
 	assert.True(t, ok)
 	_, ok = b.Lookup(ComponentProxy)
 	assert.False(t, ok, "the proxy component did not exist pre-rebrand")
+}
+
+// TestBundleIdentityImmuneToDefaultVersion pins the demotion-trap fix (a
+// characterization test, deliberately green before AND after the refactor): every
+// bundle is keyed by its own version literal and version-aligned tags are literals,
+// so changing DefaultVersion can never relabel a bundle or retag its images.
+func TestBundleIdentityImmuneToDefaultVersion(t *testing.T) {
+	for _, key := range []string{testVersion2170, testVersion2180} {
+		_, ok := BundleFor(key)
+		assert.True(t, ok, "bundle %q must be keyed by its literal version", key)
+	}
+	b, _ := BundleFor(testVersion2180)
+	assert.Equal(t, testVersion2180, b.Components["core"].Tag, "core tag must be a literal, not DefaultVersion")
+	assert.Equal(t, testVersion2180, b.Components["fe-administrator"].Tag, "fe-administrator tag must be a literal, not DefaultVersion")
+}
+
+// TestTopologyCarriesVhost pins the per-bundle vhost the migration trigger compares:
+// pre-2.19 topologies declare "czertainly".
+func TestTopologyCarriesVhost(t *testing.T) {
+	for _, v := range []string{testVersion2170, testVersion2180} {
+		b, ok := BundleFor(v)
+		assert.True(t, ok)
+		assert.Equal(t, "czertainly", b.Messaging.DefaultVirtualHost, "bundle %s", v)
+	}
+}
+
+// TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
+// helm-charts 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a
+// provisioning-exchange bug through review once already.
+func TestBundle2190(t *testing.T) {
+	b, ok := BundleFor(testVersion2190)
+	assert.True(t, ok, "2.19.0 must resolve via explicit spec.version")
+	assert.False(t, b.Released, "2.19.0 stays preview until the release-day flip PR")
+	assert.True(t, b.HasProvisioning)
+
+	// Advertised set must NOT change while 2.19.0 is preview.
+	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, AllVersions())
+
+	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag
+	// (2026-08-03): auth bumped to 1.7.0 and scheduler to 1.1.1 in the release cut.
+	assert.Equal(t, map[string]Image{
+		"core":                 {Name: "core", Tag: testVersion2190},
+		"auth":                 {Name: "auth", Tag: "1.7.0"},
+		"auth-opa-policies":    {Name: "auth-opa-policies", Tag: "1.4.1"},
+		"proxy":                {Name: "proxy", Tag: "1.0.0"},
+		"opa":                  {Name: "opa", Tag: "1.10.0-static"},
+		"curl":                 {Name: "curl", Tag: "8.16.0"},
+		"scheduler":            {Name: "scheduler", Tag: "1.1.1"},
+		"fe-administrator":     {Name: "frontend-administrator", Tag: testVersion2190},
+		"utils":                {Name: "utils-service", Tag: "1.0.2"},
+		"api-gateway":          {Name: "kong", Tag: "3.9.1"},
+		"provisioning":         {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+		"keycloak-theme":       {Name: "keycloak-theme", Tag: "0.1.4"},
+		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+	}, b.Components)
+
+	// Wiring: the 2.19.0 env changes + the provisioning proxy-exchange rename. The
+	// released tag renamed the provisioning service's logging var too (it was still
+	// _CZERTAINLY at development HEAD — the release cut changed it).
+	assert.Equal(t, "LOGGING_LEVEL_COM_OTILM", b.Wiring.LoggingLevelEnv)
+	assert.Equal(t, "MESSAGING_TIME_QUALITY_ENABLED", b.Wiring.TimeQualityEnabledEnv)
+	assert.Equal(t, "PLATFORM_INSTANCE_ID", b.Wiring.PlatformInstanceIDEnv)
+	assert.Equal(t, "ilm-proxy", b.Wiring.Provisioning.DefaultExchange,
+		"PROXY_EXCHANGE default must follow the 2.19.0 exchange rename (charts 6aa78a4)")
+	assert.Equal(t, "LOGGING_LEVEL_COM_OTILM", b.Wiring.Provisioning.LoggingLevelEnv,
+		"provisioning-rabbitmq logging env IS renamed at the released 2.19.0 tag")
+
+	// Messaging topology: vhost, exchanges (name+type+durability), users, queues, bindings.
+	m := b.Messaging
+	assert.Equal(t, "/", m.DefaultVirtualHost)
+	assert.Equal(t, []MessagingExchange{
+		{Name: "ilm", Type: "direct", Durable: true},
+		{Name: "ilm-proxy", Type: "topic", Durable: true},
+	}, m.Exchanges)
+	assert.Equal(t, []MessagingUser{
+		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
+		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.status-poll$|^time-quality\.(config-request|results)$`},
+		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
+	}, m.Users)
+	assert.Equal(t, []MessagingQueue{
+		{Name: "core", Durable: true},
+		{Name: "core.audit-logs", Durable: true},
+		{Name: "core.notifications", Durable: true},
+		{Name: "core.scheduler", Durable: true},
+		{Name: "core.actions", Durable: true},
+		{Name: "core.validation", Durable: true},
+		{Name: "core.events", Durable: true},
+		{Name: testQueueProviderStatusPoll, Durable: true},
+		{Name: testQueueTimeQualityConfig, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
+		{Name: testQueueTimeQualityConfigRequest, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
+		{Name: testQueueTimeQualityResults, Durable: true},
+	}, m.Queues)
+	assert.Equal(t, []MessagingBinding{
+		{Source: "ilm", Destination: "core.audit-logs", RoutingKey: "audit-logs"},
+		{Source: "ilm", Destination: "core.notifications", RoutingKey: "notification"},
+		{Source: "ilm", Destination: "core.actions", RoutingKey: "action"},
+		{Source: "ilm", Destination: "core.scheduler", RoutingKey: "scheduler"},
+		{Source: "ilm", Destination: "core.validation", RoutingKey: "validation"},
+		{Source: "ilm", Destination: "core.events", RoutingKey: "event"},
+		{Source: "ilm", Destination: testQueueProviderStatusPoll, RoutingKey: testQueueProviderStatusPoll},
+		{Source: "ilm", Destination: testQueueTimeQualityConfig, RoutingKey: testQueueTimeQualityConfig},
+		{Source: "ilm", Destination: testQueueTimeQualityConfigRequest, RoutingKey: testQueueTimeQualityConfigRequest},
+		{Source: "ilm", Destination: testQueueTimeQualityResults, RoutingKey: testQueueTimeQualityResults},
+	}, m.Bindings)
+
+	// Engine versions carry over from 2.18.0 (no engine bumps this cycle).
+	b18, _ := BundleFor(testVersion2180)
+	assert.Equal(t, b18.RabbitMQVersion, b.RabbitMQVersion)
+	assert.Equal(t, b18.CNPGVersion, b.CNPGVersion)
+	assert.Equal(t, b18.KeycloakVersion, b.KeycloakVersion)
 }

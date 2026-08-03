@@ -28,6 +28,7 @@ SOFTWARE.
 package platform
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	"github.com/OmniTrustILM/operator/pkg/bom"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -120,27 +122,26 @@ func imageArgs(shared, comp otilmv1alpha1.ImageSpec) []string {
 }
 
 // DefaultImageRegistry mutates the platform's effective shared ImageSpec in place,
-// defaulting an unset spec.image.registry / spec.image.repository to the public ILM
-// registry coordinates (bom.DefaultImageRegistry / bom.DefaultImageRepository). It is
-// the single chokepoint applied once per reconcile (and once in RenderPlatform) BEFORE
-// any common.ResolveImage call,
-// so every ILM component image resolves to hub.omnitrustregistry.com/ilm/<name>:<tag>
-// out of the box rather than the bare "<name>:<tag>" Docker would treat as docker.io.
+// defaulting an unset spec.image.registry to the public ILM registry host
+// (bom.DefaultImageRegistry). It is registry-only defaulting: the repository defaults
+// lazily inside common.ResolveImage (bundle-aware — see resolveRepository), never
+// eagerly here, so nothing about "user set ilm" vs. "defaulted" is lost before
+// resolution. It is applied once per reconcile (and once in RenderPlatform) BEFORE any
+// common.ResolveImage call, so every ILM component image resolves to
+// hub.omnitrustregistry.com/<repository>/<name>:<tag> out of the box rather than the
+// bare "<name>:<tag>" Docker would treat as docker.io.
 //
-// A user-set spec.image.registry / spec.image.repository is left untouched (only empty
-// fields are filled), so an explicit override still wins. It does NOT touch per-
-// component image overrides (spec.<component>.image) — those flow through ResolveImage's
-// per-field precedence and may legitimately point a single component elsewhere; an
-// unset per-component field falls back to this defaulted shared ImageSpec. Defaulting
-// here (not via a kubebuilder marker on the shared ImageSpec type) keeps the default
-// platform-only: ImageSpec is shared with Connector, which has no version bundle and
-// must not inherit the platform registry.
+// A user-set spec.image.registry is left untouched (only an empty field is filled), so
+// an explicit override still wins. It does NOT touch per-component image overrides
+// (spec.<component>.image) — those flow through ResolveImage's per-field precedence and
+// may legitimately point a single component elsewhere. Defaulting here (not via a
+// kubebuilder marker on the shared ImageSpec type) keeps the default platform-only:
+// ImageSpec is shared with Connector, which has no version bundle and must not inherit
+// the platform registry. Nothing here is ever persisted back to the stored CR — see the
+// controller's ordering invariant (finalizer handling runs BEFORE this call).
 func DefaultImageRegistry(p *otilmv1alpha1.Platform) {
 	if p.Spec.Common.Image.Registry == "" {
 		p.Spec.Common.Image.Registry = bom.DefaultImageRegistry
-	}
-	if p.Spec.Common.Image.Repository == "" {
-		p.Spec.Common.Image.Repository = bom.DefaultImageRepository
 	}
 }
 
@@ -157,7 +158,7 @@ func ResolveCore(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: "core", Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Core.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		// Recreate: Core runs schema migrations at startup. A rolling update would briefly run the
 		// old and new pods together; Recreate terminates the old pod first so a migrating pod is
@@ -485,7 +486,7 @@ func ResolveScheduler(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: schedulerName, Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Scheduler.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		Command:        imageCommand(p.Spec.Common.Image, p.Spec.Scheduler.Image),
 		Args:           imageArgs(p.Spec.Common.Image, p.Spec.Scheduler.Image),
@@ -542,20 +543,49 @@ func schedulerProbes() common.Probes {
 	return httpProbes("/health/readiness", 15, "/health/liveness")
 }
 
+// Script-local wiring for the broker-reachability wait loops (wait-for-messaging-service on
+// scheduler, wait-for-auth on Core). These env var names are deliberately NOT part of the
+// version wiring profile: nothing but these two generated scripts reads them, and they carry
+// only non-secret coordinates.
+//
+// SECURITY: in external mode the broker host is spec.messaging.host — user-supplied data. It
+// is passed as a Kubernetes env VALUE (kubelet sets env verbatim; no shell ever evaluates it)
+// and read back as a QUOTED parameter expansion, which the shell never re-parses as syntax.
+// Command substitution, backticks, quotes, `;`, `|` and newlines in the host are therefore
+// inert: they cannot reach a shell command position at all. The CRD's charset pattern on the
+// field is defence in depth. Interpolating the host into the script source (the earlier shape)
+// executed whatever it contained, once per poll iteration.
+const (
+	mqWaitHostEnv = "MQ_WAIT_HOST"
+	mqWaitPortEnv = "MQ_WAIT_PORT"
+	// mqWaitLoop polls the broker's AMQP port, reading the coordinates from the quoted env
+	// vars above rather than from interpolated script text.
+	mqWaitLoop = `while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done`
+)
+
+// messagingWaitEnv returns the script-local env carrying the resolved broker coordinates for
+// the wait loops: plain values, never a credential and never a Secret reference.
+func messagingWaitEnv(mq MessagingConnection) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: mqWaitHostEnv, Value: mq.Host},
+		{Name: mqWaitPortEnv, Value: strconv.Itoa(int(mq.Port))},
+	}
+}
+
 // waitForMessagingInitContainer returns the "wait-for-messaging-service" init
 // container used by scheduler: a simple nc loop that blocks until the
-// broker AMQP port is reachable.
+// broker AMQP port is reachable. The coordinates arrive as env values (see mqWaitLoop).
 func waitForMessagingInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
 	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
 	// Resolve the broker host/port mode-agnostically so a managed broker waits on the
 	// RabbitMQ Service, an external one on the caller's host.
 	mq := ResolveMessagingConnection(p)
-	script := fmt.Sprintf("while ! nc -z %s %d; do sleep 1; done &&\necho \"messaging service seems to be started\"\n",
-		mq.Host, mq.Port)
+	script := mqWaitLoop + " &&\necho \"messaging service seems to be started\"\n"
 	return corev1.Container{
 		Name:            "wait-for-messaging-service",
 		Image:           image,
 		ImagePullPolicy: policy,
+		Env:             messagingWaitEnv(mq),
 		Command:         []string{binSh, "-c", script},
 		// Read-only root filesystem: ENABLED. A pure nc-poll loop writes nothing to disk.
 		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
@@ -575,7 +605,7 @@ func ResolveUtils(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: "utils", Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Utils.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		Command: imageCommand(p.Spec.Common.Image, p.Spec.Utils.Image),
 		Args:    imageArgs(p.Spec.Common.Image, p.Spec.Utils.Image),
@@ -613,7 +643,7 @@ func ResolveAuthOpaPolicies(p *otilmv1alpha1.Platform) common.Component {
 	image, policy := common.ResolveImage(resolveBundle(p).Lookup, authOPAPoliciesName, p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image)
 	c := common.Component{
 		Name: authOPAPoliciesName, Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.AuthOpaPolicies.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		Command: imageCommand(p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image),
 		Args:    imageArgs(p.Spec.Common.Image, p.Spec.AuthOpaPolicies.Image),
@@ -657,7 +687,7 @@ func ResolveAuth(p *otilmv1alpha1.Platform) common.Component {
 	c := common.Component{
 		Name: authName, Instance: p.Name, Namespace: p.Namespace,
 		ContainerName: "auth", // the container is named "auth", not "auth"
-		Image:         image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image:         image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Auth.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		// Recreate: auth runs DB schema migrations at startup — never run two migrating
 		// pods concurrently (see Component.Recreate / Core above).
@@ -727,7 +757,7 @@ func ResolveFeAdministrator(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: feAdministratorName, Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: p.Spec.Common.Image.PullSecrets,
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.FeAdministrator.Image.PullSecrets),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
 		Command: imageCommand(p.Spec.Common.Image, p.Spec.FeAdministrator.Image),
 		Args:    imageArgs(p.Spec.Common.Image, p.Spec.FeAdministrator.Image),
@@ -825,15 +855,116 @@ func coreInitContainers(p *otilmv1alpha1.Platform) []corev1.Container {
 	return inits
 }
 
+// Placeholders and fixed values of the per-instance queue registration request. The queue
+// name and routing key are resolved IN THE POD from `hostname`, so the rendered JSON carries
+// the literal ${HOSTNAME} placeholder that the script substitutes at runtime.
+const (
+	hostnamePlaceholder        = "${HOSTNAME}"
+	queueExpiresProperty       = "x-expires"
+	instanceQueueExpiresMillis = "1800000"
+	// defaultInstanceQueueRoutingKey is the binding key each replica's queue is bound
+	// under when spec.provisioning.deploy.routingKey is unset.
+	defaultInstanceQueueRoutingKey = "proxymessage.*." + hostnamePlaceholder
+	// jsonNull is the value an unusable queue-argument value degrades to, so the composed
+	// body stays valid JSON and the builder stays a total function.
+	jsonNull = "null"
+)
+
+// provisionQueueRequest is the POST body the provision-instance-queue init container sends to
+// the provisioning API's /api/v1/queues endpoint. It exists so the body is composed by
+// encoding/json — which escapes every value — instead of by string interpolation.
+//
+// Properties values are json.RawMessage because a queue argument is arbitrary JSON defined by
+// the provisioning service, not by the operator. encoding/json COMPACTS every RawMessage it
+// writes, so no argument value can introduce a newline into the one-line body — the property
+// the quoted heredoc relies on to keep its terminator unforgeable, and the one that lets a
+// single `read -r` capture the whole body; provisionQueueArgumentValue guarantees each raw
+// value is valid JSON first, keeping the marshal infallible.
+type provisionQueueRequest struct {
+	Name       string                     `json:"name"`
+	Exchange   string                     `json:"exchange"`
+	RoutingKey string                     `json:"routingKey"`
+	Properties map[string]json.RawMessage `json:"properties"`
+}
+
+// provisionQueueRoutingKey resolves the binding key of the per-instance queue:
+// spec.provisioning.deploy.routingKey when set, else the operator default
+// "proxymessage.*.${HOSTNAME}". The ${HOSTNAME} token in either is substituted from the pod's
+// own hostname at runtime.
+func provisionQueueRoutingKey(p *otilmv1alpha1.Platform) string {
+	if d := p.Spec.Provisioning.Deploy; d != nil && d.RoutingKey != "" {
+		return d.RoutingKey
+	}
+	return defaultInstanceQueueRoutingKey
+}
+
+// provisionQueueProperties resolves the queue arguments sent with the registration request:
+// spec.provisioning.deploy.queueArguments when set — REPLACING the default outright, since a
+// provisioning service ignores arguments it does not recognise and falls back to its own
+// defaults — else the operator default (x-expires: 1800000). A repeated name is rejected at
+// admission by the field's list-map key; should one still reach here, the last entry wins and
+// the rendered order stays stable (encoding/json sorts map keys).
+func provisionQueueProperties(p *otilmv1alpha1.Platform) map[string]json.RawMessage {
+	d := p.Spec.Provisioning.Deploy
+	if d == nil || len(d.QueueArguments) == 0 {
+		return map[string]json.RawMessage{queueExpiresProperty: json.RawMessage(instanceQueueExpiresMillis)}
+	}
+	props := make(map[string]json.RawMessage, len(d.QueueArguments))
+	for _, a := range d.QueueArguments {
+		props[a.Name] = provisionQueueArgumentValue(a.Value)
+	}
+	return props
+}
+
+// provisionQueueArgumentValue returns a queue argument's value as a raw JSON message, falling
+// back to JSON null for an absent or non-parseable value. It keeps the request marshal
+// infallible (encoding/json rejects an invalid RawMessage), so the builder never has to
+// return an error for a value admission already validated.
+func provisionQueueArgumentValue(v apiextensionsv1.JSON) json.RawMessage {
+	if len(v.Raw) > 0 && json.Valid(v.Raw) {
+		return json.RawMessage(v.Raw)
+	}
+	return json.RawMessage(jsonNull)
+}
+
 // provisionInstanceQueueInitContainer returns the "provision-instance-queue" init
 // container rendered on Core when proxy support is enabled and a provisioning API
 // is configured (see coreInitContainers). It registers this pod's own per-instance
 // AMQP queue with the provisioning API by POSTing to <apiURL>/api/v1/queues, naming
-// the queue after the pod hostname, and retries until the call succeeds (so the
-// queue exists before Core starts consuming). The optional X-API-Key header is
+// the queue after the pod hostname, and retries the TRANSIENT failures until the call
+// succeeds (so the queue exists before Core starts consuming) while failing fast on a
+// permanent one. The optional X-API-Key header is
 // sourced via secretKeyRef from the provisioning Secret (spec.provisioning.
 // apiKeySecretRef) — never inlined — and the request omits the header when no key
 // is configured. The builder SCC-hardens it.
+//
+// The request body's exchange, routing key and queue arguments are the configurable trio at
+// spec.provisioning.deploy ({exchange,routingKey,queueArguments}); each falls back to the
+// operator default when unset (see provisionQueueRoutingKey / provisionQueueProperties).
+//
+// The proxy exchange the queue is bound to is VERSION-DEPENDENT (2.18.0: czertainly-proxy;
+// 2.19.0: ilm-proxy), so it is rendered from provisioningExchange — the SAME resolution the
+// provisioning builder uses (spec.provisioning.deploy.exchange override, else the bundle
+// wiring's DefaultExchange). Hard-coding it would make this loop retry forever against a
+// platform whose bundle declares a different exchange.
+//
+// SECURITY: the request body is built in Go with encoding/json (so every value is correctly
+// JSON-escaped) and emitted into the script inside a QUOTED heredoc (<<'EOF'), on which the
+// shell performs NO parameter expansion and NO command substitution. A spec-supplied exchange,
+// routing key or queue-argument value is therefore inert DATA: it can neither run a command in
+// this container (which holds the provisioning API key) nor reshape the JSON.
+//
+// The heredoc feeds `read -r` rather than sitting inside a command substitution
+// ($(cat <<'EOF' ... EOF)) — the same shape the Core bootstrap scripts use, for the same reason:
+// the nested form is mis-parsed by bash 3.2 when the body holds an unbalanced quote, and a
+// queueArguments value is arbitrary JSON, so `a'b` produces exactly that. A single `read -r` is
+// enough because encoding/json emits the body on ONE line, and -r keeps every backslash escape
+// verbatim.
+//
+// Only the fixed ${HOSTNAME} placeholder is substituted at runtime, from `hostname` — a trusted
+// value, never from the CR. The CRD's charset pattern on the exchange field is defence in depth.
+// The endpoint is passed with curl's --url flag so a spec.provisioning.apiURL beginning with "-"
+// is taken as a URL rather than parsed as a curl option.
 func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
 	b := resolveBundle(p)
 	w := b.Wiring
@@ -855,37 +986,81 @@ func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Conta
 		})
 	}
 
-	// Per-pod, self-idempotent retry loop: name the queue after this pod's hostname,
-	// include the X-API-Key header only when PROVISIONING_API_KEY is set, and retry
-	// until the POST succeeds.
-	script := `HOSTNAME=$(hostname)
-until
+	// The POST body, encoded in Go so EVERY value is correctly JSON-escaped. Every value is a
+	// plain string or a RawMessage already proven valid JSON, so json.Marshal is infallible
+	// and the builder stays a pure, error-free function. The output is a SINGLE line
+	// (encoding/json escapes any newline inside a value and compacts every RawMessage), so no
+	// value can produce a line that prematurely terminates the heredoc below — which is also
+	// why the single `read -r` there captures the whole body.
+	body, _ := json.Marshal(provisionQueueRequest{
+		Name:       hostnamePlaceholder,
+		Exchange:   provisioningExchange(p, w.Provisioning),
+		RoutingKey: provisionQueueRoutingKey(p),
+		Properties: provisionQueueProperties(p),
+	})
+
+	// Per-pod, self-idempotent loop: read the JSON body with `read -r` from a QUOTED heredoc
+	// (the shell expands nothing inside it, and the un-nested form sidesteps the bash 3.2
+	// command-substitution quirk — see the SECURITY note above), substitute the queue name from
+	// this pod's own hostname, include the X-API-Key header only when PROVISIONING_API_KEY is
+	// set, and POST. Both curl branches send the one composed body under the same timeouts.
+	//
+	// The outcome is CLASSIFIED, not blindly retried: only a transient transport failure and a
+	// transient status (408, 429, any 5xx) sleep and try again. A permanent transport failure
+	// (curl exit 1 unsupported protocol, 3 malformed URL, 60 TLS verification) and any other
+	// 4xx print the status and the response body and exit non-zero — so a wrong API key or a
+	// wrong URL fails the pod visibly in `kubectl logs` instead of hanging Core's startup
+	// behind an init container that loops forever on a permanent error. This is plain POSIX sh
+	// (no bashisms, no pipefail), so it behaves identically under dash and busybox ash.
+	script := fmt.Sprintf(`HOSTNAME=$(hostname)
+read -r BODY <<'%[1]s'
+%[2]s
+%[1]s
+BODY=$(printf '%%s' "$BODY" | sed "s/\${HOSTNAME}/${HOSTNAME}/g")
+while true; do
   if [ -n "${PROVISIONING_API_KEY:-}" ]; then
-    curl -sf -X POST "${PROVISIONING_API_URL}/api/v1/queues" \
+    OUT=$(curl -sS --connect-timeout 5 --max-time 30 -w '\n%%{http_code}' -X POST --url "${PROVISIONING_API_URL}/api/v1/queues" \
       -H "Content-Type: application/json" \
       -H "X-API-Key: ${PROVISIONING_API_KEY}" \
-      -d "{
-        \"name\": \"${HOSTNAME}\",
-        \"exchange\": \"czertainly-proxy\",
-        \"routingKey\": \"proxymessage.*.${HOSTNAME}\",
-        \"properties\": { \"x-expires\": 1800000 }
-      }"
+      -d "${BODY}")
+    RC=$?
   else
-    curl -sf -X POST "${PROVISIONING_API_URL}/api/v1/queues" \
+    OUT=$(curl -sS --connect-timeout 5 --max-time 30 -w '\n%%{http_code}' -X POST --url "${PROVISIONING_API_URL}/api/v1/queues" \
       -H "Content-Type: application/json" \
-      -d "{
-        \"name\": \"${HOSTNAME}\",
-        \"exchange\": \"czertainly-proxy\",
-        \"routingKey\": \"proxymessage.*.${HOSTNAME}\",
-        \"properties\": { \"x-expires\": 1800000 }
-      }"
+      -d "${BODY}")
+    RC=$?
   fi
-do
-  echo "Waiting for provisioning API at ${PROVISIONING_API_URL}..."
-  sleep 5
+  if [ "$RC" -ne 0 ]; then
+    case "$RC" in
+      1|3|60)
+        echo "Provisioning request to ${PROVISIONING_API_URL} failed permanently (curl exit ${RC}), not retrying"
+        exit 1
+        ;;
+      *)
+        echo "Provisioning request to ${PROVISIONING_API_URL} failed (curl exit ${RC}), retrying in 5s..."
+        sleep 5
+        continue
+        ;;
+    esac
+  fi
+  CODE=$(printf '%%s' "$OUT" | tail -n 1)
+  RESPONSE=$(printf '%%s' "$OUT" | sed '$d')
+  case "$CODE" in
+    2??)
+      echo "Instance queue provisioned for ${HOSTNAME}"
+      exit 0
+      ;;
+    408|429|5??)
+      echo "Provisioning API at ${PROVISIONING_API_URL} not ready (HTTP ${CODE}), retrying in 5s..."
+      sleep 5
+      ;;
+    *)
+      echo "Queue provisioning failed (HTTP ${CODE}): ${RESPONSE}"
+      exit 1
+      ;;
+  esac
 done
-echo "Instance queue provisioned for ${HOSTNAME}"
-`
+`, heredocMarker, body)
 	return corev1.Container{
 		Name:            "provision-instance-queue",
 		Image:           image,
@@ -902,6 +1077,10 @@ echo "Instance queue provisioned for ${HOSTNAME}"
 // message broker, and scheduler are all reachable. The builder SCC-hardens
 // it automatically. (The proxy-path provision-instance-queue init container is
 // rendered separately by coreInitContainers.)
+//
+// Three of the four loops poll operator-owned Service names (compile-time constants); the
+// broker loop is mqWaitLoop, whose coordinates arrive as env values because in external mode
+// the host is CR-supplied (see the mqWaitLoop security note).
 func waitForAuthInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
 	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
 	// Resolve the broker host/port mode-agnostically so a managed broker waits on the
@@ -910,19 +1089,20 @@ func waitForAuthInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
 	script := fmt.Sprintf(`while ! nc -z %s %d; do sleep 1; done &&
 while ! nc -z %s %d; do sleep 1; done &&
 echo "auth service seems to be started" &&
-while ! nc -z %s %d; do sleep 1; done &&
+%s &&
 while ! nc -z %s %d; do sleep 1; done &&
 echo "messaging and scheduler service seems to be started"
 `,
 		authName, depServicePort,
 		authOPAPoliciesName, depServicePort,
-		mq.Host, mq.Port,
+		mqWaitLoop,
 		schedulerName, depServicePort,
 	)
 	return corev1.Container{
 		Name:            "wait-for-auth",
 		Image:           image,
 		ImagePullPolicy: policy,
+		Env:             messagingWaitEnv(mq),
 		Command:         []string{binSh, "-c", script},
 		// Read-only root filesystem: ENABLED. A pure nc-poll loop writes nothing to disk.
 		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},

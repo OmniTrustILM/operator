@@ -389,8 +389,8 @@ metadata:
             },
             "configMapRefs": [
               {
-                "mountPath": "/etc/proxy/extra",
-                "name": "proxy-extra-config",
+                "mountPath": "/etc/pki/corp",
+                "name": "corp-trust-bundle",
                 "type": "volume"
               }
             ],
@@ -521,7 +521,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-06-12T12:01:42Z"
+    createdAt: "2026-08-03T13:52:37Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1
@@ -548,34 +548,24 @@ spec:
         name: ""
         version: v1
       version: v1alpha1
-    - description: Platform is the Schema for the platforms API. It deploys and manages
-        the ILM platform itself — the stateless component tier, gateway, optional
-        edge, and its database/messaging/Keycloak dependencies (referenced when external
-        or provisioned via upstream operators when managed). A Platform is a per-namespace
-        singleton.
+    - description: |-
+        Platform is the Schema for the platforms API.
+
+        A Platform is a per-namespace SINGLETON: exactly one Platform is supported per
+        namespace. The operator renders its children under clean, unscoped names (e.g.
+        "core"), so a second Platform in the same namespace would collide. The controller
+        enforces this with a runtime singleton guard — only the oldest Platform in a namespace
+        reconciles; a second one is degraded immediately (AnotherPlatformExists). A validating
+        admission webhook will replace that racy list-based guard with create-time enforcement
+        in a later milestone. To run multiple platforms, use separate namespaces.
       displayName: Platform
       kind: Platform
       name: platforms.otilm.com
-      resources:
-      - kind: ConfigMaps
-        name: ""
-        version: v1
-      - kind: Deployments
-        name: ""
-        version: apps/v1
-      - kind: PodDisruptionBudgets
-        name: ""
-        version: policy/v1
-      - kind: ServiceAccounts
-        name: ""
-        version: v1
-      - kind: Services
-        name: ""
-        version: v1
       version: v1alpha1
-    - description: Proxy is the Schema for the proxies API. It deploys one ILM proxy
-        instance — the outbound-only broker bridge for restricted network zones —
-        from a provisioning-issued config token.
+    - description: |-
+        Proxy is the Schema for the proxies API. It deploys one ILM proxy instance — the
+        outbound-only broker bridge for restricted network zones — from a
+        provisioning-issued config token.
       displayName: Proxy
       kind: Proxy
       name: proxies.otilm.com

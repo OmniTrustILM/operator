@@ -53,6 +53,7 @@ package platform
 // (restricted-v2): the postStart runs in the existing container's security context.
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -93,6 +94,75 @@ const (
 	// coreScriptsRole is the component-label value the scripts ConfigMap carries.
 	coreScriptsRole = "core-scripts"
 )
+
+// Runtime placeholders the in-pod bootstrap scripts fill in. They mark the slots of values that
+// exist only INSIDE the pod, inside JSON bodies the operator composes with encoding/json. They
+// are operator-authored tokens — never CR data.
+const (
+	// adminCertPlaceholder marks the certificateData slot in register-admin.sh's body. The
+	// script substitutes the stripped $ADMIN_CERT for it with sed, using a "|" delimiter: the
+	// value is base64 DER (A-Za-z0-9+/=), a charset that contains neither the delimiter nor
+	// sed's "&" back-reference nor a backslash, so the substitution cannot be subverted by the
+	// certificate's contents.
+	adminCertPlaceholder = "__ADMIN_CERT__"
+	// clientSecretPlaceholder marks the clientSecret slot in register-internal-keycloak.sh's
+	// body. The operator SPLITS the composed JSON there and the script concatenates the secret
+	// back inside ONE double-quoted expansion, so the secret never enters a sed program or any
+	// command's argv beyond the single curl invocation that already carries it.
+	clientSecretPlaceholder = "__CLIENT_SECRET__" //nolint:gosec // G101: a body template placeholder, not a credential
+	// oidcScopeOpenID and oidcSkewSeconds are the fixed provider-body values Core expects.
+	oidcScopeOpenID = "openid"
+	oidcSkewSeconds = 60
+	// heredocMarker delimits the QUOTED heredocs the scripts read their composed JSON from.
+	// A quoted heredoc suppresses parameter expansion AND command substitution, so everything
+	// between the markers is inert data. encoding/json emits each body on a SINGLE line (it
+	// escapes any newline inside a value), so no value can forge the terminator line — which is
+	// also why a single `read -r` captures the whole body.
+	//
+	// The heredoc feeds `read -r` rather than sitting inside a command substitution
+	// ($(cat <<'EOF' ... EOF)): the nested form is mis-parsed by bash 3.2 when the body holds an
+	// unbalanced quote, and an unbalanced quote is exactly what a legitimate surname produces.
+	heredocMarker = "EOF"
+)
+
+// adminRequest is the POST body register-admin.sh sends to Core's local-admin API — the subset
+// of Core's AddUserRequestDto the operator sets (Core defaults the rest).
+//
+// It exists so the body is composed by encoding/json, which escapes EVERY value correctly. That
+// is both the security fix and a correctness fix: the previous string-interpolated body sat
+// inside a SINGLE-quoted shell argument, so an apostrophe closed the quote and the remainder was
+// shell-parsed — which broke legitimate data (the surname O'Brien, an address with an
+// apostrophe) as readily as it admitted injection.
+//
+// LastName is omitempty so an unset surname omits the field entirely (matching the password
+// method) rather than POSTing an empty "lastName" to Core.
+type adminRequest struct {
+	Username        string `json:"username"`
+	FirstName       string `json:"firstName"`
+	LastName        string `json:"lastName,omitempty"`
+	Email           string `json:"email"`
+	Enabled         bool   `json:"enabled"`
+	CertificateData string `json:"certificateData"`
+}
+
+// oidcProviderRequest is the PUT body register-internal-keycloak.sh sends to Core's settings
+// OIDC endpoint. Composed by encoding/json so the operator-resolved URLs — which embed
+// spec.keycloak.realm and the platform hostname, both CR-supplied — are escaped JSON values
+// rather than text spliced into a single-quoted shell argument. The field order mirrors Core's
+// payload and is kept stable for the render snapshots (JSON object order is not semantic).
+type oidcProviderRequest struct {
+	IssuerURL        string   `json:"issuerUrl"`
+	ClientID         string   `json:"clientId"`
+	ClientSecret     string   `json:"clientSecret"`
+	AuthorizationURL string   `json:"authorizationUrl"`
+	TokenURL         string   `json:"tokenUrl"`
+	LogoutURL        string   `json:"logoutUrl"`
+	JwkSetURL        string   `json:"jwkSetUrl"`
+	Scope            []string `json:"scope"`
+	Audiences        []string `json:"audiences"`
+	PostLogoutURL    string   `json:"postLogoutUrl"`
+	Skew             int      `json:"skew"`
+}
 
 // OIDCClientSecretName returns the operator-owned OIDC client Secret name for a Platform:
 // "<platform>-oidc-client". The reconcile action writes the Keycloak-generated "ilm" client
@@ -219,16 +289,26 @@ func BuildCoreScriptsConfigMap(p *otilmv1alpha1.Platform) *corev1.ConfigMap {
 // is idempotent, so the fire-and-forget postStart is safe to re-run.
 //
 // SECURITY: the script carries NO secret — the certificate arrives at runtime via $ADMIN_CERT;
-// only the non-secret admin identity (username/name/email, operator-authored in the CR) is
-// composed in. Mirrors the chart's scripts/register-admin.sh.
+// only the non-secret admin identity (username/name/email) is composed in. That identity is
+// CR-supplied free text, so the body is built in Go with encoding/json and emitted into the
+// script inside a QUOTED heredoc (<<'EOF'), on which the shell performs NO parameter expansion
+// and NO command substitution. The identity is therefore inert DATA: it can neither run a
+// command in the Core container nor reshape the JSON, and an apostrophe in a real surname or
+// email is preserved verbatim instead of terminating a shell quote. Only the certificate
+// placeholder is substituted at runtime, from $CERT — see adminCertPlaceholder for why that sed
+// is closed under base64's charset. Mirrors the chart's scripts/register-admin.sh.
 func registerAdminScript(p *otilmv1alpha1.Platform) string {
 	ra := p.Spec.RegisterAdmin
-	// lastName is OPTIONAL: emit the JSON field ONLY when set (matching the password method's
-	// omitempty), so an unset surname does not POST an empty "lastName" to Core.
-	lastName := ""
-	if ra.LastName != "" {
-		lastName = fmt.Sprintf("\n    \"lastName\": \"%s\",", ra.LastName)
-	}
+	// json.Marshal of a struct of plain strings/bools is infallible, so the builder stays a
+	// pure, error-free function. LastName is omitempty: an unset surname omits the field.
+	body, _ := json.Marshal(adminRequest{
+		Username:        ra.Username,
+		FirstName:       ra.Name,
+		LastName:        ra.LastName,
+		Email:           ra.Email,
+		Enabled:         true,
+		CertificateData: adminCertPlaceholder,
+	})
 	return fmt.Sprintf(`#!/bin/sh
 
 # Register the FIRST platform admin with Core's local-admin API (POST /api/v1/local/admins),
@@ -236,8 +316,8 @@ func registerAdminScript(p *otilmv1alpha1.Platform) string {
 # A postStart hook is fire-and-forget; Core's create is idempotent, so re-runs are safe.
 
 # Wait for Core + the OPA sidecar to be listening on localhost.
-while ! nc -z localhost %d; do sleep 1; done
-while ! nc -z localhost %d; do sleep 1; done
+while ! nc -z localhost %[1]d; do sleep 1; done
+while ! nc -z localhost %[2]d; do sleep 1; done
 
 # Strip the PEM armor + ALL whitespace from $ADMIN_CERT (sourced via secretKeyRef on Core) down
 # to the SINGLE-LINE base64 DER body Core decodes. The echo is INTENTIONALLY UNQUOTED: the shell
@@ -248,21 +328,22 @@ CERT=$( echo $ADMIN_CERT | awk '{gsub(/[[:blank:]]/,""); print}' )
 CERT=$( echo $CERT | awk '{gsub(/-----BEGINCERTIFICATE-----/,""); print}' )
 CERT=$( echo $CERT | awk '{gsub(/-----ENDCERTIFICATE-----/,""); print}' )
 
+# The request body, composed by the operator with encoding/json and read from a QUOTED heredoc:
+# the shell performs NO parameter expansion and NO command substitution inside it, so the admin
+# identity is inert data — an apostrophe in a surname included. Only the certificate placeholder
+# is substituted, from the base64 $CERT above.
+read -r BODY <<'%[3]s'
+%[4]s
+%[3]s
+BODY=$(printf '%%s' "$BODY" | sed "s|%[5]s|${CERT}|")
+
 curl -X POST \
   -H 'content-type: application/json' \
-  -d '
-  {
-    "username": "%s",
-    "firstName": "%s",%s
-    "email": "%s",
-    "enabled": true,
-    "certificateData": "'"$CERT"'"
-  }' \
-  http://localhost:%d/api/v1/local/admins
+  -d "${BODY}" \
+  http://localhost:%[1]d/api/v1/local/admins
 `,
 		depServicePort, opaPort,
-		ra.Username, ra.Name, lastName, ra.Email,
-		depServicePort)
+		heredocMarker, body, adminCertPlaceholder)
 }
 
 // registerInternalKeycloakScript composes register-internal-keycloak.sh for a managed
@@ -304,10 +385,28 @@ func registerInternalKeycloakScript(p *otilmv1alpha1.Platform) string {
 		postLogout = backendRealm
 	}
 
-	// The body is Core's expected provider payload (field order + scope/audiences/skew).
-	// $CLIENT_SECRET is the positional $1 (from $INTERNAL_OAUTH_SECRET). The non-secret fields
-	// are hard-quoted (operator-composed, no shell metacharacters) and only $CLIENT_SECRET is
-	// interpolated via the shell.
+	// The body is Core's expected provider payload (field order + scope/audiences/skew), composed
+	// by encoding/json so every URL is a correctly escaped JSON value. The clientSecret slot
+	// carries a placeholder the operator then SPLITS the body at: the halves are emitted into
+	// QUOTED heredocs and the script concatenates the runtime secret between them, so the secret
+	// stays out of the rendered ConfigMap and out of every argv but curl's.
+	//nolint:gosec // G117: the clientSecret field is marshaled as a PLACEHOLDER, never a credential
+	// — the real secret only ever exists inside the pod, where the script splices it in at runtime.
+	body, _ := json.Marshal(oidcProviderRequest{
+		IssuerURL:        issuer,
+		ClientID:         OIDCClientID,
+		ClientSecret:     clientSecretPlaceholder,
+		AuthorizationURL: authz,
+		TokenURL:         tokenURL,
+		LogoutURL:        logout,
+		JwkSetURL:        jwksURL,
+		Scope:            []string{oidcScopeOpenID},
+		Audiences:        []string{OIDCClientID},
+		PostLogoutURL:    postLogout,
+		Skew:             oidcSkewSeconds,
+	})
+	bodyHead, bodyTail, _ := strings.Cut(string(body), clientSecretPlaceholder)
+
 	return fmt.Sprintf(`#!/bin/sh
 
 # The OIDC client secret arrives as $1 (from $INTERNAL_OAUTH_SECRET). The operator relays it
@@ -325,31 +424,30 @@ fi
 CLIENT_SECRET=$1
 
 # Wait for services to be ready (LOCALHOST — Core's settings API is localhost-only)
-while ! nc -z localhost %d; do sleep 1; done
-while ! nc -z localhost %d; do sleep 1; done
+while ! nc -z localhost %[1]d; do sleep 1; done
+while ! nc -z localhost %[2]d; do sleep 1; done
+
+# The provider body, composed by the operator with encoding/json and SPLIT at the clientSecret
+# value. Both halves are read from QUOTED heredocs, on which the shell performs NO parameter
+# expansion and NO command substitution, so the operator-composed URLs (which embed
+# spec.keycloak.realm and the platform hostname) are inert data. The secret is concatenated back
+# below inside ONE double-quoted expansion — a quoted expansion is never re-parsed as shell
+# syntax, so nothing there can break out either, and the secret enters no argv but curl's.
+read -r BODY_HEAD <<'%[3]s'
+%[4]s
+%[3]s
+read -r BODY_TAIL <<'%[3]s'
+%[5]s
+%[3]s
 
 # Perform the cURL request against the LOCALHOST settings endpoint
 curl -X PUT \
   -H 'content-type: application/json' \
-  -d '
-  {
-    "issuerUrl":"%s",
-    "clientId": "%s",
-    "clientSecret": "'"$CLIENT_SECRET"'",
-    "authorizationUrl": "%s",
-    "tokenUrl": "%s",
-    "logoutUrl": "%s",
-    "jwkSetUrl": "%s",
-    "scope": ["openid"],
-    "audiences": ["%s"],
-    "postLogoutUrl": "%s",
-    "skew": 60
-  }' \
-  http://localhost:%d/api/v1/settings/authentication/oauth2Providers/internal
+  -d "${BODY_HEAD}${CLIENT_SECRET}${BODY_TAIL}" \
+  http://localhost:%[1]d/api/v1/settings/authentication/oauth2Providers/internal
 `,
 		depServicePort, opaPort,
-		issuer, OIDCClientID, authz, tokenURL, logout, jwksURL, OIDCClientID, postLogout,
-		depServicePort)
+		heredocMarker, bodyHead, bodyTail)
 }
 
 // oidcBrowserHost returns the platform hostname used for the BROWSER-FACING OIDC URLs in the

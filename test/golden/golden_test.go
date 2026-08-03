@@ -170,6 +170,7 @@ func variants() []variant {
 		gatewayOptionsVariant(),
 		managedDBVariant(),
 		managedDBNoPoolerVariant(),
+		version2190Variant(),
 	}
 }
 
@@ -296,6 +297,21 @@ func managedDBNoPoolerVariant() variant {
 	spec := managedDBSpec()
 	spec.Database.PgBouncer = &otilmv1alpha1.PgBouncerSpec{Managed: false}
 	return variant{name: "managed-db-no-pooler", platform: platformFor(spec)}
+}
+
+// version2190Variant: a platform PINNED to the 2.19.0 bundle (a preview bundle — reachable
+// only by naming it explicitly), with proxy support on so the provision-instance-queue init
+// container renders too. It is the byte-for-byte record of what "spec.version: 2.19.0" ships:
+// the 2.19.0 image tags (core / frontend-administrator 2.19.0, auth 1.7.0, scheduler 1.1.1),
+// the 2.19.0 wiring (the LOGGING_LEVEL_COM_OTILM rename), and the renamed proxy exchange
+// (czertainly-proxy → ilm-proxy) in the queue-registration request. Every other variant
+// renders the default (2.18.0) bundle, so the diff between this golden and minimal's is the
+// version contract itself.
+func version2190Variant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = "2.19.0"
+	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
+	return variant{name: "version-2190", platform: platformFor(spec)}
 }
 
 // ---- the snapshot test ------------------------------------------------------

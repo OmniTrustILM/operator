@@ -101,11 +101,18 @@ const (
 	conditionAvailable = "Available"
 	// conditionProgressing reports whether a required Deployment is still rolling out.
 	conditionProgressing = "Progressing"
+	// conditionDegraded reports a deterministic, won't-proceed failure (a rejected version,
+	// the singleton loser, a render/apply error). It is set True by setDegradedMessage and
+	// flipped False again by clearStaleDegraded once a reconcile pass succeeds.
+	conditionDegraded = "Degraded"
 	// reasonReconciling: children applied, a required Deployment not yet at desired
 	// ready replicas.
 	reasonReconciling = "Reconciling"
 	// reasonAllReady: every required Deployment is measured ready.
 	reasonAllReady = "AllComponentsReady"
+	// reasonReconciled: a reconcile pass completed, so a previously-recorded Degraded
+	// condition no longer holds.
+	reasonReconciled = "Reconciled"
 )
 
 // Core workload coordinates the reconciler uses to gate readiness. They mirror the
@@ -242,19 +249,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Default the effective shared image registry/repository on this fetched copy
-	// (never persisted back) BEFORE any render/apply, so the ILM component images
-	// resolve to the public hub.omnitrustregistry.com/ilm registry out of the box. A
-	// user-set spec.image.registry/repository still wins. This single chokepoint covers
-	// every render path below (the gate functions and RenderPlatformBase).
-	platformbuilder.DefaultImageRegistry(&platform)
-
-	// Finalizer + deletion handling, FIRST (per CLAUDE.md: add the finalizer before
-	// doing any work). On deletion this runs the deletion handler then removes the
-	// finalizer; otherwise it ensures the finalizer is present before proceeding.
+	// Finalizer + deletion handling FIRST — and BEFORE any spec defaulting: the
+	// finalizer-add path persists the whole object (r.Update), so any in-memory
+	// defaulting done earlier would leak into the stored spec (this exact bug shipped:
+	// the defaulted registry/repository were persisted on every first reconcile).
 	if done, err := r.handleFinalizer(ctx, &platform); done || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Default the effective shared image REGISTRY on this fetched copy (never
+	// persisted — the finalizer Update above already ran on the pristine object).
+	// Repository defaulting is lazy inside ResolveImage (bundle-aware).
+	platformbuilder.DefaultImageRegistry(&platform)
 
 	// Singleton-per-namespace guard: only the oldest Platform in a namespace is
 	// the active one. A newer Platform goes Degraded immediately. An admission
@@ -265,9 +271,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
 	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
-	// downgrade and an unsupported version (each a terminal steady state), pins the resolved
-	// version onto the in-memory Platform, and returns the version bundle. A handled=true
-	// result means a guard short-circuited the reconcile.
+	// downgrade, an unsupported version, and an upgrade onto an unreleased preview bundle
+	// (each a terminal steady state), pins the resolved version onto the in-memory Platform,
+	// and returns the version bundle. A handled=true result means a guard short-circuited
+	// the reconcile.
 	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, &platform)
 	if handled || err != nil {
 		return res, err
@@ -514,15 +521,16 @@ func (r *Reconciler) checkSingletonGuard(ctx context.Context, platform *otilmv1a
 	return false, ctrl.Result{}, nil
 }
 
-// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD and resolves the
-// version bundle for this reconcile. effectivePlatformVersion makes an empty spec.version
-// FOLLOW the pinned status.observedVersion (not the operator's current default), so upgrading
-// the operator — which changes the built-in DefaultVersion — never silently upgrades a running
-// platform; an explicit spec.version is the only upgrade trigger.
+// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD + PREVIEW-UPGRADE
+// GUARD and resolves the version bundle for this reconcile. effectivePlatformVersion makes an
+// empty spec.version FOLLOW the pinned status.observedVersion (not the operator's current
+// default), so upgrading the operator — which changes the built-in DefaultVersion — never
+// silently upgrades a running platform; an explicit spec.version is the only upgrade trigger.
 //
-// It refuses an explicit DOWNGRADE and an UNSUPPORTED version (each a terminal steady state →
-// handled=true), pins the resolved version onto the IN-MEMORY Platform so the version-specific
-// builders resolve the SAME bundle the reconciler gated on, and returns that bundle.
+// It refuses an explicit DOWNGRADE, an UNSUPPORTED version, and an UPGRADE onto an unreleased
+// (preview) bundle (each a terminal steady state → handled=true), pins the resolved version onto
+// the IN-MEMORY Platform so the version-specific builders resolve the SAME bundle the reconciler
+// gated on, and returns that bundle.
 func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilmv1alpha1.Platform) (resolvedVersion string, bundle bom.Bundle, handled bool, res ctrl.Result, err error) {
 	effectiveVersion := effectivePlatformVersion(platform)
 
@@ -558,6 +566,20 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	if resolvedVersion == "" {
 		resolvedVersion = bom.DefaultVersion
 	}
+
+	// Preview bundles are for fresh installs and explicit testing only: refuse to
+	// UPGRADE a live platform onto an unreleased bundle — the messaging migration
+	// engine that makes such a move safe ships separately, and the release-day flip
+	// (Released=true) is what opens the path. Fresh installs (no observed version)
+	// may pin a preview explicitly.
+	if !resolvedBundle.Released && platform.Status.ObservedVersion != "" && platform.Status.ObservedVersion != resolvedVersion {
+		res, err = r.steadyState(ctx, platform, reasonPreviewVersionUpgradeBlocked,
+			fmt.Sprintf("version %s is a preview (unreleased) bundle; upgrading a running platform onto it is not supported — released versions: %s; "+
+				"keep spec.version at %q, or wait for %s to be released",
+				resolvedVersion, strings.Join(bom.SupportedVersions(), ", "), platform.Status.ObservedVersion, resolvedVersion))
+		return "", bundle, true, res, err
+	}
+
 	// Pin the resolved version onto the IN-MEMORY Platform so the version-specific builders
 	// (RenderPlatformBase → resolveBundle, which reads spec.version) resolve the SAME bundle the
 	// reconciler gated on. In-memory only — never persisted (no spec write occurs after this
@@ -849,6 +871,13 @@ func (r *Reconciler) handleFinalizer(ctx context.Context, p *otilmv1alpha1.Platf
 //     their data intact; Delete reclaims them. These CRs carry no controller owner ref and
 //     are prune-excluded, so this handler is the only thing that deletes them.
 //
+// VERSION: teardown renders against the version the platform is ACTUALLY RUNNING
+// (teardownPlatformVersion — status.observedVersion, else spec.version) and, when an upgrade is
+// in flight, the requested version too — the deduplicated UNION of both renders, so neither a
+// blocked upgrade's live topology nor a partially applied one's new objects is orphaned. Each
+// render is pinned onto a DEEP COPY so the finalizer-removal Update that follows never persists
+// a spec change. See teardownRenderPlatforms and teardownGate.
+//
 // On a teardown failure the handler returns the non-nil error so handleFinalizer keeps the
 // finalizer (requeues) and the teardown is retried, rather than removing the finalizer and
 // orphaning a half-deleted managed CR.
@@ -862,7 +891,9 @@ func (r *Reconciler) handleDeletion(ctx context.Context, p *otilmv1alpha1.Platfo
 	// Managed infrastructure (CloudNativePG database + RabbitMQ broker + Keycloak today) is
 	// reclaimed or retained per `policy`. The managed CRs carry NO controller owner reference
 	// and are prune-excluded, so they are NOT garbage-collected with the Platform — this
-	// handler is the ONLY thing that deletes them, and only under Delete.
+	// handler is the ONLY thing that deletes them, and only under Delete. Each handler renders
+	// its own teardown version set (see the VERSION note above), so the Platform is passed
+	// through UNPINNED.
 	if err := r.handleManagedDatabaseDeletion(ctx, p, policy); err != nil {
 		return err // requeue to retry teardown; the finalizer stays until it succeeds
 	}
@@ -895,7 +926,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, p *otilmv1alpha1.Platfo
 //
 // It is a no-op for an external database (the operator provisions nothing to tear down).
 func (r *Reconciler) handleManagedDatabaseDeletion(ctx context.Context, p *otilmv1alpha1.Platform, policy otilmv1alpha1.PlatformDeletionPolicy) error {
-	return r.handleManagedInfraDeletion(ctx, p, policy, r.databaseGate(p), "RetainedDatabase", "DeletedDatabase")
+	return r.handleManagedInfraDeletion(ctx, p, policy, r.teardownGate(p, r.databaseGate), "RetainedDatabase", "DeletedDatabase")
 }
 
 // handleManagedMessagingDeletion enforces the deletion-safety contract for a managed
@@ -904,7 +935,7 @@ func (r *Reconciler) handleManagedDatabaseDeletion(ctx context.Context, p *otilm
 // the cluster and every topology CR (the RabbitMQ Cluster Operator GCs the PVCs). It is a
 // no-op for an external broker. See handleManagedInfraDeletion for the shared semantics.
 func (r *Reconciler) handleManagedMessagingDeletion(ctx context.Context, p *otilmv1alpha1.Platform, policy otilmv1alpha1.PlatformDeletionPolicy) error {
-	return r.handleManagedInfraDeletion(ctx, p, policy, r.messagingGate(p), "RetainedMessaging", "DeletedMessaging")
+	return r.handleManagedInfraDeletion(ctx, p, policy, r.teardownGate(p, r.messagingGate), "RetainedMessaging", "DeletedMessaging")
 }
 
 // handleManagedKeycloakDeletion enforces the deletion-safety contract for a managed Keycloak
@@ -915,7 +946,7 @@ func (r *Reconciler) handleManagedMessagingDeletion(ctx context.Context, p *otil
 // carries the FULL rendered set (CR + import) so both are reclaimed/retained. See
 // handleManagedInfraDeletion for the shared semantics.
 func (r *Reconciler) handleManagedKeycloakDeletion(ctx context.Context, p *otilmv1alpha1.Platform, policy otilmv1alpha1.PlatformDeletionPolicy) error {
-	return r.handleManagedInfraDeletion(ctx, p, policy, r.keycloakDeletionGate(p), "RetainedKeycloak", "DeletedKeycloak")
+	return r.handleManagedInfraDeletion(ctx, p, policy, r.teardownGate(p, r.keycloakDeletionGate), "RetainedKeycloak", "DeletedKeycloak")
 }
 
 // requiredDeploymentsReady reports whether every workload the platform requires to be
@@ -1003,10 +1034,16 @@ func statefulSetReady(sts *appsv1.StatefulSet) bool {
 // setReadinessStatus sets the Available/Progressing conditions and the Phase from the
 // MEASURED readiness of the required Deployments. When ready: Available=True,
 // Progressing=False, Phase=Running. While a required Deployment is still rolling out:
-// Available=False, Progressing=True, Phase=Progressing. It never sets Degraded — a
-// fatal error path uses degraded()/setDegraded() instead. Messages are generic (no
-// secret/coordinate leakage).
+// Available=False, Progressing=True, Phase=Progressing. It never sets Degraded TRUE — a
+// fatal error path uses degraded()/setDegraded() instead — but it does CLEAR a stale
+// Degraded=True (this pass reached the success path, so the recorded failure no longer
+// holds). Messages are generic (no secret/coordinate leakage).
 func (r *Reconciler) setReadinessStatus(p *otilmv1alpha1.Platform, ready bool) {
+	// Reaching here means the reconcile SUCCEEDED, so any Degraded=True recorded by an
+	// earlier pass (a refused version, the singleton loser, a render/apply failure) is
+	// history — drop it, or the platform would advertise Degraded=True forever after the
+	// user corrected the spec, since only Available/Progressing were being updated.
+	clearStaleDegraded(p)
 	if ready {
 		p.Status.Phase = otilmv1alpha1.PlatformPhaseRunning
 		meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
@@ -1027,6 +1064,23 @@ func (r *Reconciler) setReadinessStatus(p *otilmv1alpha1.Platform, ready bool) {
 	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 		Type: conditionProgressing, Status: metav1.ConditionTrue, Reason: reasonReconciling,
 		Message: "required components are rolling out", ObservedGeneration: p.Generation,
+	})
+}
+
+// clearStaleDegraded flips a leftover Degraded=True to False on a SUCCESSFUL reconcile pass,
+// so a platform that was degraded by a deterministic, user-correctable condition (a refused
+// version — PreviewVersionUpgradeBlocked / DowngradeForbidden / UnsupportedVersion — the
+// singleton loser, a render error) stops advertising Degraded once the cause is gone.
+//
+// It touches the condition ONLY when it is currently True: a platform that never degraded
+// keeps a Degraded-free condition list rather than gaining a permanent Degraded=False entry.
+func clearStaleDegraded(p *otilmv1alpha1.Platform) {
+	if !meta.IsStatusConditionTrue(p.Status.Conditions, conditionDegraded) {
+		return
+	}
+	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
+		Type: conditionDegraded, Status: metav1.ConditionFalse, Reason: reasonReconciled,
+		Message: "reconcile succeeded; the reported failure no longer applies", ObservedGeneration: p.Generation,
 	})
 }
 
@@ -1616,7 +1670,7 @@ func (r *Reconciler) steadyStateRequeue(ctx context.Context, p *otilmv1alpha1.Pl
 func (r *Reconciler) setDegradedMessage(ctx context.Context, p *otilmv1alpha1.Platform, reason, message string) {
 	p.Status.Phase = otilmv1alpha1.PlatformPhaseDegraded
 	meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
-		Type: "Degraded", Status: metav1.ConditionTrue, Reason: reason,
+		Type: conditionDegraded, Status: metav1.ConditionTrue, Reason: reason,
 		Message: message, ObservedGeneration: p.Generation, // message must not leak secret values/coordinates
 	})
 	if err := r.Status().Update(ctx, p); err != nil {

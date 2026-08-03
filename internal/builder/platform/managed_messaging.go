@@ -172,14 +172,14 @@ const (
 	messagingModeExternal = "external"
 )
 
-// managedVirtualHost returns the vhost name the operator provisions for a managed broker:
-// the configured spec.messaging.virtualHost, or bom.DefaultVirtualHost when empty. The
-// exchanges/queues/bindings all bind to this vhost.
+// managedVirtualHost returns the vhost name the operator provisions for a managed
+// broker: the configured spec.messaging.virtualHost, or the selected bundle's
+// per-version default when empty. The exchanges/queues/bindings all bind to this vhost.
 func managedVirtualHost(p *otilmv1alpha1.Platform) string {
 	if v := p.Spec.Messaging.VirtualHost; v != "" {
 		return v
 	}
-	return bom.DefaultVirtualHost
+	return resolveBundle(p).Messaging.DefaultVirtualHost
 }
 
 // ResolveManagedMessaging returns the RabbitMQ objects the operator provisions for a

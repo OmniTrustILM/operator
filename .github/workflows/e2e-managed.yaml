@@ -1,12 +1,28 @@
 name: E2E Managed
 
 # GATED managed e2e tier. The managed Ginkgo specs (CNPG/RabbitMQ/Keycloak + the full ILM
-# platform) install the REAL upstream operators and bring up real stateful infra, so a single run
-# takes ~45-60min. To keep PRs cheap, this expensive validation is NOT run on every PR by the
-# default Test workflow (which runs only the fast `make test-e2e` tier). Instead it runs:
+# platform + the version matrix) install the REAL upstream operators and bring up real stateful
+# infra, so a single run takes ~45-60min. To keep PRs cheap, this expensive validation is NOT run
+# on every PR by the default Test workflow (which runs only the fast `make test-e2e` tier).
+# Instead it runs:
 #   - nightly on a schedule (catch drift against the real operators),
 #   - on manual workflow_dispatch (run it on demand), and
 #   - on PRs/pushes that touch the managed-infra code paths (where it actually matters).
+#
+# PATH-FILTER SELECTION RULE (keep the two lists below identical, and keep them disciplined).
+# A path belongs here ONLY when a change to it can break something no cheaper tier can catch —
+# i.e. behaviour that depends on a REAL upstream operator (CloudNativePG / RabbitMQ Cluster +
+# Topology / Keycloak) accepting and acting on what the operator renders, on the LIVE wiring the
+# running ILM images consume, or on the multi-version upgrade/teardown sequence. Everything else
+# — pure render shape (edge, gateway, network policies, component resolution, ConfigMaps),
+# CRD-level validation, the Connector/Proxy kinds — is already covered on EVERY PR by the unit
+# tests, the golden render snapshots under test/golden, and the fast e2e tier. Therefore:
+#   - NO broad directory globs over internal/** (internal/builder/platform/**,
+#     internal/controller/platform/**, internal/builder/common/** made this ~1h tier fire on
+#     nearly every operator PR); list individual files or a narrow prefix glob instead;
+#   - when adding a path, name the managed spec that would catch its regression.
+# The nightly schedule is the BACKSTOP for anything these filters miss: a managed-visible change
+# that lands through an unlisted path is caught within 24h rather than never.
 on:
   schedule:
     # 02:30 UTC nightly.
@@ -15,18 +31,50 @@ on:
   pull_request:
     branches: [ main ]
     paths:
+      - 'pkg/bom/**'
+      - 'pkg/capabilities/**'
+      - 'api/v1alpha1/platform_types.go'
+      - 'internal/builder/common/component.go'
       - 'internal/builder/platform/managed_*.go'
+      - 'internal/builder/platform/db_connection.go'
+      - 'internal/builder/platform/messaging_connection.go'
+      - 'internal/builder/platform/oidc_core.go'
+      - 'internal/builder/platform/provisioning.go'
+      - 'internal/builder/platform/resolve.go'
+      - 'internal/registration/oidc.go'
+      - 'go.mod'
       - 'internal/controller/platform/gate_*.go'
-      - 'internal/bom/bom.go'
+      - 'internal/controller/platform/controller.go'
+      - 'internal/controller/platform/version.go'
+      - 'internal/controller/platform/oidc_provider.go'
+      - 'internal/controller/platform/admin_keycloak_user.go'
       - 'test/e2e/**'
+      - 'test/utils/**'
+      - 'Makefile'
       - '.github/workflows/e2e-managed.yaml'
   push:
     branches: [ main ]
     paths:
+      - 'pkg/bom/**'
+      - 'pkg/capabilities/**'
+      - 'api/v1alpha1/platform_types.go'
+      - 'internal/builder/common/component.go'
       - 'internal/builder/platform/managed_*.go'
+      - 'internal/builder/platform/db_connection.go'
+      - 'internal/builder/platform/messaging_connection.go'
+      - 'internal/builder/platform/oidc_core.go'
+      - 'internal/builder/platform/provisioning.go'
+      - 'internal/builder/platform/resolve.go'
+      - 'internal/registration/oidc.go'
+      - 'go.mod'
       - 'internal/controller/platform/gate_*.go'
-      - 'internal/bom/bom.go'
+      - 'internal/controller/platform/controller.go'
+      - 'internal/controller/platform/version.go'
+      - 'internal/controller/platform/oidc_provider.go'
+      - 'internal/controller/platform/admin_keycloak_user.go'
       - 'test/e2e/**'
+      - 'test/utils/**'
+      - 'Makefile'
       - '.github/workflows/e2e-managed.yaml'
 
 concurrency:
@@ -37,26 +85,85 @@ permissions:
   contents: read
 
 jobs:
+  # BUILD ONCE, LOAD EVERYWHERE. Every managed block needs the same operator image; building it
+  # per block burned ~3-4min x 6 jobs of identical work on every run. This job builds it once and
+  # publishes a `docker save` archive the test jobs import with `kind load image-archive`.
+  #
+  # Parity with `make docker-build`: same Dockerfile, same context, and — like that target —
+  # NO --build-arg, so the Dockerfile's own ARG defaults (VERSION=dev, GIT_COMMIT=unknown,
+  # BUILD_DATE=unknown) feed the version/commit/date ldflags exactly as they do locally today.
+  # The tag is the one the e2e suite deploys by (projectImage in test/e2e/e2e_suite_test.go).
+  build-image:
+    name: build-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build the operator image and export it as an archive
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: example.com/ilm-operator:v0.0.1
+          outputs: type=docker,dest=/tmp/operator-image.tar
+          # GitHub Actions layer cache. mode=max is required, not cosmetic: the Dockerfile is a
+          # two-stage build whose expensive layers (go mod download, go build) live in the
+          # discarded `builder` stage, and the default mode=min would cache only the final
+          # distroless image's layers — i.e. cache nothing that costs time. The scope is shared
+          # with the Test workflow's identical build so both populate and hit ONE cache entry;
+          # Actions cache reads fall back to the default branch, so a PR's first run reuses the
+          # cache that main's runs (of either workflow) wrote, and later runs of the same branch
+          # reuse their own.
+          cache-from: type=gha,scope=operator-image
+          cache-to: type=gha,mode=max,scope=operator-image
+      - name: Upload the operator image archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: operator-image
+          path: /tmp/operator-image.tar
+          retention-days: 1
+          if-no-files-found: error
+
   e2e-managed:
     name: e2e-managed (${{ matrix.block }})
     runs-on: ubuntu-latest
+    needs: [build-image]
     # Each managed block runs in its OWN job on its OWN fresh Kind cluster (matrix below), so the
     # blocks no longer share a cluster: no install/uninstall collisions, and they run in PARALLEL
     # (wall-clock ≈ the slowest block, not the sum). fail-fast: false so one block's failure still
-    # lets the others report. The per-job ceiling stays generous for a cold image cache.
-    timeout-minutes: 90
+    # lets the others report.
+    # timeout-minutes must sit ABOVE the go-test ceiling the step's `make test-e2e-managed` sets
+    # (-timeout 90m, with --ginkgo.timeout=85m under it) PLUS this job's Kind cluster creation,
+    # image import and deploy — otherwise the job is killed before Ginkgo/go-test can report which
+    # spec hung. 110m keeps that ordering.
+    timeout-minutes: 110
     strategy:
       fail-fast: false
       matrix:
-        # One entry per managed Ginkgo Context label (see test/e2e/platform_test.go).
-        block: [managed-postgres, managed-rabbitmq, managed-keycloak, full, matrix]
+        # One entry per managed Ginkgo Context label (see test/e2e/platform_test.go). The version
+        # matrix is TWO labels: 'matrix-upgrade' (2.17.0 -> 2.18.0 -> refusals -> Delete reclaim)
+        # and 'matrix-preview' (the fresh 2.19.0 install). They used to be one Context that did
+        # both bring-ups serially with a node-freeing barrier between them, which made it the
+        # tier's longest pole; on separate clusters they run at the same time and neither needs
+        # the barrier.
+        block: [managed-postgres, managed-rabbitmq, managed-keycloak, full, matrix-upgrade, matrix-preview]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
           go-version-file: go.mod
+      - name: Download the operator image archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: operator-image
+          path: /tmp/operator-image
+      # `make test-e2e-managed` creates the Kind cluster itself (its setup-test-e2e prerequisite
+      # deletes-then-creates a pristine one), then the suite imports E2E_IMAGE_ARCHIVE into that
+      # fresh node and deploys the operator from it. The image load has to happen after the
+      # cluster exists, which is why it is passed in rather than run as a preceding make goal.
       - name: Run E2E tests (${{ matrix.block }})
-        run: make -j1 kind-cluster docker-build kind-load deploy test-e2e-managed E2E_MANAGED_LABEL=${{ matrix.block }}
+        run: make -j1 test-e2e-managed E2E_MANAGED_LABEL=${{ matrix.block }} E2E_IMAGE_ARCHIVE=/tmp/operator-image/operator-image.tar
       - name: Export logs on failure
         if: failure()
         run: make kind-export-logs
