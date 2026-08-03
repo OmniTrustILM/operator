@@ -157,9 +157,12 @@ KIND_CLUSTER ?= ilm-operator-test-e2e
 E2E_IMAGE_ARCHIVE ?=
 
 .PHONY: setup-test-e2e
-setup-test-e2e: ## Set up a FRESH Kind cluster for e2e tests (delete-if-exists, then create)
+# Depends on `kind` so the binary is DOWNLOADED here rather than inherited from whichever goal
+# ran first: every e2e entry point goes through this target, so it must stand alone — on a fresh
+# checkout, and in CI, which no longer runs kind-cluster beforehand.
+setup-test-e2e: kind ## Set up a FRESH Kind cluster for e2e tests (delete-if-exists, then create)
 	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
+		echo "Kind is not installed and could not be downloaded to $(KIND)."; \
 		exit 1; \
 	}
 	# Always start from a pristine node. cleanup-test-e2e only runs after a SUCCESSFUL `go test`
@@ -539,9 +542,17 @@ kind-load-archive: kind ## Load a pre-built operator image archive (E2E_IMAGE_AR
 	@[ -n "$(E2E_IMAGE_ARCHIVE)" ] || { echo "E2E_IMAGE_ARCHIVE is not set (path to a 'docker save' tarball)"; exit 1; }
 	$(KIND) load image-archive $(E2E_IMAGE_ARCHIVE) --name $(KIND_CLUSTER_NAME)
 
+# KIND_LOG_DIR is written here AND read by CI's "Upload logs" step — they were two different
+# paths, so a failing job exported logs and then uploaded an empty directory. Named once.
+KIND_LOG_DIR ?= /tmp/ilm-operator-e2e-logs
+
 .PHONY: kind-export-logs
-kind-export-logs: kind ## Export logs from the Kind cluster.
-	$(KIND) export logs /tmp/$(KIND_CLUSTER_NAME)-logs --name $(KIND_CLUSTER_NAME)
+# Runs from CI's `if: failure()` step, where the cluster may never have been created. Exporting
+# logs is diagnostics, not a gate: a missing cluster must not stack a second, misleading error
+# on top of the real failure.
+kind-export-logs: kind ## Export logs from the Kind cluster into KIND_LOG_DIR (best-effort).
+	@$(KIND) export logs $(KIND_LOG_DIR) --name $(KIND_CLUSTER_NAME) \
+		|| echo "No logs exported: cluster $(KIND_CLUSTER_NAME) does not exist."
 
 ##@ Quality
 
