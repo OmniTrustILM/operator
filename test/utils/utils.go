@@ -167,7 +167,7 @@ func CreateNamespaceIdempotent(name string) error {
 
 	// `kubectl create ... --dry-run=client -o yaml` renders the Namespace manifest without
 	// touching the cluster; `kubectl apply -f -` then creates-or-no-ops it.
-	create := exec.Command("kubectl", "create", "namespace", name, //nolint:gosec // test utility; name is a hardcoded test constant
+	create := exec.Command("kubectl", "create", "namespace", name, //nolint:gosec // test utility; exec.Command passes argv directly, so name is never shell-interpreted
 		"--dry-run=client", "-o", "yaml")
 	apply := exec.Command("kubectl", "apply", "-f", "-")
 	create.Dir, apply.Dir = dir, dir
@@ -223,7 +223,7 @@ func ApplyResource(createArgs ...string) error {
 	// cluster; `kubectl apply -f -` then creates-or-no-ops it.
 	args := append([]string{"create"}, createArgs...)
 	args = append(args, "--dry-run=client", "-o", "yaml")
-	create := exec.Command("kubectl", args...) //nolint:gosec // test utility; args are hardcoded test constants
+	create := exec.Command("kubectl", args...) //nolint:gosec // test utility; exec.Command passes argv directly, so args are never shell-interpreted
 	apply := exec.Command("kubectl", "apply", "-f", "-")
 	create.Dir, apply.Dir = dir, dir
 	create.Env, apply.Env = env, env
@@ -261,7 +261,7 @@ func ApplyResource(createArgs ...string) error {
 // `--ignore-not-found` (so a re-run on a cluster where teardown already removed the namespace
 // is a no-op) and only warns on any other error, so suite/spec teardown never fails the run.
 func DeleteNamespace(name string) {
-	cmd := exec.Command("kubectl", "delete", "ns", name, "--ignore-not-found") //nolint:gosec // test utility; name is a hardcoded test constant
+	cmd := exec.Command("kubectl", "delete", "ns", name, "--ignore-not-found") //nolint:gosec // test utility; exec.Command passes argv directly, so name is never shell-interpreted
 	if _, err := Run(cmd); err != nil {
 		warnError(err)
 	}
@@ -306,7 +306,7 @@ func WaitForWorkloadsDrained(ns string, keepPrefixes ...string) {
 // the drain becomes a HARD barrier. The error is returned rather than swallowed so a caller can
 // tell an unreadable API apart from a genuinely drained namespace.
 func RemainingWorkloadPods(ns string, keepPrefixes ...string) ([]string, error) {
-	out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; ns is a hardcoded test constant
+	out, err := Run(exec.Command("kubectl", "get", "pods", "-n", ns, //nolint:gosec // test utility; exec.Command passes argv directly, so ns is never shell-interpreted
 		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}"))
 	if err != nil {
 		return nil, err

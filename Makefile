@@ -520,13 +520,21 @@ kind-export-logs: kind ## Export logs from the Kind cluster.
 
 COVERAGE_THRESHOLD ?= 80
 
+# The Trivy flags below mirror the org-default policy the shared Docker workflow copies into
+# the workspace at scan time (it neutralizes any repo-local Trivy config, so a repo-local
+# config/trivy.yaml would only make local scans disagree with CI). Keep them in sync with that
+# policy: table output, exit 1 on a finding, HIGH+CRITICAL, os+library packages, fixed-only,
+# vuln+secret scanners.
+TRIVY_FLAGS ?= --format table --exit-code 1 --severity HIGH,CRITICAL \
+	--pkg-types os,library --ignore-unfixed --scanners vuln,secret
+
 .PHONY: trivy
 trivy: docker-build ## Run Trivy vulnerability scan on the operator Docker image.
-	trivy image --config config/trivy.yaml $(IMG)
+	trivy image $(TRIVY_FLAGS) $(IMG)
 
 .PHONY: trivy-fs
 trivy-fs: ## Run Trivy filesystem scan on Go dependencies (no Docker build needed).
-	trivy fs --config config/trivy.yaml .
+	trivy fs $(TRIVY_FLAGS) .
 
 .PHONY: sonar
 sonar: test ## Run SonarQube analysis locally via ephemeral Docker container.

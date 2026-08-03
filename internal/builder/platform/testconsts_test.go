@@ -124,4 +124,7 @@ const (
 	testExchangeIlmProxy        = "ilm-proxy"
 	testCustomProxyExchange     = "custom-proxy"
 	testQueueArgExpires         = "x-expires"
+	// testQueueArgHostile is the argument name the hostile queueArguments values are stored
+	// under, so the round-trip assertions read one key.
+	testQueueArgHostile = "x-hostile"
 )

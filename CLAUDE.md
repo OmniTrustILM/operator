@@ -58,7 +58,9 @@ make bundle
 make docker-build
 
 # 7. Trivy vulnerability scan — no HIGH/CRITICAL vulnerabilities
-#    Uses config/trivy.yaml for severity and scanner configuration.
+#    The targets pass explicit flags (TRIVY_FLAGS in the Makefile) that mirror the
+#    org-default policy the shared CI workflow applies — it neutralizes repo-local
+#    Trivy config, so there is deliberately no config/trivy.yaml to drift from it.
 #    If vulnerabilities are found in Go dependencies, fix them with:
 #      go get <package>@latest && go mod tidy
 make trivy

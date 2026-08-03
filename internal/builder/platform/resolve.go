@@ -876,9 +876,10 @@ const (
 //
 // Properties values are json.RawMessage because a queue argument is arbitrary JSON defined by
 // the provisioning service, not by the operator. encoding/json COMPACTS every RawMessage it
-// writes, so no argument value can introduce a newline into the one-line body (the property
-// the quoted heredoc relies on); provisionQueueArgumentValue guarantees each raw value is
-// valid JSON first, keeping the marshal infallible.
+// writes, so no argument value can introduce a newline into the one-line body — the property
+// the quoted heredoc relies on to keep its terminator unforgeable, and the one that lets a
+// single `read -r` capture the whole body; provisionQueueArgumentValue guarantees each raw
+// value is valid JSON first, keeping the marshal infallible.
 type provisionQueueRequest struct {
 	Name       string                     `json:"name"`
 	Exchange   string                     `json:"exchange"`
@@ -949,11 +950,19 @@ func provisionQueueArgumentValue(v apiextensionsv1.JSON) json.RawMessage {
 //
 // SECURITY: the request body is built in Go with encoding/json (so every value is correctly
 // JSON-escaped) and emitted into the script inside a QUOTED heredoc (<<'EOF'), on which the
-// shell performs NO parameter expansion and NO command substitution. A spec-supplied exchange
-// is therefore inert DATA: it can neither run a command in this container (which holds the
-// provisioning API key) nor reshape the JSON. Only the fixed ${HOSTNAME} placeholder is
-// substituted at runtime, from `hostname` — a trusted value, never from the CR. This mirrors
-// the released platform Helm chart; the CRD's charset pattern on the field is defence in depth.
+// shell performs NO parameter expansion and NO command substitution. A spec-supplied exchange,
+// routing key or queue-argument value is therefore inert DATA: it can neither run a command in
+// this container (which holds the provisioning API key) nor reshape the JSON.
+//
+// The heredoc feeds `read -r` rather than sitting inside a command substitution
+// ($(cat <<'EOF' ... EOF)) — the same shape the Core bootstrap scripts use, for the same reason:
+// the nested form is mis-parsed by bash 3.2 when the body holds an unbalanced quote, and a
+// queueArguments value is arbitrary JSON, so `a'b` produces exactly that. A single `read -r` is
+// enough because encoding/json emits the body on ONE line, and -r keeps every backslash escape
+// verbatim.
+//
+// Only the fixed ${HOSTNAME} placeholder is substituted at runtime, from `hostname` — a trusted
+// value, never from the CR. The CRD's charset pattern on the exchange field is defence in depth.
 // The endpoint is passed with curl's --url flag so a spec.provisioning.apiURL beginning with "-"
 // is taken as a URL rather than parsed as a curl option.
 func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
@@ -981,7 +990,8 @@ func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Conta
 	// plain string or a RawMessage already proven valid JSON, so json.Marshal is infallible
 	// and the builder stays a pure, error-free function. The output is a SINGLE line
 	// (encoding/json escapes any newline inside a value and compacts every RawMessage), so no
-	// value can produce a line that prematurely terminates the heredoc below.
+	// value can produce a line that prematurely terminates the heredoc below — which is also
+	// why the single `read -r` there captures the whole body.
 	body, _ := json.Marshal(provisionQueueRequest{
 		Name:       hostnamePlaceholder,
 		Exchange:   provisioningExchange(p, w.Provisioning),
@@ -989,8 +999,9 @@ func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Conta
 		Properties: provisionQueueProperties(p),
 	})
 
-	// Per-pod, self-idempotent loop: read the JSON body from a QUOTED heredoc (the shell
-	// expands nothing inside it — see the SECURITY note above), substitute the queue name from
+	// Per-pod, self-idempotent loop: read the JSON body with `read -r` from a QUOTED heredoc
+	// (the shell expands nothing inside it, and the un-nested form sidesteps the bash 3.2
+	// command-substitution quirk — see the SECURITY note above), substitute the queue name from
 	// this pod's own hostname, include the X-API-Key header only when PROVISIONING_API_KEY is
 	// set, and POST. Both curl branches send the one composed body under the same timeouts.
 	//
@@ -1002,10 +1013,9 @@ func provisionInstanceQueueInitContainer(p *otilmv1alpha1.Platform) corev1.Conta
 	// behind an init container that loops forever on a permanent error. This is plain POSIX sh
 	// (no bashisms, no pipefail), so it behaves identically under dash and busybox ash.
 	script := fmt.Sprintf(`HOSTNAME=$(hostname)
-BODY=$(cat <<'EOF'
-%s
-EOF
-)
+read -r BODY <<'%[1]s'
+%[2]s
+%[1]s
 BODY=$(printf '%%s' "$BODY" | sed "s/\${HOSTNAME}/${HOSTNAME}/g")
 while true; do
   if [ -n "${PROVISIONING_API_KEY:-}" ]; then
@@ -1050,7 +1060,7 @@ while true; do
       ;;
   esac
 done
-`, body)
+`, heredocMarker, body)
 	return corev1.Container{
 		Name:            "provision-instance-queue",
 		Image:           image,

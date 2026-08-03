@@ -508,10 +508,9 @@ spec:
         - -c
         - |
           HOSTNAME=$(hostname)
-          BODY=$(cat <<'EOF'
+          read -r BODY <<'EOF'
           {"name":"${HOSTNAME}","exchange":"ilm-proxy","routingKey":"proxymessage.*.${HOSTNAME}","properties":{"x-expires":1800000}}
           EOF
-          )
           BODY=$(printf '%s' "$BODY" | sed "s/\${HOSTNAME}/${HOSTNAME}/g")
           while true; do
             if [ -n "${PROVISIONING_API_KEY:-}" ]; then

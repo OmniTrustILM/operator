@@ -1266,6 +1266,66 @@ func TestResolveCoreProvisionQueueBodyIsConfigurable(t *testing.T) {
 	}
 }
 
+// TestResolveCoreProvisionQueueArgumentValuesStayInertData is the hostile-value guard for
+// spec.provisioning.deploy.queueArguments — the ONE input to this script the operator does NOT
+// constrain (a queue argument is arbitrary JSON defined by the provisioning service, so unlike
+// the exchange it carries no CRD charset pattern).
+//
+// It pins the two properties the delivery shape depends on:
+//
+//   - STRUCTURE: the body is read by a single `read -r` from a QUOTED, UN-NESTED heredoc. The
+//     older nested form ($(cat <<'EOF' ... EOF)) is mis-parsed by bash 3.2 when the body holds
+//     an unbalanced quote — and a value like a'b produces exactly that — so the nested form must
+//     not come back.
+//   - ROUND-TRIP: every value reaches the container byte-for-byte. A single quote survives
+//     because the heredoc is quoted (the shell never re-parses it); a real newline survives
+//     because encoding/json escapes it, keeping the body one line so it can neither forge the
+//     heredoc terminator nor outrun the single `read`.
+func TestResolveCoreProvisionQueueArgumentValuesStayInertData(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "an embedded single quote survives the heredoc delivery", want: `a'b`},
+		{name: "an unbalanced quote does not derail the shell parse", want: `it's a 'value`},
+		{name: "a real newline is escaped and cannot forge the terminator", want: "a\nb"},
+		{name: "a newline next to a quote is still inert", want: "a\n'b"},
+		{name: "command substitution stays inert data", want: "$(id)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.want)
+			require.NoError(t, err, "the hostile value must be encodable as a JSON string")
+
+			p := proxyProvisioningPlatform()
+			queueArgs([2]string{testQueueArgHostile, string(raw)})(p)
+			script := provisionQueueScript(t, p)
+			body, outside := heredocParts(t, script)
+
+			// STRUCTURE: one `read -r` from a quoted heredoc, and never the nested form again.
+			assert.Contains(t, script, "read -r BODY <<'EOF'",
+				"the body must be delivered by a single `read -r` from a QUOTED heredoc")
+			assert.NotContains(t, script, "$(cat <<'EOF'",
+				"the nested command-substitution heredoc is mis-parsed by bash 3.2 and must not return")
+			assert.NotContains(t, body, "\n",
+				"the body stays one line, so no value can forge the heredoc terminator")
+
+			// ROUND-TRIP: the value arrives exactly as stored.
+			var got struct {
+				Properties map[string]string `json:"properties"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &got),
+				"the heredoc body must be valid JSON (encoding/json composed it)")
+			assert.Equal(t, tc.want, got.Properties[testQueueArgHostile],
+				"the queue argument value must round-trip through JSON unchanged")
+
+			// INERTNESS: the value lives only in the heredoc, never in text the shell evaluates.
+			assert.NotContains(t, outside, tc.want,
+				"the queue argument value must not appear anywhere the shell evaluates it")
+		})
+	}
+}
+
 func TestResolveCoreProvisionQueueInitOmittedWithoutProxy(t *testing.T) {
 	// Provisioning configured but proxy disabled => no provision-queue init container.
 	p := basePlatform()
