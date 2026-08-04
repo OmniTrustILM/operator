@@ -64,6 +64,13 @@ const (
 
 	// managed_messaging_test.go.
 	testMessagingName    = "ilm-messaging"
+	testMsgVhost         = "ilm-messaging-vhost"
+	testMsgUserCore      = "ilm-messaging-core"
+	testMsgUserMonitor   = "ilm-messaging-monitor"
+	testMsgUserProv      = "ilm-messaging-provisioner"
+	testMsgUserProxy     = "ilm-messaging-proxy"
+	testMsgCorePerm      = "ilm-messaging-core-permission"
+	testMsgQueueAudit    = "ilm-messaging-queue-core-audit-logs"
 	testQueueAuditLogs   = "core.audit-logs"
 	testQueueTQResults   = "time-quality.results"
 	testQueueTQConfigReq = "time-quality.config-request"

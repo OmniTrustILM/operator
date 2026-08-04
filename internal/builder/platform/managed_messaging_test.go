@@ -111,17 +111,17 @@ func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
 			"ilm-messaging-binding-czertainly-core-notifications",
 			"ilm-messaging-binding-czertainly-core-scheduler",
 			"ilm-messaging-binding-czertainly-core-validation",
-			"ilm-messaging-core",
-			"ilm-messaging-core-permission",
+			testMsgUserCore,
+			testMsgCorePerm,
 			"ilm-messaging-exchange-czertainly",
 			"ilm-messaging-queue-core",
 			"ilm-messaging-queue-core-actions",
-			"ilm-messaging-queue-core-audit-logs",
+			testMsgQueueAudit,
 			"ilm-messaging-queue-core-events",
 			"ilm-messaging-queue-core-notifications",
 			"ilm-messaging-queue-core-scheduler",
 			"ilm-messaging-queue-core-validation",
-			"ilm-messaging-vhost",
+			testMsgVhost,
 		}, renderedNames(t, ResolveManagedMessaging(p)))
 	})
 }
@@ -163,19 +163,19 @@ var frozenUnscopedTopologyNames = []string{
 	"ilm-messaging-binding-czertainly-time-quality-config",
 	"ilm-messaging-binding-czertainly-time-quality-config-request",
 	"ilm-messaging-binding-czertainly-time-quality-results",
-	"ilm-messaging-core",
-	"ilm-messaging-core-permission",
+	testMsgUserCore,
+	testMsgCorePerm,
 	"ilm-messaging-exchange-czertainly",
 	"ilm-messaging-exchange-czertainly-proxy",
-	"ilm-messaging-monitor",
+	testMsgUserMonitor,
 	"ilm-messaging-monitor-permission",
-	"ilm-messaging-provisioner",
+	testMsgUserProv,
 	"ilm-messaging-provisioner-permission",
-	"ilm-messaging-proxy",
+	testMsgUserProxy,
 	"ilm-messaging-proxy-permission",
 	"ilm-messaging-queue-core",
 	"ilm-messaging-queue-core-actions",
-	"ilm-messaging-queue-core-audit-logs",
+	testMsgQueueAudit,
 	"ilm-messaging-queue-core-events",
 	"ilm-messaging-queue-core-notifications",
 	"ilm-messaging-queue-core-scheduler",
@@ -183,7 +183,7 @@ var frozenUnscopedTopologyNames = []string{
 	"ilm-messaging-queue-time-quality-config",
 	"ilm-messaging-queue-time-quality-config-request",
 	"ilm-messaging-queue-time-quality-results",
-	"ilm-messaging-vhost",
+	testMsgVhost,
 }
 
 // namesOfKinds returns the sorted metadata.names of the rendered objects whose Kind is one
@@ -246,11 +246,11 @@ func TestSourceAndTargetTopologyNamesAreDisjoint(t *testing.T) {
 func TestManagedUserNamesAreVhostIndependent(t *testing.T) {
 	for _, vh := range []string{"", "/", "myvhost", bom.LegacyUnscopedVirtualHost} {
 		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = vh })
-		assert.Equal(t, "ilm-messaging-core", managedUserName(p, bom.MessagingUserCore),
+		assert.Equal(t, testMsgUserCore, managedUserName(p, bom.MessagingUserCore),
 			"the User CR name must not depend on the vhost (%q)", vh)
 		assert.Equal(t, "ilm-messaging-core-user-credentials", managedUserCredentialsSecretName(p, bom.MessagingUserCore),
 			"the generated credentials Secret name must not depend on the vhost (%q)", vh)
-		assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindUser), "ilm-messaging-core",
+		assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindUser), testMsgUserCore,
 			"the rendered User CR must keep its vhost-independent name (%q)", vh)
 	}
 }
@@ -400,9 +400,9 @@ func TestResolveManagedMessagingVhost(t *testing.T) {
 	// A user-pinned vhost keeps every vhost-bound object name UNSCOPED: it resolves to the
 	// same value on every bundle, so this platform never migrates and never needs a
 	// disjoint name (see TestUserPinnedVhostTopologyNamesAreFrozen and topologyScope).
-	assert.Equal(t, "ilm-messaging-vhost", vhost.GetName())
-	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindPermission), "ilm-messaging-core-permission")
-	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindQueue), "ilm-messaging-queue-core-audit-logs")
+	assert.Equal(t, testMsgVhost, vhost.GetName())
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindPermission), testMsgCorePerm)
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindQueue), testMsgQueueAudit)
 }
 
 func TestResolveManagedMessagingVhostDefault(t *testing.T) {
@@ -427,10 +427,10 @@ func TestResolveManagedMessagingUsers(t *testing.T) {
 	}
 	wants := []want{
 		{testMessagingAdminUser, []string{"administrator"}},
-		{"ilm-messaging-provisioner", []string{"administrator"}},
-		{"ilm-messaging-proxy", nil},
-		{"ilm-messaging-core", nil},
-		{"ilm-messaging-monitor", nil}, // time-quality monitor user (new in 2.18.0)
+		{testMsgUserProv, []string{"administrator"}},
+		{testMsgUserProxy, nil},
+		{testMsgUserCore, nil},
+		{testMsgUserMonitor, nil}, // time-quality monitor user (new in 2.18.0)
 	}
 	for _, w := range wants {
 		u := findByName(users, w.name)
@@ -463,12 +463,12 @@ func TestResolveManagedMessagingPermissions(t *testing.T) {
 	}
 	wants := []want{
 		{testMessagingAdminPerm, testMessagingAdminUser, ".*", ".*", ".*"},
-		{"ilm-messaging-provisioner-permission", "ilm-messaging-provisioner", ".*", ".*", ".*"},
-		{"ilm-messaging-proxy-permission", "ilm-messaging-proxy", "", "^czertainly-proxy$", `^proxy\..*$`},
+		{"ilm-messaging-provisioner-permission", testMsgUserProv, ".*", ".*", ".*"},
+		{"ilm-messaging-proxy-permission", testMsgUserProxy, "", "^czertainly-proxy$", `^proxy\..*$`},
 		// Core's read MUST include the time-quality monitor's request/result queues (2.18.0) —
 		// without it the broker denies read and Core crash-loops.
-		{"ilm-messaging-core-permission", "ilm-messaging-core", "", "^czertainly(-proxy)?$", `^core(\..+|-.+)?$|^time-quality\.(config-request|results)$`},
-		{"ilm-messaging-monitor-permission", "ilm-messaging-monitor", "", "^czertainly$", `^time-quality\.config$`},
+		{testMsgCorePerm, testMsgUserCore, "", "^czertainly(-proxy)?$", `^core(\..+|-.+)?$|^time-quality\.(config-request|results)$`},
+		{"ilm-messaging-monitor-permission", testMsgUserMonitor, "", "^czertainly$", `^time-quality\.config$`},
 	}
 	for _, w := range wants {
 		perm := findByName(perms, w.permName)
@@ -601,7 +601,7 @@ func TestResolveManagedMessagingTopologyNames(t *testing.T) {
 		return nil
 	}()
 	require.NotNil(t, auditLogs)
-	assert.Equal(t, "ilm-messaging-queue-core-audit-logs", auditLogs.GetName(),
+	assert.Equal(t, testMsgQueueAudit, auditLogs.GetName(),
 		"metadata.name is DNS-sanitized while spec.name keeps the dotted app name")
 }
 
