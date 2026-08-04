@@ -820,11 +820,20 @@ type MessagingTopology struct {
 	Bindings []MessagingBinding
 }
 
+// LegacyUnscopedVirtualHost is the pre-2.19 messaging vhost name, and the ONE vhost whose
+// managed-topology object names are rendered UNSCOPED. Live 2.17.0/2.18.0 platforms carry
+// those unscoped names in their clusters, so the operator must keep composing them
+// byte-identically or every applied rabbitmq.com CR would be re-identified and orphaned
+// (those kinds are deliberately excluded from pruning). Every other vhost — including the
+// 2.19.0 "/" — gets a vhost-derived scope, which is what lets a source and a target
+// topology coexist during a migration.
+const LegacyUnscopedVirtualHost = "czertainly"
+
 // DefaultVirtualHost is the pre-2.19 messaging vhost name.
 //
-// Deprecated: read the per-bundle MessagingTopology.DefaultVirtualHost instead; this
-// const remains only as the 2.17/2.18 data value and for module compatibility.
-const DefaultVirtualHost = "czertainly"
+// Deprecated: use LegacyUnscopedVirtualHost, or read the per-bundle
+// MessagingTopology.DefaultVirtualHost; this alias remains for module compatibility.
+const DefaultVirtualHost = LegacyUnscopedVirtualHost
 
 // Exchange names used by the topology (app-level names, tied to the application naming).
 const (
@@ -883,7 +892,7 @@ func latestOnlyQueueArguments() map[string]interface{} {
 // the user permission regexes, exchange/queue/binding names, and routing keys the platform
 // requires on its messaging vhost.
 var messagingTopology2180 = MessagingTopology{
-	DefaultVirtualHost: DefaultVirtualHost,
+	DefaultVirtualHost: LegacyUnscopedVirtualHost,
 	Users: []MessagingUser{
 		// administrator + provisioner have admin tags and full ".*" permissions.
 		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
@@ -999,7 +1008,7 @@ var messagingTopology2190 = MessagingTopology{
 // direct exchange plus the core.* queues 2.17.0 Core uses; there is no czertainly-proxy
 // exchange (that is the 2.18.0 proxy/provisioning path).
 var messagingTopology2170 = MessagingTopology{
-	DefaultVirtualHost: DefaultVirtualHost,
+	DefaultVirtualHost: LegacyUnscopedVirtualHost,
 	Users: []MessagingUser{
 		{Role: MessagingUserCore, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
 	},

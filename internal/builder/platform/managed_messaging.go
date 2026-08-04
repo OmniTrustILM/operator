@@ -125,6 +125,11 @@ func ManagedMessagingName(p *otilmv1alpha1.Platform) string {
 // credentials Secret) for a given platform broker role: "<platform>-messaging-<role>"
 // (e.g. "ilm-messaging-core"). The role-suffix keeps every topology object's name a fixed
 // function of the operator-owned cluster name.
+//
+// It is deliberately NOT vhost-scoped: broker users are global to the cluster, their specs
+// are identical across the version bundles, and the "<user>-user-credentials" Secret the
+// Topology Operator generates from each one is wired into every component's secretKeyRef —
+// so scoping this would re-key every component's credentials on a vhost migration.
 func managedUserName(p *otilmv1alpha1.Platform, role bom.MessagingUserRole) string {
 	return ManagedMessagingName(p) + "-" + string(role)
 }
@@ -153,10 +158,12 @@ func ManagedMessagingVhostGVK() schema.GroupVersionKind {
 }
 
 // ManagedMessagingVhostName returns the stable k8s object name of the Vhost CR the operator
-// renders: "<platform>-messaging-vhost" (NOT the vhost's spec.name, which is the broker vhost
-// the components connect to). It is a fixed function of the operator-owned cluster name.
+// renders: "<platform>-messaging<scope>-vhost" (NOT the vhost's spec.name, which is the
+// broker vhost the components connect to). It is a fixed function of the operator-owned
+// cluster name and the vhost scope, so a legacy-vhost platform keeps the exact name it
+// already carries while another vhost gets its own Vhost CR.
 func ManagedMessagingVhostName(p *otilmv1alpha1.Platform) string {
-	return managedUserName(p, "vhost")
+	return scopedTopologyName(p, managedVirtualHost(p), "vhost")
 }
 
 // MessagingManaged reports whether the Platform's messaging is operator-provisioned
@@ -317,7 +324,7 @@ func buildVhost(p *otilmv1alpha1.Platform, vhost string) *unstructured.Unstructu
 		"name":                     vhost, // Vhost spec.name
 		"rabbitmqClusterReference": clusterReference(p),
 	}
-	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindVhost, managedUserName(p, "vhost"), managedTopologyRole, spec)
+	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindVhost, ManagedMessagingVhostName(p), managedTopologyRole, spec)
 }
 
 // buildUser renders a User topology CR for one platform broker user. The Messaging
@@ -356,7 +363,7 @@ func buildPermission(p *otilmv1alpha1.Platform, vhost string, user bom.Messaging
 		"rabbitmqClusterReference": clusterReference(p),
 	}
 	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindPermission,
-		managedUserName(p, user.Role)+"-permission", managedTopologyRole, spec)
+		scopedTopologyName(p, vhost, string(user.Role)+"-permission"), managedTopologyRole, spec)
 }
 
 // buildExchange renders an Exchange topology CR with spec.{name,type,durable,vhost}.
@@ -369,7 +376,7 @@ func buildExchange(p *otilmv1alpha1.Platform, vhost string, ex bom.MessagingExch
 		"rabbitmqClusterReference": clusterReference(p),
 	}
 	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindExchange,
-		topologyObjectName(p, "exchange", ex.Name), managedTopologyRole, spec)
+		topologyObjectName(p, vhost, "exchange", ex.Name), managedTopologyRole, spec)
 }
 
 // buildQueue renders a Queue topology CR with spec.{name,durable,vhost}.
@@ -386,7 +393,7 @@ func buildQueue(p *otilmv1alpha1.Platform, vhost string, q bom.MessagingQueue) *
 		spec["arguments"] = q.Arguments
 	}
 	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindQueue,
-		topologyObjectName(p, "queue", q.Name), managedTopologyRole, spec)
+		topologyObjectName(p, vhost, "queue", q.Name), managedTopologyRole, spec)
 }
 
 // buildBinding renders a Binding topology CR (exchange→queue) with
@@ -402,16 +409,25 @@ func buildBinding(p *otilmv1alpha1.Platform, vhost string, b bom.MessagingBindin
 		"rabbitmqClusterReference": clusterReference(p),
 	}
 	return newManagedUnstructured(p, rabbitmqAPIVersion, rmqKindBinding,
-		topologyObjectName(p, "binding", b.Source+"-"+b.Destination), managedTopologyRole, spec)
+		topologyObjectName(p, vhost, "binding", b.Source+"-"+b.Destination), managedTopologyRole, spec)
+}
+
+// scopedTopologyName composes the object name of a vhost-bound topology CR from the
+// operator-owned cluster name, the vhost scope, and a suffix. The scope is EMPTY for the
+// legacy vhost, so a live 2.17.0/2.18.0 platform re-renders the exact names it already
+// carries; any other vhost gets its own name space, which is what lets a source and a
+// target topology coexist during a migration (see topology_naming.go).
+func scopedTopologyName(p *otilmv1alpha1.Platform, vhost, suffix string) string {
+	return ManagedMessagingName(p) + topologyScope(vhost) + "-" + suffix
 }
 
 // topologyObjectName composes a stable, DNS-safe object name for a topology CR from the
-// operator-owned cluster name, the kind discriminator, and the app-level resource name.
-// App-level names (e.g. "core.audit-logs") contain characters illegal in a k8s object
-// name (".", "_"), so they are sanitized to "-"; the kind discriminator keeps an exchange
-// and a queue of the same app name from colliding.
-func topologyObjectName(p *otilmv1alpha1.Platform, kind, appName string) string {
-	return ManagedMessagingName(p) + "-" + kind + "-" + sanitizeName(appName)
+// operator-owned cluster name, the vhost scope, the kind discriminator, and the app-level
+// resource name. App-level names (e.g. "core.audit-logs") contain characters illegal in a
+// k8s object name (".", "_"), so they are sanitized to "-"; the kind discriminator keeps an
+// exchange and a queue of the same app name from colliding.
+func topologyObjectName(p *otilmv1alpha1.Platform, vhost, kind, appName string) string {
+	return scopedTopologyName(p, vhost, kind+"-"+sanitizeName(appName))
 }
 
 // sanitizeName lowercases and replaces every character illegal in a Kubernetes object

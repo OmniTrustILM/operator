@@ -24,6 +24,8 @@ package platform
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -73,6 +75,158 @@ func findManagedObjs(objs []client.Object, kind string) []*unstructured.Unstruct
 		}
 	}
 	return out
+}
+
+// renderedNames returns the sorted metadata.names of a rendered object set — the object
+// IDENTITIES the operator applies to the cluster.
+func renderedNames(t *testing.T, objs []client.Object) []string {
+	t.Helper()
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.GetName())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestLegacyTopologyNamesAreFrozen pins the topology CR names for the legacy vhost
+// EXACTLY as earlier operator builds applied them. Live 2.17.0/2.18.0 platforms carry
+// these names in their clusters; rendering anything else would orphan every applied CR
+// (rabbitmq.com kinds are deliberately excluded from pruning, so the originals would
+// linger forever holding finalizers over live queues). Never relax this test: the legacy
+// vhost must map to an EMPTY scope, unconditionally.
+func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
+	t.Run("default bundle (2.18.0)", func(t *testing.T) {
+		p := managedMQPlatform(nil) // vhost unset -> the 2.18.0 bundle default
+		assert.Equal(t, []string{
+			"ilm-messaging",
+			"ilm-messaging-administrator",
+			"ilm-messaging-administrator-permission",
+			"ilm-messaging-binding-czertainly-core-actions",
+			"ilm-messaging-binding-czertainly-core-audit-logs",
+			"ilm-messaging-binding-czertainly-core-events",
+			"ilm-messaging-binding-czertainly-core-notifications",
+			"ilm-messaging-binding-czertainly-core-scheduler",
+			"ilm-messaging-binding-czertainly-core-validation",
+			"ilm-messaging-binding-czertainly-time-quality-config",
+			"ilm-messaging-binding-czertainly-time-quality-config-request",
+			"ilm-messaging-binding-czertainly-time-quality-results",
+			"ilm-messaging-core",
+			"ilm-messaging-core-permission",
+			"ilm-messaging-exchange-czertainly",
+			"ilm-messaging-exchange-czertainly-proxy",
+			"ilm-messaging-monitor",
+			"ilm-messaging-monitor-permission",
+			"ilm-messaging-provisioner",
+			"ilm-messaging-provisioner-permission",
+			"ilm-messaging-proxy",
+			"ilm-messaging-proxy-permission",
+			"ilm-messaging-queue-core",
+			"ilm-messaging-queue-core-actions",
+			"ilm-messaging-queue-core-audit-logs",
+			"ilm-messaging-queue-core-events",
+			"ilm-messaging-queue-core-notifications",
+			"ilm-messaging-queue-core-scheduler",
+			"ilm-messaging-queue-core-validation",
+			"ilm-messaging-queue-time-quality-config",
+			"ilm-messaging-queue-time-quality-config-request",
+			"ilm-messaging-queue-time-quality-results",
+			"ilm-messaging-vhost",
+		}, renderedNames(t, ResolveManagedMessaging(p)))
+	})
+
+	t.Run("2.17.0 bundle", func(t *testing.T) {
+		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion217 })
+		assert.Equal(t, []string{
+			"ilm-messaging",
+			"ilm-messaging-binding-czertainly-core-actions",
+			"ilm-messaging-binding-czertainly-core-audit-logs",
+			"ilm-messaging-binding-czertainly-core-events",
+			"ilm-messaging-binding-czertainly-core-notifications",
+			"ilm-messaging-binding-czertainly-core-scheduler",
+			"ilm-messaging-binding-czertainly-core-validation",
+			"ilm-messaging-core",
+			"ilm-messaging-core-permission",
+			"ilm-messaging-exchange-czertainly",
+			"ilm-messaging-queue-core",
+			"ilm-messaging-queue-core-actions",
+			"ilm-messaging-queue-core-audit-logs",
+			"ilm-messaging-queue-core-events",
+			"ilm-messaging-queue-core-notifications",
+			"ilm-messaging-queue-core-scheduler",
+			"ilm-messaging-queue-core-validation",
+			"ilm-messaging-vhost",
+		}, renderedNames(t, ResolveManagedMessaging(p)))
+	})
+}
+
+// namesOfKinds returns the sorted metadata.names of the rendered objects whose Kind is one
+// of kinds.
+func namesOfKinds(objs []client.Object, kinds ...string) []string {
+	want := map[string]bool{}
+	for _, k := range kinds {
+		want[k] = true
+	}
+	var names []string
+	for _, o := range objs {
+		if u, ok := o.(*unstructured.Unstructured); ok && want[u.GetKind()] {
+			names = append(names, u.GetName())
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// vhostScopedNames returns the names of the rendered objects whose identity is vhost-scoped
+// (everything the Messaging Topology Operator binds to a single vhost). The RabbitmqCluster
+// and the Users are broker-global and deliberately excluded.
+func vhostScopedNames(objs []client.Object) []string {
+	return namesOfKinds(objs, rmqKindVhost, rmqKindPermission, rmqKindExchange, rmqKindQueue, rmqKindBinding)
+}
+
+// TestSourceAndTargetTopologyNamesAreDisjoint proves a 2.18.0 render and a 2.19.0 render
+// share no vhost-scoped topology CR name, so both topologies can be live at once during a
+// migration (the Topology Operator's immutable spec.vhost/spec.name would otherwise reject
+// re-pointing the applied CRs).
+//
+// The RabbitmqCluster and the User CRs are EXCLUDED on purpose: they are broker-global,
+// their specs are identical across the two bundles, and each User's generated
+// "<user>-user-credentials" Secret is wired into every component's secretKeyRef — so they
+// must stay IDENTICAL across the cutover, which is asserted here instead of disjointness.
+func TestSourceAndTargetTopologyNamesAreDisjoint(t *testing.T) {
+	src := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion218 })
+	tgt := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion219 })
+	srcObjs := ResolveManagedMessaging(src)
+	tgtObjs := ResolveManagedMessaging(tgt)
+
+	s := vhostScopedNames(srcObjs)
+	d := vhostScopedNames(tgtObjs)
+	require.NotEmpty(t, s)
+	require.NotEmpty(t, d)
+	for _, n := range s {
+		assert.NotContains(t, d, n, "source name %q must not collide with the target set", n)
+	}
+
+	assert.Equal(t, namesOfKinds(srcObjs, rmqKindUser), namesOfKinds(tgtObjs, rmqKindUser),
+		"the broker Users (and thus their credentials Secrets) must be IDENTICAL across the cutover")
+	assert.Equal(t, namesOfKinds(srcObjs, rmqKindCluster), namesOfKinds(tgtObjs, rmqKindCluster),
+		"both topologies live on the SAME managed broker")
+}
+
+// TestManagedUserNamesAreVhostIndependent proves the broker Users — and the credentials
+// Secrets the Topology Operator generates from them, which every component consumes by
+// secretKeyRef — are NOT vhost-scoped. Scoping them would re-key every component's
+// credentials at cutover: a second migration inside the first.
+func TestManagedUserNamesAreVhostIndependent(t *testing.T) {
+	for _, vh := range []string{"", "/", "myvhost", bom.LegacyUnscopedVirtualHost} {
+		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = vh })
+		assert.Equal(t, "ilm-messaging-core", managedUserName(p, bom.MessagingUserCore),
+			"the User CR name must not depend on the vhost (%q)", vh)
+		assert.Equal(t, "ilm-messaging-core-user-credentials", managedUserCredentialsSecretName(p, bom.MessagingUserCore),
+			"the generated credentials Secret name must not depend on the vhost (%q)", vh)
+		assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindUser), "ilm-messaging-core",
+			"the rendered User CR must keep its vhost-independent name (%q)", vh)
+	}
 }
 
 func TestResolveManagedMessagingExternalRendersNothing(t *testing.T) {
@@ -216,6 +370,11 @@ func TestResolveManagedMessagingVhost(t *testing.T) {
 	assert.Equal(t, "myvhost", name, "the Vhost uses the configured virtualHost")
 	ref, _, _ := unstructured.NestedString(vhost.Object, "spec", "rabbitmqClusterReference", "name")
 	assert.Equal(t, testMessagingName, ref, "every topology CR references the managed cluster")
+
+	// A non-legacy vhost scopes every vhost-bound object name (the users stay unscoped).
+	assert.Equal(t, "ilm-messaging-myvhost-vhost", vhost.GetName())
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindPermission), "ilm-messaging-myvhost-core-permission")
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindQueue), "ilm-messaging-myvhost-queue-core-audit-logs")
 }
 
 func TestResolveManagedMessagingVhostDefault(t *testing.T) {
@@ -542,9 +701,10 @@ func TestManagedMessagingTopologyIsBOMData(t *testing.T) {
 
 // TestResolveManagedMessaging2190 proves a spec.version 2.19.0 platform renders the
 // renamed topology: vhost "/", 35 objects (1 cluster + 1 vhost + 5 users + 5
-// permissions + 2 exchanges + 11 queues + 10 bindings), and the status-poll queue.
+// permissions + 2 exchanges + 11 queues + 10 bindings), and the status-poll queue —
+// with every vhost-bound object name carrying the "/" vhost's "-default" scope.
 func TestResolveManagedMessaging2190(t *testing.T) {
-	p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = "2.19.0" })
+	p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion219 })
 	objs := ResolveManagedMessaging(p)
 	assert.Len(t, objs, 35)
 
@@ -552,6 +712,19 @@ func TestResolveManagedMessaging2190(t *testing.T) {
 	require.NotNil(t, vhost)
 	name, _, _ := unstructured.NestedString(vhost.Object, "spec", "name")
 	assert.Equal(t, "/", name)
+	assert.Equal(t, "ilm-messaging-default-vhost", vhost.GetName(),
+		"the 2.19.0 vhost CR is scoped by its \"/\" vhost")
+	assert.Equal(t, "ilm-messaging-default-vhost", ManagedMessagingVhostName(p),
+		"the controller's Vhost GET must address the SAME object the builder renders")
+	for _, n := range vhostScopedNames(objs) {
+		assert.True(t, strings.HasPrefix(n, "ilm-messaging-default-"),
+			"vhost-bound object %q must carry the \"/\" vhost scope", n)
+	}
+	assert.Equal(t, []string{
+		"ilm-messaging-default-exchange-ilm",
+		"ilm-messaging-default-exchange-ilm-proxy",
+	}, namesOfKinds(objs, rmqKindExchange))
+	assert.Contains(t, namesOfKinds(objs, rmqKindQueue), "ilm-messaging-default-queue-provider-status-poll")
 
 	queues := findManagedObjs(objs, rmqKindQueue)
 	require.Len(t, queues, 11)

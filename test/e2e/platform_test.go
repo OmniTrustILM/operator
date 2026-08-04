@@ -948,7 +948,10 @@ spec:
 			// spec.permissions.{configure,write,read}, binding source/destination/destinationType,
 			// spec.rabbitmqClusterReference, etc.) against the real operator.
 			By("listing every topology CR the operator should have rendered")
-			// metadata.name of each rendered topology CR (see managed_messaging.go's naming):
+			// metadata.name of each rendered topology CR (see managed_messaging.go's naming).
+			// This Platform runs on the LEGACY "czertainly" vhost (the default bundle's), which
+			// renders UNSCOPED — the exact names live 2.17.0/2.18.0 platforms already carry. Any
+			// other vhost inserts a "-<vhostSlug>" scope after <cluster> (see topology_naming.go).
 			//   Vhost:       <cluster>-vhost
 			//   User:        <cluster>-<role>
 			//   Permission:  <cluster>-<role>-permission
@@ -3020,7 +3023,9 @@ spec:
 				// The guard is a terminal steady state BEFORE the render/apply, so the live objects must
 				// keep the 2.18.0 contract: Core stays on core:2.18.0 and the managed topology keeps the
 				// 2.18.0 vhost with none of the 2.19.0-only objects (the renamed "ilm" exchange, the new
-				// provider.status-poll queue) appearing alongside it.
+				// provider.status-poll queue) appearing alongside it. This CR PINS spec.messaging.virtualHost
+				// to the legacy "czertainly", so the 2.19.0 objects it would have rendered carry the
+				// UNSCOPED names asserted absent here (a non-legacy vhost would scope them).
 				Consistently(func(g Gomega) {
 					img, _ := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
 						"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].image}`))
@@ -3210,16 +3215,21 @@ spec:
 				// metadata.name is sanitized ([a-z0-9-] only), so "provider.status-poll" and
 				// "provider_status_poll" would share the object name "...-queue-provider-status-poll"
 				// and only spec.name distinguishes them. Assert both.
-				const previewVhostCR = previewMQClusterName + "-vhost"
-				const previewStatusPollQueueCR = previewMQClusterName + "-queue-provider-status-poll"
+				//
+				// Every vhost-bound CR name carries the vhost SCOPE: 2.19.0 provisions the "/" vhost,
+				// which scopes to "-default". Only the LEGACY "czertainly" vhost renders unscoped (the
+				// upgrade block above asserts that regime), which is what lets the two topologies
+				// coexist on one broker during a migration.
+				const previewVhostCR = previewMQClusterName + "-default-vhost"
+				const previewStatusPollQueueCR = previewMQClusterName + "-default-queue-provider-status-poll"
 				Eventually(func(g Gomega) {
 					g.Expect(topologyObjectReadyInNS(g, ns, "vhost", previewVhostCR)).To(BeTrue(),
 						"the Vhost CR should be accepted and reach Ready")
 					g.Expect(topologyObjectSpecName(g, ns, "vhost", previewVhostCR)).To(Equal("/"),
 						"2.19.0 provisions the default \"/\" vhost")
 					for _, ex := range []struct{ cr, brokerName string }{
-						{previewMQClusterName + "-exchange-ilm", "ilm"},
-						{previewMQClusterName + "-exchange-ilm-proxy", "ilm-proxy"},
+						{previewMQClusterName + "-default-exchange-ilm", "ilm"},
+						{previewMQClusterName + "-default-exchange-ilm-proxy", "ilm-proxy"},
 					} {
 						g.Expect(topologyObjectReadyInNS(g, ns, "exchange", ex.cr)).To(BeTrue(),
 							"Exchange CR %q should be accepted and reach Ready (2.19.0 renamed both exchanges)", ex.cr)

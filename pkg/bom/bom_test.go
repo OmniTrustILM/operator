@@ -163,7 +163,9 @@ func TestMessagingTopology(t *testing.T) {
 	assert.Equal(t, "^czertainly$", monitor.Write)
 	assert.Equal(t, `^time-quality\.config$`, monitor.Read)
 
-	assert.Equal(t, "czertainly", DefaultVirtualHost)
+	assert.Equal(t, "czertainly", LegacyUnscopedVirtualHost)
+	assert.Equal(t, LegacyUnscopedVirtualHost, DefaultVirtualHost,
+		"the deprecated alias must keep resolving to the legacy vhost (external modules import it)")
 	assert.NotEmpty(t, DefaultRabbitMQVersion)
 }
 

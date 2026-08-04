@@ -116,6 +116,7 @@ const (
 	testKongABC = "kong-abc"
 
 	// version_test.go.
+	testVersion217 = "2.17.0"
 	testVersion218 = "2.18.0"
 	testVersion219 = "2.19.0"
 
