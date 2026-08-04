@@ -446,7 +446,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	// only on this success path; an unknown version returned early (steadyState) and left the
 	// prior ObservedVersion untouched.
 	platform.Status.ObservedVersion = mig.version
-	if err := r.Status().Update(ctx, platform); err != nil {
+	if err := r.writeStatus(ctx, platform); err != nil {
 		// A competing write updated the Platform between our cached read and this status write
 		// (common during bring-up: watched child Secrets/Deployments from the upstream operators
 		// fire overlapping reconciles). The status is recomputed every reconcile, so on a benign
@@ -1707,6 +1707,33 @@ func isWebhookNotReady(err error) bool {
 		strings.Contains(msg, "no endpoints available for service")
 }
 
+// writeStatus persists status WITHOUT letting the write revise the spec this pass is rendering
+// against. Every status write in this package goes through it.
+//
+// client.Status().Update DECODES THE APISERVER'S REPLY BACK INTO THE OBJECT, and that reply is
+// the whole Platform — SPEC INCLUDED, exactly as stored. The copy a reconcile holds is
+// deliberately not that spec: resolvePlatformVersion pins the version it resolved onto
+// spec.version, the messaging migration RE-PINS it back to the version it is holding the
+// platform on, and DefaultImageRegistry defaults the shared registry — all in memory, all
+// decisions this pass has already acted on. Every builder reads spec.version (resolveBundle), so
+// a status write taken in the MIDDLE of a pass silently restores the REQUESTED version and hands
+// every apply that follows it the target bundle.
+//
+// That is not theoretical: it is how a drain, which persists its clean-poll progress and then
+// goes on reconciling the source version, came to apply the TARGET messaging topology beside a
+// source virtual host that had not emptied — and rabbitmq.com objects are deliberately never
+// pruned, so nothing reclaimed them afterwards.
+//
+// The spec is restored whether the write succeeded or failed: it is this pass's rendering
+// decision, and a status write is not entitled to change it. A genuine spec edit re-enqueues the
+// Platform through its own watch and is picked up by the NEXT pass, whole.
+func (r *Reconciler) writeStatus(ctx context.Context, p *otilmv1alpha1.Platform) error {
+	rendering := p.Spec
+	err := r.Status().Update(ctx, p)
+	p.Spec = rendering
+	return err
+}
+
 // steadyState marks the Platform Degraded for a DETERMINISTIC won't-proceed condition
 // and returns NO error and NO requeue: the condition is terminal until an external
 // change (a watch / a spec edit) re-enqueues the Platform. Used for the singleton
@@ -1740,7 +1767,7 @@ func (r *Reconciler) setDegradedMessage(ctx context.Context, p *otilmv1alpha1.Pl
 		Type: conditionDegraded, Status: metav1.ConditionTrue, Reason: reason,
 		Message: message, ObservedGeneration: p.Generation, // message must not leak secret values/coordinates
 	})
-	if err := r.Status().Update(ctx, p); err != nil {
+	if err := r.writeStatus(ctx, p); err != nil {
 		log.FromContext(ctx).Error(err, "failed to update Platform status", "phase", "Degraded")
 	}
 }

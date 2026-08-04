@@ -268,7 +268,7 @@ func (r *Reconciler) refreshForceAuthorization(ctx context.Context, p *otilmv1al
 		return nil
 	}
 	u.ForceCarriedOver = false
-	if err := r.Status().Update(ctx, p); err != nil {
+	if err := r.writeStatus(ctx, p); err != nil {
 		u.ForceCarriedOver = true
 		return err
 	}
@@ -286,7 +286,7 @@ func (r *Reconciler) consumeMigrationForce(ctx context.Context, p *otilmv1alpha1
 		return nil
 	}
 	u.ForceAuthorized = true
-	if err := r.Status().Update(ctx, p); err != nil {
+	if err := r.writeStatus(ctx, p); err != nil {
 		u.ForceAuthorized = false
 		return err
 	}

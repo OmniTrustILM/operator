@@ -113,7 +113,7 @@ func (r *Reconciler) fenceWorkloads(ctx context.Context, p *otilmv1alpha1.Platfo
 		// Persist the WHOLE list before the first patch: from here on, every entry is
 		// restorable even if the process dies between two patches.
 		p.Status.Upgrade.Fenced = recorded
-		if err := r.Status().Update(ctx, p); err != nil {
+		if err := r.writeStatus(ctx, p); err != nil {
 			return err
 		}
 	}
@@ -205,7 +205,7 @@ func (r *Reconciler) restoreWorkload(ctx context.Context, p *otilmv1alpha1.Platf
 		return nil // already restored on an earlier pass
 	}
 	p.Status.Upgrade.Fenced = remaining
-	return r.Status().Update(ctx, p)
+	return r.writeStatus(ctx, p)
 }
 
 // patchWorkloadReplicas writes .spec.replicas on one fenced workload under the fence's own

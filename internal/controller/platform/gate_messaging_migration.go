@@ -38,7 +38,9 @@ package platform
 // reconcile the source bundle. Without it the very next apply would render the target
 // topology beside a source vhost that has not drained — exactly what the migration exists to
 // sequence. The pin is in-memory only, as resolvePlatformVersion's is: no spec is ever
-// persisted.
+// persisted. It also has to SURVIVE this file's own status writes, which is why every one of
+// them goes through Reconciler.writeStatus rather than the client directly — see the reasoning
+// there.
 //
 // THE CADENCE. Every phase that WAITS re-checks on migrationRequeueAfter. The gate must
 // supply that requeue itself: it runs ahead of the messaging gate, so on a pass it
@@ -557,7 +559,7 @@ func (r *Reconciler) liftMigrationFence(ctx context.Context, p *otilmv1alpha1.Pl
 // idempotent.
 func (r *Reconciler) writeMigrationState(ctx context.Context, p *otilmv1alpha1.Platform, status metav1.ConditionStatus, reason, message string) error {
 	setMigrationCondition(p, status, reason, message)
-	return r.Status().Update(ctx, p)
+	return r.writeStatus(ctx, p)
 }
 
 // setMigrationCondition records the migration's state on the Platform's conditions, following

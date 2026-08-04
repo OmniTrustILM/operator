@@ -48,6 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
@@ -122,6 +123,26 @@ func pinMigrationInputs(p *otilmv1alpha1.Platform) {
 	if fingerprint, ok := migrationInputFingerprint(p); ok {
 		p.Status.Upgrade.InputsHash = fingerprint
 	}
+}
+
+// managedMessagingNames lists the managed-messaging objects a platform copy would apply, in
+// render order. The names are SCOPED to the virtual host they belong to, so the source and the
+// target sets are disjoint — which is what makes them a usable answer to "which version did this
+// pass render?".
+func managedMessagingNames(p *otilmv1alpha1.Platform) []string {
+	var names []string
+	for _, obj := range platformbuilder.ResolveManagedMessaging(p) {
+		names = append(names, obj.GetName())
+	}
+	return names
+}
+
+// managedMessagingNamesAt is managedMessagingNames for one named version, so a test can state
+// the two sets it is distinguishing without hard-coding either.
+func managedMessagingNamesAt(p *otilmv1alpha1.Platform, version string) []string {
+	pinned := p.DeepCopy()
+	pinned.Spec.Version = version
+	return managedMessagingNames(pinned)
 }
 
 // migrationBundles resolves the source and target bundles the gate is called with.
@@ -326,6 +347,34 @@ func TestGateMessagingMigrationStartFencesAndHoldsTheSourceVersion(t *testing.T)
 	assertNoBrokerCoordinates(t, reasons)
 }
 
+// TestGateMessagingMigrationStartRendersTheSourceTopology asks the start pass the question the
+// live cluster asks: not which version it REPORTS, but which managed topology it would apply.
+//
+// The two can disagree, because every builder resolves its bundle from spec.version on the copy
+// the pass is holding — not from the bundle the gate returns. The source and target topologies
+// are disjoint OBJECT SETS (their names are scoped to the virtual host they belong to), and
+// rabbitmq.com objects are deliberately never pruned, so a single pass that renders the target
+// early leaves a virtual host and its exchanges behind that nothing will ever reclaim.
+func TestGateMessagingMigrationStartRendersTheSourceTopology(t *testing.T) {
+	p := migrationGatePlatform()
+	from, to := migrationBundles(t)
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
+
+	render, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err)
+	require.False(t, handled)
+	require.Equal(t, from, render.bundle, "the pass that starts a migration renders the SOURCE bundle")
+
+	sourceTopologyNames := managedMessagingNamesAt(p, platformVersion218)
+	targetTopologyNames := managedMessagingNamesAt(p, platformVersion219)
+	require.NotEmpty(t, sourceTopologyNames)
+	require.NotEqual(t, sourceTopologyNames, targetTopologyNames,
+		"the fixture must be a move whose topology object names really are disjoint, or this proves nothing")
+
+	assert.Equal(t, sourceTopologyNames, managedMessagingNames(p),
+		"the objects the pass would apply are the SOURCE topology, whole")
+}
+
 // TestGateMessagingMigrationHoldsFencingWhileProducersRun: the fence patch is instantaneous,
 // the producers are not. Fencing must not hand over to the drain while pods are still up —
 // the drain would start counting an "empty" queue that is still being written to.
@@ -472,6 +521,73 @@ func TestGateMessagingMigrationAbortRestoresAndClears(t *testing.T) {
 	assert.Equal(t, reasonMigrationAborted, cond.Reason)
 	assertNoBrokerCoordinates(t, cond.Message)
 	assert.Contains(t, strings.Join(drainEvents(rec), " "), eventMigrationAborted)
+}
+
+// TestReversibleMigrationExitsDeleteNothing pins a DECISION, not an omission: neither exit from
+// a reversible migration — the user's revert, or a deadline the phase did not meet — deletes
+// anything.
+//
+// The temptation is to have them reclaim target topology "just in case some pass applied it
+// early", and it is the wrong instinct. A reclaim on these paths would mean the operator issuing
+// broker-side deletes on an ORDINARY reconcile, which is exactly what pruneOrphans refuses to do
+// for rabbitmq.com objects: deleting a Vhost CR takes the virtual host and everything on it with
+// it. The one path that IS allowed to delete topology is the cleanup phase, and it earns that
+// behind the drain barrier plus a final check that nothing is still connected. An abort has no
+// such barrier — it fires precisely when the migration went wrong, i.e. when the operator's
+// picture of the broker is least trustworthy, and it derives what to delete from the very record
+// that may be what went wrong. So the exits restore the fence, keep the platform on its source
+// version, and touch nothing else.
+func TestReversibleMigrationExitsDeleteNothing(t *testing.T) {
+	fenced := []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}}
+
+	tests := []struct {
+		name      string
+		platform  func() *otilmv1alpha1.Platform
+		requested string
+	}{
+		{
+			name: "the user reverts spec.version",
+			platform: func() *otilmv1alpha1.Platform {
+				p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
+				p.Spec.Version = platformVersion218
+				return p
+			},
+			requested: platformVersion218,
+		},
+		{
+			name: "the drain outlives its deadline",
+			platform: func() *otilmv1alpha1.Platform {
+				p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
+				p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+				return p
+			},
+			requested: platformVersion219,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.platform()
+			bundle := bundleFor(t, tc.requested)
+			var deleted []string
+			watchDeletes := interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					deleted = append(deleted, obj.GetObjectKind().GroupVersionKind().Kind+"/"+obj.GetName())
+					return c.Delete(ctx, obj, opts...)
+				},
+			}
+			r, _ := migrationReconciler(t, p, watchDeletes, producerWorkloads(0, 0)...)
+
+			_, handled, _, err := r.gateMessagingMigration(context.Background(), p, bundle, tc.requested)
+			require.NoError(t, err)
+			require.False(t, handled, "the platform goes on reconciling its source version")
+
+			assert.Empty(t, deleted, "a reversible exit reclaims nothing — it restores the fence and stops")
+			assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the producers come back at the recorded count")
+			assert.Equal(t, platformVersion218, storedPlatform(t, r).Status.ObservedVersion,
+				"the platform keeps running the version it started from")
+		})
+	}
 }
 
 // TestAbortMigrationKeepsTheRecordWhenTheWriteFails: the record is the only thing that says

@@ -39,12 +39,15 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 // awaitObservedVersion waits until the platform reports the version it has settled on.
@@ -97,6 +100,39 @@ func workloadImages(ns, name string) string {
 		images = append(images, c.Image)
 	}
 	return strings.Join(images, " ")
+}
+
+// renderedImages joins every image the BASE RENDER of a platform copy would pull, so a spec can
+// assert which bundle the copy the reconcile is holding would actually apply — the question
+// workloadImages answers about what has already landed, asked one step earlier.
+func renderedImages(p *otilmv1alpha1.Platform) string {
+	var images []string
+	for _, obj := range platformbuilder.RenderPlatformBase(p) {
+		var pod *corev1.PodSpec
+		switch w := obj.(type) {
+		case *appsv1.Deployment:
+			pod = &w.Spec.Template.Spec
+		case *appsv1.StatefulSet:
+			pod = &w.Spec.Template.Spec
+		default:
+			continue
+		}
+		for _, c := range append(append([]corev1.Container{}, pod.InitContainers...), pod.Containers...) {
+			images = append(images, c.Image)
+		}
+	}
+	return strings.Join(images, " ")
+}
+
+// renderedManagedMessagingNames lists the managed-messaging objects a platform copy would apply.
+// Their names are SCOPED to the virtual host they belong to, so they are where a premature target
+// render becomes visible as a second, disjoint topology set.
+func renderedManagedMessagingNames(p *otilmv1alpha1.Platform) []string {
+	var names []string
+	for _, obj := range platformbuilder.ResolveManagedMessaging(p) {
+		names = append(names, obj.GetName())
+	}
+	return names
 }
 
 // migrationConditionOf returns the platform's MessagingMigration condition, or nil.
@@ -316,4 +352,78 @@ var _ = Describe("Messaging migration state", func() {
 			Expect(getPlatform(ns).Status.ObservedVersion).To(Equal(platformVersion218))
 		})
 	})
+
+	// A PRE-CUTOVER PASS MUST LEAVE THE WHOLE RECONCILE ON THE SOURCE, and "the whole reconcile"
+	// means the copy the builders read, not the version the gate reports. Both are asserted here,
+	// against a REAL apiserver, because only a real one reproduces the way the two can disagree:
+	// Status().Update DECODES THE REPLY BACK INTO THE OBJECT — spec included, exactly as stored —
+	// so a status write taken after the source re-pin silently restores the requested version,
+	// and every apply that follows renders the TARGET. A fake client never replies with the spec,
+	// so no unit test can make this claim.
+	Context("A pass that takes a status write of its own while holding the platform back", func() {
+		It("holds the source through a drain pass that persists its progress", func() {
+			const ns = "ilm-migration-drain-pin"
+			// No broker is registered for this namespace, so the poll can only fail closed — which
+			// is the branch that persists a clean-poll count of zero and goes on reconciling.
+			beginMigrationFixture(ns, otilmv1alpha1.MigrationPhaseDraining, managedMessagingPlatform,
+				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
+			)
+
+			from, ok := bom.BundleFor(platformVersion218)
+			Expect(ok).To(BeTrue())
+			to, ok := bom.BundleFor(platformVersion219)
+			Expect(ok).To(BeTrue())
+
+			By("driving a drain pass that takes a sample and records it")
+			r := fenceReconciler()
+			var render migrationRender
+			var held *otilmv1alpha1.Platform
+			Eventually(func(g Gomega) {
+				held = getPlatform(ns)
+				g.Expect(held.Status.Upgrade).NotTo(BeNil())
+				g.Expect(held.Status.Upgrade.Phase).To(Equal(otilmv1alpha1.MigrationPhaseDraining))
+				held.Spec.Version = platformVersion219
+				// The drain spaces its samples from a floor it records; clearing it makes THIS
+				// pass the one that samples and persists what it found.
+				held.Status.Upgrade.NextDrainPollAt = nil
+
+				var handled bool
+				var err error
+				render, handled, _, err = r.gateMessagingMigration(ctx, held, to, platformVersion219)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(handled).To(BeFalse(), "a waiting phase keeps reconciling the source version")
+			}, platformTimeout, platformInterval).Should(Succeed())
+
+			Expect(held.Status.Upgrade.CleanDrainPolls).To(BeZero(), "a failed poll counts as no progress")
+			assertRendersSource(held, render, from)
+		})
+	})
 })
+
+// assertRendersSource is the whole invariant of a pre-cutover pass, asserted where it actually
+// bites: not only that the gate REPORTS the source, but that the platform copy the rest of the
+// reconcile renders from would apply the source's workloads and the source's managed topology.
+//
+// The topology is the assertion that matches the live-cluster failure. The target's virtual host
+// scopes its object names differently from the source's, so a premature target render shows up as
+// a whole set of differently-named rabbitmq.com objects — which, applied, nothing would ever
+// reclaim, because the prune deliberately never touches that group.
+func assertRendersSource(p *otilmv1alpha1.Platform, render migrationRender, from bom.Bundle) {
+	ExpectWithOffset(1, render.version).To(Equal(platformVersion218), "the pass reports the version it is still running")
+	ExpectWithOffset(1, render.bundle).To(Equal(from))
+	ExpectWithOffset(1, p.Spec.Version).To(Equal(platformVersion218),
+		"the source re-pin must survive the pass's own status writes — every builder resolves its bundle off this field")
+
+	ExpectWithOffset(1, renderedImages(p)).To(And(
+		ContainSubstring(":"+platformVersion218),
+		Not(ContainSubstring(":"+platformVersion219)),
+	), "no workload belonging to the target may be rendered before the cutover")
+
+	names := renderedManagedMessagingNames(p)
+	ExpectWithOffset(1, names).To(ContainElement("ilm-messaging-vhost"),
+		"the source virtual host is the only one this pass may declare")
+	for _, n := range names {
+		ExpectWithOffset(1, n).NotTo(ContainSubstring("-default-"),
+			"a target-scoped topology object must not be rendered before the cutover")
+	}
+}

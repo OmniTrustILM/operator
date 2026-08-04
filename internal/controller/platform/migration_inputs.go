@@ -81,7 +81,7 @@ func (r *Reconciler) guardMigrationInputs(ctx context.Context, p *otilmv1alpha1.
 	if u.InputsHash == "" {
 		previous := u.InputsHash
 		u.InputsHash = fingerprint
-		if err := r.Status().Update(ctx, p); err != nil {
+		if err := r.writeStatus(ctx, p); err != nil {
 			u.InputsHash = previous
 			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
 			return true, res, aerr
