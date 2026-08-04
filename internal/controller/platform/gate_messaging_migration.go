@@ -54,6 +54,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -107,6 +108,17 @@ const (
 	// reasonMigrationWorkloadKindChanged: a fenced component's workloadType was changed while
 	// the migration holds it at zero replicas. Refused — see migrationWorkloadKindFlip.
 	reasonMigrationWorkloadKindChanged = "MigrationWorkloadKindChanged"
+	// reasonMigrationInputsChanged: a migration-critical spec input changed mid-flight — see
+	// migrationInputFingerprint for what that covers and why it cannot be followed.
+	reasonMigrationInputsChanged = "MigrationInputsChanged"
+	// reasonMigrationSourceVersionUnknown: the platform reports running a version this
+	// operator build does not carry, so the engine cannot tell whether the requested move
+	// renames the messaging topology. It refuses to render the target on that ignorance.
+	reasonMigrationSourceVersionUnknown = "MigrationSourceVersionUnknown"
+	// reasonMigrationPhaseUnknown: status.upgrade names a phase this build has no handler
+	// for. Every phase authorises different work — one of them deletes the source topology —
+	// so an unrecognised value stops the engine instead of falling through to any of them.
+	reasonMigrationPhaseUnknown = "MigrationPhaseUnknown"
 )
 
 // Event reasons for the migration's lifecycle transitions.
@@ -151,12 +163,26 @@ func (r *Reconciler) gateMessagingMigration(ctx context.Context, p *otilmv1alpha
 	render := migrationRender{version: targetVersion, bundle: target}
 
 	// The SOURCE bundle is read only to decide whether a move needs a migration at all; an
-	// in-flight one is decided entirely from status.upgrade. So a running version this
-	// operator build no longer carries simply cannot START a migration — it does not silence
-	// one that is already recorded.
+	// in-flight one is decided entirely from status.upgrade, so a running version this
+	// operator build no longer carries does not silence one that is already recorded.
+	//
+	// With no migration recorded, an unrecognised running version is a REFUSAL, not a
+	// shrug. The trigger's whole question — does this move rename the messaging virtual
+	// host? — is answered from the running version's bundle, and without it the engine
+	// cannot tell an additive upgrade from one that would render the target topology beside
+	// a source vhost still holding traffic. Rendering the target anyway is the unsafe half of
+	// that guess, so the reconcile stops in a terminal, user-correctable state instead.
+	// (An empty observed version is a fresh install: bom.BundleFor resolves it, and the
+	// trigger sees nothing running to migrate FROM.)
 	source, sourceKnown := bom.BundleFor(p.Status.ObservedVersion)
 	if !sourceKnown && !migrationInFlight(p) {
-		return render, false, ctrl.Result{}, nil
+		message := fmt.Sprintf(
+			"the platform reports running version %q, which this operator build does not carry, so it cannot tell whether moving to %s "+
+				"renames the messaging topology; run an operator build that carries %q, or correct status.observedVersion — supported versions: %s",
+			p.Status.ObservedVersion, targetVersion, p.Status.ObservedVersion, strings.Join(bom.SupportedVersions(), ", "))
+		setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationSourceVersionUnknown, message)
+		res, err := r.steadyState(ctx, p, reasonMigrationSourceVersionUnknown, message)
+		return render, true, res, err
 	}
 
 	switch decision := decideMigration(p, source, target); decision.Action {
@@ -190,9 +216,22 @@ func (r *Reconciler) gateMessagingMigration(ctx context.Context, p *otilmv1alpha
 
 // advanceMigration runs the recorded phase of a live migration.
 //
-// The workload-kind guard runs first, for EVERY phase: it protects a fence that is already
-// holding workloads down, and the fence outlives the phase that raised it.
+// The two spec guards run first, for EVERY phase. The input-drift guard protects the
+// migration's IDENTITY — which broker, which virtual hosts, which topology objects are source
+// and which target — and the workload-kind guard protects a fence that is already holding
+// workloads down. Both outlive the phase that raised them, so neither belongs inside one.
 func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Platform, render migrationRender) (migrationRender, bool, ctrl.Result, error) {
+	if handled, res, err := r.guardMigrationInputs(ctx, p); handled || err != nil {
+		return render, true, res, err
+	}
+
+	// A force authorisation left over from an earlier attempt stops counting as left over the
+	// moment the operator clears the field, which is what lets them re-arm it for this one.
+	if err := r.refreshForceAuthorization(ctx, p); err != nil {
+		res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
+		return render, true, res, aerr
+	}
+
 	if name, recorded, requested, flipped := migrationWorkloadKindFlip(p); flipped {
 		message := fmt.Sprintf(
 			"workload %q is rendered as a %s but the messaging migration to platform version %s holds it fenced as a %s; "+
@@ -218,13 +257,26 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 		// re-pin deliberately does not apply to it.
 		return r.migrationCuttingOverPhase(ctx, p, render)
 
-	default:
+	case otilmv1alpha1.MigrationPhaseCleaningUp:
 		// messaging_migration_cleanup.go: reclaim the topology the platform has moved off, one
 		// class at a time and behind a final barrier, then finish the migration. Like the
 		// cutover it renders the TARGET — the source re-pin ended two phases ago — and it is
 		// past the point of no return, so the deadline it applies ends a WAIT rather than
 		// unwinding anything.
 		return r.migrationCleaningUpPhase(ctx, p, render)
+
+	default:
+		// AN UNRECOGNISED PHASE IS AN ERROR, never a default action. The phase decides what
+		// this pass is allowed to do, and one of the phases DELETES the source topology — so a
+		// value written by a newer build, or corrupted, must stop the engine rather than pick
+		// the most destructive interpretation of it. Nothing is unwound: the fence stays where
+		// it is, and a build that understands the phase resumes from exactly here.
+		cause := fmt.Errorf(
+			"the messaging migration to platform version %s is recorded at phase %q, which this operator build does not implement",
+			p.Status.Upgrade.ToVersion, p.Status.Upgrade.Phase)
+		setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationPhaseUnknown, cause.Error())
+		res, err := r.degraded(ctx, p, reasonMigrationPhaseUnknown, cause)
+		return render, true, res, err
 	}
 }
 
@@ -332,6 +384,15 @@ func (r *Reconciler) beginMigration(ctx context.Context, p *otilmv1alpha1.Platfo
 		Phase:          otilmv1alpha1.MigrationPhaseFencing,
 		StartedAt:      now,
 		PhaseStartedAt: now,
+		// A force authorisation the spec ALREADY carried for this target belongs to some
+		// earlier attempt, so it is marked carried over and authorises nothing here until the
+		// operator clears it and sets it again for this one.
+		ForceCarriedOver: migrationForceCarriedOver(p, toVersion),
+	}
+	// The migration-critical inputs are pinned in the same write that records the migration,
+	// so there is never a pass that could act on a spec the record did not agree to.
+	if fingerprint, ok := migrationInputFingerprint(p); ok {
+		p.Status.Upgrade.InputsHash = fingerprint
 	}
 	if err := r.writeMigrationState(ctx, p, metav1.ConditionTrue,
 		string(otilmv1alpha1.MigrationPhaseFencing), migrationPhaseMessage(p.Status.Upgrade)); err != nil {
@@ -348,16 +409,17 @@ func (r *Reconciler) beginMigration(ctx context.Context, p *otilmv1alpha1.Platfo
 // a stage the cluster has not recorded.
 func (r *Reconciler) transitionMigrationPhase(ctx context.Context, p *otilmv1alpha1.Platform, next otilmv1alpha1.MigrationPhase) error {
 	u := p.Status.Upgrade
-	previous, previousStart, previousPolls := u.Phase, u.PhaseStartedAt, u.CleanDrainPolls
+	previous, previousStart, previousPolls, previousNext := u.Phase, u.PhaseStartedAt, u.CleanDrainPolls, u.NextDrainPollAt
 
 	u.Phase = next
 	u.PhaseStartedAt = metav1.Now()
-	// Each phase's deadline and its progress counter are the previous phase's, not the new
-	// one's: a phase begins with a full budget and nothing counted.
-	u.CleanDrainPolls = 0
+	// Each phase's deadline, its progress counter and the poll floor that paced it are the
+	// previous phase's, not the new one's: a phase begins with a full budget, nothing counted
+	// and nothing to wait for.
+	u.CleanDrainPolls, u.NextDrainPollAt = 0, nil
 
 	if err := r.writeMigrationState(ctx, p, metav1.ConditionTrue, string(next), migrationPhaseMessage(u)); err != nil {
-		u.Phase, u.PhaseStartedAt, u.CleanDrainPolls = previous, previousStart, previousPolls
+		u.Phase, u.PhaseStartedAt, u.CleanDrainPolls, u.NextDrainPollAt = previous, previousStart, previousPolls, previousNext
 		return err
 	}
 	r.eventf(p, corev1.EventTypeNormal, eventMigrationPhase,
@@ -573,14 +635,25 @@ func migrationWorkloadKindFlip(p *otilmv1alpha1.Platform) (name, recorded, reque
 	return "", "", "", false
 }
 
-// fencedProducersStopped reports whether every fenced workload has actually wound down, read
+// fencedProducersStopped reports whether every EXPECTED producer has actually wound down, read
 // from each one's OBSERVED replica count rather than the zero the fence wrote.
 //
 // The distinction is the whole point of the Fencing phase: patching .spec.replicas to zero is
 // instantaneous, but a producer keeps publishing until its last pod is gone. Advancing to the
 // drain on the patch alone would start counting an "empty" queue while messages were still
-// arriving. A workload that no longer exists has no producer left and is stopped by
-// definition.
+// arriving.
+//
+// Every entry the fence recorded must clear, and there are exactly two ways to clear:
+//
+//   - the entry was recorded ABSENT and the workload is still absent — there is no producer,
+//     and if the render creates one it is fenced on sight (the entry is in the list) and this
+//     answer goes back to "not stopped" until it is observed at zero; or
+//   - the workload exists and its controller reports ZERO pods.
+//
+// A workload the fence recorded as RUNNING and that has since VANISHED is deliberately NOT
+// stopped. The operator's own render re-creates its children on every pass, so a missing
+// producer is a workload about to come back — treating it as stopped would hand the drain a
+// virtual host that is about to be published to again.
 func (r *Reconciler) fencedProducersStopped(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
 	if p.Status.Upgrade == nil {
 		return false, nil
@@ -592,7 +665,10 @@ func (r *Reconciler) fencedProducersStopped(ctx context.Context, p *otilmv1alpha
 		}
 		if err := r.Get(ctx, types.NamespacedName{Name: w.Name, Namespace: p.Namespace}, obj); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue
+				if w.Absent {
+					continue // expected to be missing, and still is
+				}
+				return false, nil // it was running when the fence recorded it: wait for it back, at zero
 			}
 			return false, fmt.Errorf("reading %s %q to check the fence has taken effect: %w", w.Kind, w.Name, err)
 		}

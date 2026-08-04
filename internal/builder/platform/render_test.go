@@ -371,6 +371,49 @@ func TestRenderPlatformAdditionalEnvOnEveryComponent(t *testing.T) {
 	}
 }
 
+// TestRenderPlatformStampsTheVersionOnEveryPodTemplate: every component's pod template names
+// the bundle it was rendered from.
+//
+// The marker exists because an IMAGE TAG cannot answer "which version is this workload
+// configured for": neighbouring bundles legitimately pin a component to the same image, so a
+// template rendered entirely from the previous version can satisfy an image check on the new
+// one. The messaging migration's staged cutover gates on this annotation for exactly that
+// reason, and it must be the operator's — a user pod annotation may not overwrite it.
+func TestRenderPlatformStampsTheVersionOnEveryPodTemplate(t *testing.T) {
+	p := basePlatform()
+	p.Spec.Utils.Enabled = true
+	p.Spec.Version = bom.DefaultVersion
+	p.Spec.Common.PodAnnotations = map[string]string{PlatformVersionAnnotation: "not-a-version"}
+
+	deps := map[string]*appsv1.Deployment{}
+	for _, o := range RenderPlatform(p) {
+		if dep, ok := o.(*appsv1.Deployment); ok {
+			deps[dep.Name] = dep
+		}
+	}
+	for _, comp := range allPlatformComponents {
+		dep, ok := deps[comp]
+		require.Truef(t, ok, "%s must render", comp)
+		assert.Equalf(t, bom.DefaultVersion, dep.Spec.Template.Annotations[PlatformVersionAnnotation],
+			"%s pod template must be stamped with the rendered version, and the CR may not overwrite it", comp)
+	}
+}
+
+// TestRenderedPlatformVersionFollowsTheResolvedBundle: the stamp names the bundle the images and
+// wiring actually came from, which for a version this build does not carry is the operator's
+// default — exactly the fallback resolveBundle makes.
+func TestRenderedPlatformVersionFollowsTheResolvedBundle(t *testing.T) {
+	p := basePlatform()
+	assert.Equal(t, bom.DefaultVersion, RenderedPlatformVersion(p), "an empty spec.version renders the default bundle")
+
+	p.Spec.Version = "2.19.0"
+	assert.Equal(t, "2.19.0", RenderedPlatformVersion(p))
+
+	p.Spec.Version = "9.9.9"
+	assert.Equal(t, bom.DefaultVersion, RenderedPlatformVersion(p),
+		"the stamp may never name a bundle other than the one that was rendered")
+}
+
 // TestRenderPlatformAdditionalEnvOmittedWhenUnset asserts that when spec.additionalEnv
 // is empty no extra env is injected (the global passthrough is a no-op): a sentinel
 // name never appears on any component.

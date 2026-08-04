@@ -145,7 +145,6 @@ type queueRepr struct {
 	Name            string `json:"name"`
 	MessagesReady   *int64 `json:"messages_ready"`
 	MessagesUnacked *int64 `json:"messages_unacknowledged"`
-	Consumers       *int   `json:"consumers"`
 }
 
 type bindingRepr struct {
@@ -158,8 +157,8 @@ type connectionRepr struct {
 }
 
 // Queues implements BrokerAdmin. It reads GET /api/queues/<vhost> and returns one QueueState
-// per queue. An entry missing its name, either depth, or its consumer count is rejected — an
-// unreportable queue must never be mistaken for an empty one.
+// per queue. An entry missing its name or either depth is rejected — an unreportable queue
+// must never be mistaken for an empty one.
 func (c *Client) Queues(ctx context.Context, vhost string) ([]QueueState, error) {
 	var reprs []queueRepr
 	if err := c.do(ctx, http.MethodGet, managementPath("queues", vhost), opQueues, &reprs); err != nil {
@@ -168,14 +167,13 @@ func (c *Client) Queues(ctx context.Context, vhost string) ([]QueueState, error)
 
 	queues := make([]QueueState, 0, len(reprs))
 	for _, r := range reprs {
-		if r.Name == "" || r.MessagesReady == nil || r.MessagesUnacked == nil || r.Consumers == nil {
+		if r.Name == "" || r.MessagesReady == nil || r.MessagesUnacked == nil {
 			return nil, incompleteErr(opQueues)
 		}
 		queues = append(queues, QueueState{
 			Name:            r.Name,
 			MessagesReady:   *r.MessagesReady,
 			MessagesUnacked: *r.MessagesUnacked,
-			Consumers:       *r.Consumers,
 		})
 	}
 	return queues, nil

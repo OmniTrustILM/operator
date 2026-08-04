@@ -212,6 +212,19 @@ func drainingPlatform(polls int32) *otilmv1alpha1.Platform {
 	return p
 }
 
+// advanceDrainPollClock back-dates the recorded next-poll floor, standing in for the migration
+// cadence a real reconcile waits out between two samples. Every looping drain spec calls it
+// BETWEEN passes rather than skipping the floor, because the floor is the thing under test: a
+// loop that could poll without it would be proving nothing about "consecutive".
+func advanceDrainPollClock(t *testing.T, r *Reconciler) {
+	t.Helper()
+	p := storedPlatform(t, r)
+	require.NotNil(t, p.Status.Upgrade)
+	past := metav1.NewTime(time.Now().Add(-time.Second))
+	p.Status.Upgrade.NextDrainPollAt = &past
+	require.NoError(t, r.Status().Update(context.Background(), p))
+}
+
 // storedPolls returns the persisted consecutive-clean-poll count.
 func storedPolls(t *testing.T, r *Reconciler) int32 {
 	t.Helper()
@@ -246,6 +259,7 @@ func TestDrainAdvancesOnThreeConsecutiveCleanPolls(t *testing.T) {
 		assert.True(t, render.requeue, "the drain asks for the migration cadence")
 		assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r))
 		assert.Equal(t, poll, storedPolls(t, r), "each clean poll is persisted, so a restart resumes the count")
+		advanceDrainPollClock(t, r)
 	}
 
 	_, handled, res, err := drainPass(t, r)
@@ -344,7 +358,7 @@ func TestDrainResetsTheCountOnADirtyQueue(t *testing.T) {
 func TestDrainIgnoresLatestOnlyRetentionQueues(t *testing.T) {
 	p := drainingPlatform(migrationCleanDrainPolls - 1)
 	listing := sourceQueueListing()
-	listing[8] = rabbitmq.QueueState{Name: "time-quality.config", MessagesReady: 1, Consumers: 1}
+	listing[8] = rabbitmq.QueueState{Name: "time-quality.config", MessagesReady: 1}
 	listing[9] = rabbitmq.QueueState{Name: "time-quality.config-request", MessagesReady: 1}
 	r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{queues: listing}, interceptor.Funcs{})
 
@@ -391,13 +405,16 @@ func TestDrainDiscoversDynamicQueuesByBindingNotByName(t *testing.T) {
 
 // TestDrainAdvancesWithLiveConsumersOnDynamicQueues is the anti-deadlock case, and the reason
 // the drain looks at DEPTH only: a healthy remote proxy is permanently attached to its own
-// queue, so a drain that waited for zero consumers would never finish while the platform was
-// still serving the clients the migration exists to keep.
+// queue and holds an open connection to the virtual host, so a drain that waited for either to
+// go away would never finish while the platform was still serving the clients the migration
+// exists to keep. The call log is the proof — the drain never asks about connections at all;
+// that question belongs to the cleanup, which is allowed to wait for it.
 func TestDrainAdvancesWithLiveConsumersOnDynamicQueues(t *testing.T) {
 	p := drainingPlatform(0)
 	admin := &fakeBrokerAdmin{
-		queues: sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f", Consumers: 3}),
-		bound:  map[string][]string{sourceProxyExchange: {"instance-7a3f"}},
+		queues:      sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f"}),
+		bound:       map[string][]string{sourceProxyExchange: {"instance-7a3f"}},
+		connections: 3,
 	}
 	r, _, _ := drainReconciler(t, p, admin, interceptor.Funcs{})
 
@@ -405,11 +422,15 @@ func TestDrainAdvancesWithLiveConsumersOnDynamicQueues(t *testing.T) {
 		_, _, _, err := drainPass(t, r)
 		require.NoError(t, err)
 		assert.Equal(t, poll, storedPolls(t, r))
+		advanceDrainPollClock(t, r)
 	}
 	_, _, _, err := drainPass(t, r)
 	require.NoError(t, err)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r),
-		"an attached consumer on an empty queue must never stall the migration")
+		"an attached client on an empty queue must never stall the migration")
+	for _, c := range admin.callLog() {
+		assert.NotEqual(t, "Connections", c.method, "the drain never consults the connection count")
+	}
 }
 
 // --- the deadline and its authorised exit ------------------------------------
@@ -530,8 +551,8 @@ func TestForceBeforeTheDeadlineStillWaitsForACleanDrain(t *testing.T) {
 	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
 }
 
-// TestMigrationForceCutoverAuthorized: the authorisation is target-scoped, so one migration's
-// acceptance of data loss can never carry over to the next.
+// TestMigrationForceCutoverAuthorized: the authorisation is bound to ONE ATTEMPT, so neither a
+// value naming another version nor one this attempt inherited can authorise data loss here.
 func TestMigrationForceCutoverAuthorized(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -547,6 +568,21 @@ func TestMigrationForceCutoverAuthorized(t *testing.T) {
 		{
 			name:   "left over from an older migration",
 			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion217 },
+		},
+		{
+			name: "naming this target, but already present when this attempt began",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+				p.Status.Upgrade.ForceCarriedOver = true
+			},
+		},
+		{
+			name: "already consumed by this attempt, and since cleared from the spec",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Messaging.Managed.ForceCutoverForVersion = ""
+				p.Status.Upgrade.ForceAuthorized = true
+			},
+			want: true,
 		},
 		{
 			name: "no migration to authorise",
@@ -569,6 +605,105 @@ func TestMigrationForceCutoverAuthorized(t *testing.T) {
 			assert.Equal(t, tc.want, migrationForceCutoverAuthorized(p))
 		})
 	}
+}
+
+// TestForceLeftBehindByAnAbortedAttemptAuthorizesNothing is the destructive-authorisation hole
+// the attempt binding closes. The field is a plain version string, so a value an operator set
+// for a migration that was then aborted (or blocked and reverted) sits in the spec naming the
+// same target — and target-scoping ALONE would let it silently authorise every later migration
+// to that version to discard whatever the source virtual host still holds. It must not: the
+// attempt that inherited it records that, and takes the blocked exit instead.
+func TestForceLeftBehindByAnAbortedAttemptAuthorizesNothing(t *testing.T) {
+	p := migrationGatePlatform()
+	// The leftover: set for an earlier attempt at this very version, never cleared.
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+	_, to := migrationBundles(t)
+	// The producers never wind down, so the attempt stays in Fencing and reaches that phase's
+	// deadline — the exit an inherited authorisation must not be able to take.
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, runningProducerWorkloads()...)
+
+	// The new attempt begins, and inherits the value.
+	_, _, _, err := r.gateMessagingMigration(context.Background(), storedPlatform(t, r), to, platformVersion219)
+	require.NoError(t, err)
+	begun := storedPlatform(t, r)
+	require.NotNil(t, begun.Status.Upgrade)
+	assert.True(t, begun.Status.Upgrade.ForceCarriedOver, "a value the attempt did not ask for is recorded as inherited")
+	assert.False(t, migrationForceCutoverAuthorized(begun))
+
+	// Its fencing phase now outlives the deadline: with a genuine authorisation this would cut
+	// over and discard. With an inherited one it must block instead.
+	begun.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	require.NoError(t, r.Status().Update(context.Background(), begun))
+	drainEvents(rec)
+
+	_, _, _, err = r.gateMessagingMigration(context.Background(), storedPlatform(t, r), to, platformVersion219)
+	require.NoError(t, err)
+
+	stored := storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseFencing, stored.Status.Upgrade.Phase,
+		"an inherited authorisation may not move the migration on")
+	cond := migrationCondition(stored)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonMigrationDrainTimeout, cond.Reason)
+	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
+}
+
+// TestForceReArmedForThisAttemptAuthorizes is the other half: an inherited value stops being
+// inherited the moment the operator CLEARS it, so setting it again — deliberately, for the
+// attempt they can now see blocked in the platform's status — is a real authorisation.
+func TestForceReArmedForThisAttemptAuthorizes(t *testing.T) {
+	p := drainingPlatform(0)
+	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	p.Status.Upgrade.ForceCarriedOver = true
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+	_, to := migrationBundles(t)
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	// Pass one: the operator clears the leftover. The engine records that it is out of play.
+	cleared := storedPlatform(t, r)
+	cleared.Spec.Messaging.Managed.ForceCutoverForVersion = ""
+	require.NoError(t, r.Update(context.Background(), cleared))
+	_, _, _, err := r.gateMessagingMigration(context.Background(), storedPlatform(t, r), to, platformVersion219)
+	require.NoError(t, err)
+	assert.False(t, storedPlatform(t, r).Status.Upgrade.ForceCarriedOver)
+
+	// Pass two: they set it again, for this attempt.
+	rearmed := storedPlatform(t, r)
+	rearmed.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+	require.NoError(t, r.Update(context.Background(), rearmed))
+	drainEvents(rec)
+
+	_, handled, _, err := r.gateMessagingMigration(context.Background(), storedPlatform(t, r), to, platformVersion219)
+	require.NoError(t, err)
+	assert.True(t, handled)
+
+	stored := storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase)
+	assert.True(t, stored.Status.Upgrade.ForceAuthorized,
+		"the authorisation is recorded as consumed before the step it permits")
+	assert.Contains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
+}
+
+// TestForcedCutoverRecordsItsAuthorizationBeforeActing: the consumed flag is what carries the
+// operator's decision forward to the CLEANUP, which is the phase that actually discards. A
+// forced cutover that recorded nothing would let a later spec edit quietly turn the reclaim back
+// into a waiting one — a different outcome from the one that was authorised.
+func TestForcedCutoverRecordsItsAuthorizationBeforeActing(t *testing.T) {
+	p := drainingPlatform(0)
+	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+	r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{}, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	_, _, _, err := drainPass(t, r)
+	require.NoError(t, err)
+	require.True(t, storedPlatform(t, r).Status.Upgrade.ForceAuthorized)
+
+	// The operator clears the field after the cutover has acted on it.
+	cleared := storedPlatform(t, r)
+	cleared.Spec.Messaging.Managed.ForceCutoverForVersion = ""
+	require.NoError(t, r.Update(context.Background(), cleared))
+	assert.True(t, migrationForceCutoverAuthorized(storedPlatform(t, r)),
+		"the reclaim finishes the migration the operator authorised, not a different one")
 }
 
 // --- the poll's own inputs ---------------------------------------------------
@@ -680,7 +815,7 @@ func TestOutstandingQueues(t *testing.T) {
 		{Name: "a"},
 		{Name: "b", MessagesReady: 3},
 		{Name: "c", MessagesUnacked: 1},
-		{Name: "d", Consumers: 9},
+		{Name: "d"},
 	}
 	assert.Zero(t, outstandingQueues([]string{"a", "d"}, states), "an attached consumer is not a message")
 	assert.Equal(t, 1, outstandingQueues([]string{"b"}, states))
@@ -796,18 +931,66 @@ func TestDrainDegradesOnAnUnknownSourceVersion(t *testing.T) {
 	assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, storedPlatform(t, r).Status.Phase)
 }
 
-// TestWriteCleanDrainPollsSkipsAnUnchangedCount: a drain that waits out its whole window must
-// not write status on every poll, so an unchanged count is not a write at all.
-func TestWriteCleanDrainPollsSkipsAnUnchangedCount(t *testing.T) {
+// TestWriteCleanDrainPollsRecordsTheSampleAndItsFloor: each sample persists BOTH what it
+// counted and when the next one may be taken. The floor is written even when the count has not
+// moved — it is the only thing that stops the re-enqueue this very write causes from sampling
+// again immediately — and a refused write rolls both halves back.
+func TestWriteCleanDrainPollsRecordsTheSampleAndItsFloor(t *testing.T) {
 	p := drainingPlatform(0)
-	r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{}, failingStatusUpdate(errors.New("status write rejected")))
+	r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{}, interceptor.Funcs{})
 
-	require.NoError(t, r.writeCleanDrainPolls(context.Background(), p, 0),
-		"a count that has not moved is not written, so a failing write is never reached")
+	require.NoError(t, r.writeCleanDrainPolls(context.Background(), p, 0))
+	stored := storedPlatform(t, r).Status.Upgrade
+	require.NotNil(t, stored.NextDrainPollAt, "an unchanged count still moves the floor on")
+	assert.WithinDuration(t, time.Now().Add(migrationDrainPollInterval), stored.NextDrainPollAt.Time, time.Minute)
+	assert.False(t, migrationDrainPollDue(storedPlatform(t, r), time.Now()), "the next pass must wait")
 
-	err := r.writeCleanDrainPolls(context.Background(), p, 1)
+	refusing, _, _ := drainReconciler(t, drainingPlatform(0), &fakeBrokerAdmin{},
+		failingStatusUpdate(errors.New("status write rejected")))
+	q := storedPlatform(t, refusing)
+	err := refusing.writeCleanDrainPolls(context.Background(), q, 1)
 	require.Error(t, err)
-	assert.Zero(t, p.Status.Upgrade.CleanDrainPolls, "a count the cluster refused must roll back in memory too")
+	assert.Zero(t, q.Status.Upgrade.CleanDrainPolls, "a count the cluster refused must roll back in memory too")
+	assert.Nil(t, q.Status.Upgrade.NextDrainPollAt, "and so must the floor it would have set")
+}
+
+// TestDrainPollsInQuickSuccessionCountAsOne is the barrier's real claim. Every status write the
+// drain makes re-enqueues the Platform through the operator's own watch, so the passes that
+// follow a sample arrive within milliseconds — not on the requeue cadence. Three of those in a
+// row prove nothing about a virtual host that has stopped receiving traffic, so only the FIRST
+// counts and the rest wait.
+func TestDrainPollsInQuickSuccessionCountAsOne(t *testing.T) {
+	p := drainingPlatform(0)
+	admin := &fakeBrokerAdmin{queues: sourceQueueListing()}
+	r, _, _ := drainReconciler(t, p, admin, interceptor.Funcs{})
+
+	for i := 0; i < 4; i++ {
+		_, _, _, err := drainPass(t, r)
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, int32(1), storedPolls(t, r),
+		"four passes inside one interval are one sample, not four")
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r),
+		"the migration may not cut over on samples that were never spread across time")
+	assert.Equal(t, 1, queueListings(admin), "and the broker is polled once, not once per pass")
+
+	// Time passing is the only thing that lets the count grow.
+	advanceDrainPollClock(t, r)
+	_, _, _, err := drainPass(t, r)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), storedPolls(t, r))
+}
+
+// queueListings returns how many times the drain asked this broker for the queue listing.
+func queueListings(admin *fakeBrokerAdmin) int {
+	listings := 0
+	for _, c := range admin.callLog() {
+		if c.method == "Queues" {
+			listings++
+		}
+	}
+	return listings
 }
 
 // TestMigrationDrainMessageReportsProgressWithoutCoordinates: the condition an operator reads

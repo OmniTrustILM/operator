@@ -2215,6 +2215,10 @@ func (in *UpgradeStatus) DeepCopyInto(out *UpgradeStatus) {
 		*out = make([]FencedWorkload, len(*in))
 		copy(*out, *in)
 	}
+	if in.NextDrainPollAt != nil {
+		in, out := &in.NextDrainPollAt, &out.NextDrainPollAt
+		*out = (*in).DeepCopy()
+	}
 	in.StartedAt.DeepCopyInto(&out.StartedAt)
 	in.PhaseStartedAt.DeepCopyInto(&out.PhaseStartedAt)
 }

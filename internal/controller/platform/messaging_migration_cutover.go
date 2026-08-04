@@ -195,7 +195,11 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 // drain, whose fail-closed answer is a wait it will retry, the cutover has no deadline, so a
 // persistent read failure must surface on the platform rather than sit silently in a stage.
 func (r *Reconciler) cutoverStage(ctx context.Context, p *otilmv1alpha1.Platform) (cutoverStage, error) {
-	if !r.targetTopologyDeclared(ctx, p) {
+	declared, err := r.targetTopologyDeclared(ctx, p)
+	if err != nil {
+		return cutoverStageTopology, err
+	}
+	if !declared {
 		return cutoverStageTopology, nil
 	}
 
@@ -224,6 +228,16 @@ func (r *Reconciler) cutoverStage(ctx context.Context, p *otilmv1alpha1.Platform
 	return cutoverStageGateway, nil
 }
 
+// migrationTargetVersion is the version the cutover is moving the platform ONTO, read from the
+// migration record rather than from spec.version: the record is what every other part of the
+// phase is measured against, and the spec is a live field.
+func migrationTargetVersion(p *otilmv1alpha1.Platform) string {
+	if p.Status.Upgrade == nil {
+		return ""
+	}
+	return p.Status.Upgrade.ToVersion
+}
+
 // targetTopologyDeclared reports whether EVERY topology CR the target bundle renders reports
 // Ready — the Messaging Topology Operator's signal that it has actually declared the object in
 // the broker.
@@ -237,59 +251,110 @@ func (r *Reconciler) cutoverStage(ctx context.Context, p *otilmv1alpha1.Platform
 // The RabbitmqCluster itself is skipped: it is the broker, not a topology object, its readiness
 // vocabulary is different, and it is the same cluster that has been serving the source topology
 // all along.
-func (r *Reconciler) targetTopologyDeclared(ctx context.Context, p *otilmv1alpha1.Platform) bool {
+func (r *Reconciler) targetTopologyDeclared(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
 	clusterKind := platformbuilder.ManagedMessagingClusterGVK().Kind
 	for _, obj := range platformbuilder.ResolveManagedMessaging(p) {
 		gvk := obj.GetObjectKind().GroupVersionKind()
 		if gvk.Kind == clusterKind {
 			continue
 		}
-		if !r.topologyObjectReady(ctx, p.Namespace, gvk, obj.GetName()) {
+		ready, err := r.topologyObjectDeclared(ctx, p.Namespace, gvk, obj.GetName())
+		if err != nil {
+			return false, err
+		}
+		if !ready {
 			// Kind only: a topology object's NAME carries the vhost scope, which is a broker
 			// coordinate.
 			log.FromContext(ctx).V(1).Info("messaging migration cutover: a target topology object is not declared yet",
 				"phase", otilmv1alpha1.MigrationPhaseCuttingOver, "kind", gvk.Kind)
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
-// topologyObjectReady reports whether ONE topology CR reports the Messaging Topology Operator's
-// Ready=True condition. Anything short of an affirmative yes — the object absent, unreadable,
-// or carrying no condition yet — is a no, because what follows a yes is rolling the platform
-// onto that topology.
-func (r *Reconciler) topologyObjectReady(ctx context.Context, namespace string, gvk schema.GroupVersionKind, name string) bool {
+// topologyObjectDeclared reports whether ONE topology CR is declared in the broker FOR ITS
+// CURRENT SPEC — the question the cutover has to ask before it rolls the platform onto that
+// topology, and a stricter one than the ordinary messaging gate's.
+//
+// The extra requirement is the GENERATION. A migration retains objects whose identities the two
+// versions share, and a retained object carries the Ready its PREVIOUS spec earned until the
+// Topology Operator has reconciled the new one — a yes that would authorise the cutover to
+// publish to a topology the broker has not been told about.
+func (r *Reconciler) topologyObjectDeclared(ctx context.Context, namespace string, gvk schema.GroupVersionKind, name string) (bool, error) {
+	state, err := r.topologyObjectState(ctx, namespace, gvk, name)
+	if err != nil {
+		return false, err
+	}
+	return state.found && state.current && state.ready, nil
+}
+
+// topologyObjectState is what one topology CR says about itself: whether it exists, whether the
+// Messaging Topology Operator has reconciled the spec it currently carries, and whether that
+// reconcile succeeded.
+type topologyObjectState struct {
+	found, current, ready bool
+}
+
+// topologyObjectState reads one topology CR's self-report.
+//
+// A FAILURE IS AN ERROR, not a "no". Folding an unreadable object into "not ready" turns every
+// apiserver blip and every unexpected status shape into an indefinite, silent wait — which the
+// cutover, a phase with no deadline behind it, could sit in forever. Callers that DO have a
+// retry story of their own (the ordinary messaging gate re-checks on its own cadence) are free
+// to treat the error as a no; the cutover surfaces it. Only a genuine absence — including a Kind
+// the cluster does not serve, which is positive proof — is a plain, error-free no.
+func (r *Reconciler) topologyObjectState(ctx context.Context, namespace string, gvk schema.GroupVersionKind, name string) (topologyObjectState, error) {
+	var state topologyObjectState
 	var u unstructured.Unstructured
 	u.SetGroupVersionKind(gvk)
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &u); err != nil {
-		return false
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return state, nil
+		}
+		// Kind and API reason only: the object's NAME carries the vhost scope, and so does the
+		// apiserver's own error text.
+		return state, safeErrorf(err, "reading a messaging topology %s to check it is declared failed (%s)",
+			gvk.Kind, apiFailureReason(err))
 	}
-	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
+	state.found = true
+
+	observed, observedFound, oerr := unstructured.NestedInt64(u.Object, "status", "observedGeneration")
+	if oerr != nil {
+		return state, safeErrorf(oerr, "reading a messaging topology %s's observed generation failed", gvk.Kind)
+	}
+	state.current = observedFound && observed >= u.GetGeneration()
+
+	conds, found, cerr := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if cerr != nil {
+		return state, safeErrorf(cerr, "reading a messaging topology %s's conditions failed", gvk.Kind)
+	}
 	if !found {
-		return false
+		return state, nil
 	}
 	for _, c := range conds {
 		cm, ok := c.(map[string]interface{})
 		if !ok {
-			continue
+			return state, fmt.Errorf("a messaging topology %s reports a condition this operator cannot read", gvk.Kind)
 		}
 		if cm["type"] == conditionTypeReady && cm["status"] == string(metav1.ConditionTrue) {
-			return true
+			state.ready = true
+			return state, nil
 		}
 	}
-	return false
+	return state, nil
 }
 
-// provisioningRolledOut reports whether the bundled provisioning service is running the target
-// bundle's image and has finished rolling out onto it. A platform that does not render the
-// service at all (provisioning.mode=external) has nothing to wait for: somebody else's
+// provisioningRolledOut reports whether the bundled provisioning service is running the TARGET
+// version's pod template and has finished rolling out onto it. A platform that does not render
+// the service at all (provisioning.mode=external) has nothing to wait for: somebody else's
 // provisioner is somebody else's to restart.
 func (r *Reconciler) provisioningRolledOut(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
 	if !platformbuilder.ProvisioningDeploy(p) {
 		return true, nil
 	}
-	return r.workloadRolledOut(ctx, p.Namespace, provisioningWorkloadName, platformbuilder.ResolveProvisioning(p).Image)
+	return r.workloadRolledOut(ctx, p.Namespace, provisioningWorkloadName,
+		platformbuilder.ResolveProvisioning(p).Image, migrationTargetVersion(p))
 }
 
 // coreRolledOut reports whether Core is Ready ON THE TARGET ROLLOUT.
@@ -299,18 +364,20 @@ func (r *Reconciler) provisioningRolledOut(ctx context.Context, p *otilmv1alpha1
 // readiness would report success before the cutover had moved anything, and the gateway would
 // be reopened onto a platform still talking to the topology the cleanup is about to reclaim.
 func (r *Reconciler) coreRolledOut(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
-	return r.workloadRolledOut(ctx, p.Namespace, coreDeploymentName, platformbuilder.ResolveCore(p).Image)
+	return r.workloadRolledOut(ctx, p.Namespace, coreDeploymentName,
+		platformbuilder.ResolveCore(p).Image, migrationTargetVersion(p))
 }
 
-// workloadRolledOut reports whether the named workload BOTH carries the given image and has
-// finished rolling out onto it, handling either workload kind (a component is rendered as a
-// Deployment by default, or a StatefulSet when its workloadType says so). A workload of neither
-// kind has not been applied yet, which is not-rolled-out rather than an error.
-func (r *Reconciler) workloadRolledOut(ctx context.Context, namespace, name, image string) (bool, error) {
+// workloadRolledOut reports whether the named workload carries the TARGET VERSION's pod
+// template — proved by the version annotation the render stamps AND by the expected image —
+// and has finished rolling out onto it, handling either workload kind (a component is rendered
+// as a Deployment by default, or a StatefulSet when its workloadType says so). A workload of
+// neither kind has not been applied yet, which is not-rolled-out rather than an error.
+func (r *Reconciler) workloadRolledOut(ctx context.Context, namespace, name, image, version string) (bool, error) {
 	var dep appsv1.Deployment
 	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &dep)
 	if err == nil {
-		return podTemplateRuns(&dep.Spec.Template, image) && rolloutComplete(deploymentRolloutState(&dep)), nil
+		return podTemplateIsTarget(&dep.Spec.Template, image, version) && rolloutComplete(deploymentRolloutState(&dep)), nil
 	}
 	if !apierrors.IsNotFound(err) {
 		return false, fmt.Errorf("reading Deployment %q to check the cutover rollout: %w", name, err)
@@ -323,12 +390,28 @@ func (r *Reconciler) workloadRolledOut(ctx context.Context, namespace, name, ima
 		}
 		return false, fmt.Errorf("reading StatefulSet %q to check the cutover rollout: %w", name, serr)
 	}
-	return podTemplateRuns(&sts.Spec.Template, image) && rolloutComplete(statefulSetRolloutState(&sts)), nil
+	return podTemplateIsTarget(&sts.Spec.Template, image, version) && rolloutComplete(statefulSetRolloutState(&sts)), nil
 }
 
-// podTemplateRuns reports whether a pod template's containers pull the given image — the
-// visible marker that the template the workload carries came from the TARGET bundle rather than
-// the source one. An empty image answers no: an unresolvable image is not evidence of anything.
+// podTemplateIsTarget reports whether a pod template is the one the TARGET version renders.
+//
+// THE IMAGE ALONE CANNOT ANSWER THIS. Neighbouring bundles legitimately pin a component to the
+// same image — provisioning-rabbitmq:1.0.0 is identical in 2.18.0 and 2.19.0 — so a template
+// rendered entirely from the SOURCE bundle, still configured for the source virtual host,
+// satisfies an image check on the target. The cutover acts on that answer by releasing Core,
+// which then rolls onto a topology its provisioner has not moved to. So the version the render
+// STAMPED on the template (PlatformVersionAnnotation) is the load-bearing half, and the image
+// is kept as the corroborating one. An empty image or version answers no: neither absence is
+// evidence of anything.
+func podTemplateIsTarget(tpl *corev1.PodTemplateSpec, image, version string) bool {
+	if version == "" || tpl.Annotations[platformbuilder.PlatformVersionAnnotation] != version {
+		return false
+	}
+	return podTemplateRuns(tpl, image)
+}
+
+// podTemplateRuns reports whether a pod template's containers pull the given image. An empty
+// image answers no: an unresolvable image is not evidence of anything.
 func podTemplateRuns(tpl *corev1.PodTemplateSpec, image string) bool {
 	if image == "" {
 		return false

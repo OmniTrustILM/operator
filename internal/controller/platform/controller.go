@@ -1601,15 +1601,20 @@ func (r *Reconciler) apply(ctx context.Context, p *otilmv1alpha1.Platform, obj c
 // transient API error prefer transientRequeue / applyOrDegrade so a retryable failure does
 // not flip the platform to Degraded.
 //
-// SECURITY: the condition Message is the generic reason only; the cause (which may
-// reference a Secret/coordinate by name) is logged but never placed in status/Event.
+// SECURITY: cause.Error() is PUBLISHED verbatim — into the Degraded condition, the Warning
+// Event and the log. Every call site is therefore responsible for a leak-free cause, and a
+// wrapper that merely omits a name is NOT enough: a wrapped Kubernetes StatusError re-adds the
+// object it is about, and a managed-topology object's name encodes the virtual host it is
+// scoped to. Wrap any such cause with safeErrorf (see safe_error.go), whose Error() is the
+// chosen public text and whose Unwrap keeps the API error reachable for isTransient.
 func (r *Reconciler) degraded(ctx context.Context, p *otilmv1alpha1.Platform, reason string, cause error) (ctrl.Result, error) {
 	// Surface the ACTUAL cause in the Degraded condition + Warning event, not just the reason
 	// code: an opaque "Message: ManagedMessagingError" tells the operator nothing about what
 	// failed (e.g. which managed object the apply rejected, or that an upstream CRD/webhook is
-	// not ready). Every caller crafts a LEAK-FREE cause (object kind/name + field path + the API
-	// error — never a secret value or a connection coordinate), so it is safe to expose, and it
-	// is what makes the condition actionable.
+	// not ready). Every caller crafts a LEAK-FREE cause (object kind + field path + the API
+	// failure reason — never a secret value, an object name that is a coordinate, or the
+	// apiserver's own text), so it is safe to expose, and it is what makes the condition
+	// actionable.
 	msg := cause.Error()
 	r.setDegradedMessage(ctx, p, reason, msg)
 	r.event(p, corev1.EventTypeWarning, reason, msg)
@@ -1641,7 +1646,10 @@ func (r *Reconciler) applyOrDegrade(ctx context.Context, p *otilmv1alpha1.Platfo
 // of benign conflicts neither spams error logs nor pages on a Degraded transition. The
 // platform keeps whatever phase the prior successful reconcile set (Available / Progressing).
 //
-// SECURITY: the cause (which may name a Secret/coordinate) is logged only — never surfaced.
+// SECURITY: cause.Error() reaches the LOG, which is as much a leak as a condition would be
+// for a coordinate — so the same rule as degraded applies: a cause whose text could name a
+// managed-topology object (or quote an apiserver error that does) must arrive here already
+// wrapped by safeErrorf.
 func (r *Reconciler) transientRequeue(ctx context.Context, p *otilmv1alpha1.Platform, reason string, cause error) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("transient reconcile error; requeueing with backoff (platform not degraded)",
 		"reason", reason, "name", p.Name, "err", cause.Error())

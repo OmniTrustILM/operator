@@ -57,7 +57,7 @@ const (
 	migrationActionNone migrationAction = "none"
 	// migrationActionStart means a migration must begin at the first phase.
 	migrationActionStart migrationAction = "start"
-	// migrationActionResume means a recorded migration continues at migrationDecision.Phase.
+	// migrationActionResume means a recorded migration continues at its recorded phase.
 	migrationActionResume migrationAction = "resume"
 	// migrationActionRefuse means the requested move is not supported: the platform holds at
 	// the running version and surfaces migrationDecision.Reason/Message.
@@ -94,11 +94,11 @@ const migrationSteppingStoneVersion = "2.18.0"
 // migrationDecision is what the trigger layer concludes for one reconcile.
 type migrationDecision struct {
 	// Action is the operation to carry out.
+	//
+	// The recorded PHASE is deliberately not carried alongside it: the gate reads
+	// status.upgrade.phase directly when it resumes, so a copy here could only ever
+	// disagree with the record the engine actually acts on.
 	Action migrationAction
-	// Phase is the recorded phase of an IN-FLIGHT migration: where a resume picks up, and
-	// which stage an abort unwinds or a refusal reports. It is empty when no migration is
-	// recorded (none/start, and the refusals raised before one exists).
-	Phase otilmv1alpha1.MigrationPhase
 	// Reason is the condition/Event reason for a refusal; empty otherwise.
 	Reason string
 	// Message is the refusal's actionable, coordinate-free remedy; empty otherwise.
@@ -140,21 +140,21 @@ func decideInFlightMigration(p *otilmv1alpha1.Platform) migrationDecision {
 
 	switch requested {
 	case u.ToVersion:
-		return migrationDecision{Action: migrationActionResume, Phase: u.Phase}
+		return migrationDecision{Action: migrationActionResume}
 
 	case u.FromVersion:
 		if u.Phase == otilmv1alpha1.MigrationPhaseFencing || u.Phase == otilmv1alpha1.MigrationPhaseDraining {
-			return migrationDecision{Action: migrationActionAbort, Phase: u.Phase}
+			return migrationDecision{Action: migrationActionAbort}
 		}
 		return migrationDecision{
-			Action: migrationActionRefuse, Phase: u.Phase, Reason: reasonMigrationForwardOnly,
+			Action: migrationActionRefuse, Reason: reasonMigrationForwardOnly,
 			Message: fmt.Sprintf("the messaging migration to %s has passed the point where it can be reverted (phase %s); "+
 				"set spec.version back to %s to let it finish", u.ToVersion, u.Phase, u.ToVersion),
 		}
 
 	default:
 		return migrationDecision{
-			Action: migrationActionRefuse, Phase: u.Phase, Reason: reasonMigrationInProgress,
+			Action: migrationActionRefuse, Reason: reasonMigrationInProgress,
 			Message: fmt.Sprintf("a messaging migration to %s is in progress (phase %s), so no other version can be requested yet; "+
 				"set spec.version to %s to let it finish, or back to %s to abort it while it is still fencing or draining",
 				u.ToVersion, u.Phase, u.ToVersion, u.FromVersion),

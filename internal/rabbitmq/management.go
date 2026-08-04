@@ -56,8 +56,14 @@ type BrokerAdmin interface {
 }
 
 // QueueState is one queue's drain-relevant state: how many messages the broker still holds
-// for it (ready plus unacknowledged) and how many consumers are attached. A queue is drained
-// only when both depths are zero.
+// for it, ready plus unacknowledged. A queue is drained only when both depths are zero.
+//
+// The broker also reports a CONSUMER count, which this type deliberately does not carry.
+// Neither the drain nor the cleanup may gate on it: a healthy remote proxy is permanently
+// attached to its own queue, so waiting for zero consumers would deadlock the migration
+// against the very clients it exists to keep serving. What gates the cleanup is the count of
+// open CONNECTIONS on the virtual host (BrokerAdmin.Connections), which is a different
+// question with a different answer.
 type QueueState struct {
 	// Name is the queue name as reported by the broker.
 	Name string
@@ -65,8 +71,6 @@ type QueueState struct {
 	MessagesReady int64
 	// MessagesUnacked is the number of messages delivered but not yet acknowledged.
 	MessagesUnacked int64
-	// Consumers is the number of consumers attached to the queue.
-	Consumers int
 }
 
 // Error is the only error type this package returns. It carries a generic, leak-free message

@@ -155,7 +155,13 @@ func (r *Reconciler) migrationCleaningUpPhase(ctx context.Context, p *otilmv1alp
 		return r.holdCleanup(ctx, p, render)
 	}
 	if forced {
-		// The authorisation is explicit and target-scoped: whatever is still attached to the
+		// Record the authorisation as consumed BEFORE acting on it, so a reclaim that starts
+		// discarding cannot be turned back into a waiting one by a later spec edit.
+		if werr := r.consumeMigrationForce(ctx, p); werr != nil {
+			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, werr)
+			return render, true, res, aerr
+		}
+		// The authorisation is explicit and attempt-scoped: whatever is still attached to the
 		// source virtual host is disconnected, and whatever it still holds is discarded with it.
 		r.closeSourceConnections(ctx, p)
 	}
@@ -401,9 +407,12 @@ func (r *Reconciler) topologyObjectExists(ctx context.Context, namespace string,
 	case apierrors.IsNotFound(err), meta.IsNoMatchError(err):
 		return false, nil
 	default:
-		// Kind only: the object's NAME carries the virtual-host scope, which is a coordinate.
-		return false, fmt.Errorf("reading a %s of the previous messaging topology to check whether it is still declared: %w",
-			gvk.Kind, err)
+		// Kind and API reason only: the object's NAME carries the virtual-host scope, and so
+		// does the apiserver's own error text — safeErrorf publishes neither while keeping the
+		// API error reachable for the transience classification.
+		return false, safeErrorf(err,
+			"reading a %s of the previous messaging topology to check whether it is still declared failed (%s)",
+			gvk.Kind, apiFailureReason(err))
 	}
 }
 
@@ -412,9 +421,9 @@ func (r *Reconciler) topologyObjectExists(ctx context.Context, namespace string,
 func (r *Reconciler) deleteReclaimClass(ctx context.Context, objs []client.Object) error {
 	for _, obj := range objs {
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-			// Kind only, for the same reason topologyObjectExists gives.
-			return fmt.Errorf("deleting a %s of the previous messaging topology: %w",
-				obj.GetObjectKind().GroupVersionKind().Kind, err)
+			// Kind and API reason only, for the same reason topologyObjectExists gives.
+			return safeErrorf(err, "deleting a %s of the previous messaging topology failed (%s)",
+				obj.GetObjectKind().GroupVersionKind().Kind, apiFailureReason(err))
 		}
 	}
 	return nil

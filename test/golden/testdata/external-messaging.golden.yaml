@@ -19,6 +19,8 @@ spec:
   strategy: {}
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: api-gateway
         app.kubernetes.io/instance: ilm
@@ -133,6 +135,8 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: auth
         app.kubernetes.io/instance: ilm
@@ -234,6 +238,8 @@ spec:
   strategy: {}
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: auth-opa-policies
         app.kubernetes.io/instance: ilm
@@ -316,6 +322,8 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: core
         app.kubernetes.io/instance: ilm
@@ -546,6 +554,8 @@ spec:
   strategy: {}
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: fe-administrator
         app.kubernetes.io/instance: ilm
@@ -636,6 +646,8 @@ spec:
   strategy: {}
   template:
     metadata:
+      annotations:
+        otilm.com/platform-version: 2.18.0
       labels:
         app.kubernetes.io/component: scheduler
         app.kubernetes.io/instance: ilm

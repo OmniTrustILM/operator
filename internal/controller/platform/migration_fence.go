@@ -29,11 +29,20 @@ package platform
 //
 // THREE MECHANICS CARRY THE WHOLE THING:
 //
-//  1. THE RECORD COMES FIRST. status.upgrade.fenced is written with the COMPLETE set of
-//     workloads — name, kind and the replica count each one carried — BEFORE the first
-//     workload is patched. A crash mid-fencing then leaves a recoverable SUPERSET (some
-//     entries may name workloads that were never actually patched, which restore handles
-//     idempotently) rather than an unknown partial state with no record of what to restore.
+//  1. THE RECORD COMES FIRST, AND IT IS THE COMPLETE INTENDED SET. status.upgrade.fenced is
+//     written with EVERY producer the migration means to hold down — name, kind and the
+//     replica count each one carried — BEFORE the first workload is patched. A crash
+//     mid-fencing then leaves a recoverable SUPERSET (some entries may name workloads that
+//     were never actually patched, which restore handles idempotently) rather than an unknown
+//     partial state with no record of what to restore.
+//
+//     A target that does not exist yet is recorded TOO, marked Absent. Skipping it would put
+//     the workload permanently outside the fence: the ordinary render creates it on the very
+//     next apply, at the configured replica count, publishing to the virtual host the
+//     migration is draining — while a fence that only inspects what it recorded sees nothing
+//     wrong. Recorded, it is re-fenced the instant it appears (the render omits its replicas
+//     and enforceMigrationFence re-writes the zero behind every apply) and the Fencing phase
+//     keeps waiting until it is observed stopped.
 //
 //  2. THE PATCH RUNS AFTER THE OPERATOR'S APPLY, WITHIN THE SAME RECONCILE, EVERY RECONCILE.
 //     The reconciler's Server-Side Apply force-owns every field it sends, so the fence cannot
@@ -86,8 +95,8 @@ const reasonMigrationFenceError = "MigrationFenceError"
 // It is IDEMPOTENT and re-enterable. The recording step runs only while status.upgrade.fenced
 // is still empty, so a second call after a crash never overwrites the counts recorded by the
 // first (which are the only surviving evidence of what the platform was running); it goes
-// straight to re-asserting the zeros. A workload that does not exist is skipped rather than
-// recorded — there is no producer to stop and no count to restore.
+// straight to re-asserting the zeros. A workload that does not exist yet is recorded as
+// Absent rather than skipped, so it is fenced if the render brings it up.
 func (r *Reconciler) fenceWorkloads(ctx context.Context, p *otilmv1alpha1.Platform) error {
 	if p.Status.Upgrade == nil {
 		return errors.New("no messaging migration is recorded on the platform, so there is nothing to fence")
@@ -112,10 +121,14 @@ func (r *Reconciler) fenceWorkloads(ctx context.Context, p *otilmv1alpha1.Platfo
 	return r.enforceMigrationFence(ctx, p)
 }
 
-// recordFenceTargets reads each fence target's current replica count from the cluster and
-// returns the entries to record on status.upgrade.fenced. The count is read from the LIVE
-// workload rather than derived from the spec, so what restore writes back is what the
-// platform was actually running (including a count an HPA had scaled it to).
+// recordFenceTargets returns the entries to record on status.upgrade.fenced: one for EVERY
+// fence target the platform renders, whether or not it currently exists.
+//
+// For a workload that exists the count is read from the LIVE object rather than derived from
+// the spec, so what restore writes back is what the platform was actually running (including a
+// count an HPA had scaled it to). A workload that is absent is recorded with Absent=true and
+// no count: there is nothing to restore into, but there IS something to hold down if the
+// render creates it, and the fence's list is the only place that knowledge lives.
 func (r *Reconciler) recordFenceTargets(ctx context.Context, p *otilmv1alpha1.Platform) ([]otilmv1alpha1.FencedWorkload, error) {
 	targets := platformbuilder.MigrationFenceTargets(p)
 	recorded := make([]otilmv1alpha1.FencedWorkload, 0, len(targets))
@@ -126,7 +139,8 @@ func (r *Reconciler) recordFenceTargets(ctx context.Context, p *otilmv1alpha1.Pl
 		}
 		if err := r.Get(ctx, types.NamespacedName{Name: t.Name, Namespace: p.Namespace}, obj); err != nil {
 			if apierrors.IsNotFound(err) {
-				continue // not rendered (yet): no producer to stop, nothing to restore
+				recorded = append(recorded, otilmv1alpha1.FencedWorkload{Name: t.Name, Kind: t.Kind, Absent: true})
+				continue
 			}
 			return nil, fmt.Errorf("reading %s %q to fence it: %w", t.Kind, t.Name, err)
 		}
@@ -171,8 +185,14 @@ func (r *Reconciler) restoreWorkload(ctx context.Context, p *otilmv1alpha1.Platf
 	if p.Status.Upgrade == nil {
 		return nil
 	}
-	if err := r.patchWorkloadReplicas(ctx, p.Namespace, w, w.Replicas); err != nil {
-		return err
+	// An entry the fence recorded as ABSENT has no count to write back — there was no running
+	// workload to remember. Dropping its entry is the whole restore: the render stops omitting
+	// .spec.replicas the moment the entry is gone, so the next apply gives the workload the
+	// count the spec asks for rather than a zero the fence invented.
+	if !w.Absent {
+		if err := r.patchWorkloadReplicas(ctx, p.Namespace, w, w.Replicas); err != nil {
+			return err
+		}
 	}
 
 	remaining := make([]otilmv1alpha1.FencedWorkload, 0, len(p.Status.Upgrade.Fenced))

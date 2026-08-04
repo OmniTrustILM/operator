@@ -89,7 +89,6 @@ func TestDecideMigration(t *testing.T) {
 		platform     *otilmv1alpha1.Platform
 		from, to     string
 		wantAction   migrationAction
-		wantPhase    otilmv1alpha1.MigrationPhase
 		wantReason   string
 		messageParts []string
 	}{
@@ -190,7 +189,6 @@ func TestDecideMigration(t *testing.T) {
 			from:       platformVersion218,
 			to:         platformVersion219,
 			wantAction: migrationActionResume,
-			wantPhase:  otilmv1alpha1.MigrationPhaseDraining,
 		},
 		{
 			name:       "in flight: reverting to the source version while fencing aborts",
@@ -198,7 +196,6 @@ func TestDecideMigration(t *testing.T) {
 			from:       platformVersion218,
 			to:         platformVersion218,
 			wantAction: migrationActionAbort,
-			wantPhase:  otilmv1alpha1.MigrationPhaseFencing,
 		},
 		{
 			name:       "in flight: reverting to the source version while draining aborts",
@@ -206,7 +203,6 @@ func TestDecideMigration(t *testing.T) {
 			from:       platformVersion218,
 			to:         platformVersion218,
 			wantAction: migrationActionAbort,
-			wantPhase:  otilmv1alpha1.MigrationPhaseDraining,
 		},
 		{
 			name:         "in flight: reverting once the cutover began is refused (forward only)",
@@ -214,7 +210,6 @@ func TestDecideMigration(t *testing.T) {
 			from:         platformVersion218,
 			to:           platformVersion218,
 			wantAction:   migrationActionRefuse,
-			wantPhase:    otilmv1alpha1.MigrationPhaseCuttingOver,
 			wantReason:   reasonMigrationForwardOnly,
 			messageParts: []string{platformVersion219, string(otilmv1alpha1.MigrationPhaseCuttingOver)},
 		},
@@ -224,7 +219,6 @@ func TestDecideMigration(t *testing.T) {
 			from:         platformVersion218,
 			to:           platformVersion218,
 			wantAction:   migrationActionRefuse,
-			wantPhase:    otilmv1alpha1.MigrationPhaseCleaningUp,
 			wantReason:   reasonMigrationForwardOnly,
 			messageParts: []string{platformVersion219},
 		},
@@ -234,7 +228,6 @@ func TestDecideMigration(t *testing.T) {
 			from:         platformVersion218,
 			to:           platformVersion217,
 			wantAction:   migrationActionRefuse,
-			wantPhase:    otilmv1alpha1.MigrationPhaseDraining,
 			wantReason:   reasonMigrationInProgress,
 			messageParts: []string{platformVersion219, platformVersion218},
 		},
@@ -244,7 +237,6 @@ func TestDecideMigration(t *testing.T) {
 			from:       platformVersion218,
 			to:         platformVersion218,
 			wantAction: migrationActionAbort,
-			wantPhase:  otilmv1alpha1.MigrationPhaseFencing,
 		},
 	}
 
@@ -253,7 +245,6 @@ func TestDecideMigration(t *testing.T) {
 			got := decideMigration(c.platform, bundleFor(t, c.from), bundleFor(t, c.to))
 
 			assert.Equal(t, c.wantAction, got.Action)
-			assert.Equal(t, c.wantPhase, got.Phase)
 			assert.Equal(t, c.wantReason, got.Reason)
 
 			if c.wantAction == migrationActionRefuse {

@@ -103,11 +103,25 @@ func producerWorkloads(gatewayReplicas, schedulerReplicas int32) []client.Object
 // event sink. Optional interceptors let a test fail a specific write.
 func migrationReconciler(t *testing.T, p *otilmv1alpha1.Platform, funcs interceptor.Funcs, objs ...client.Object) (*Reconciler, *record.FakeRecorder) {
 	t.Helper()
+	pinMigrationInputs(p)
 	s := reconcileScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(p).
 		WithObjects(append([]client.Object{p}, objs...)...).WithInterceptorFuncs(funcs).Build()
 	rec := record.NewFakeRecorder(32)
 	return &Reconciler{Client: c, Scheme: s, Recorder: rec}, rec
+}
+
+// pinMigrationInputs stamps the migration-critical spec fingerprint onto a recorded migration,
+// as beginMigration does in production. Every fixture goes through it at the point its spec is
+// final, so a spec a test does NOT change reads as no drift at all — and a test that means to
+// change one is changing it against a record that pinned the original.
+func pinMigrationInputs(p *otilmv1alpha1.Platform) {
+	if p.Status.Upgrade == nil || p.Status.Upgrade.InputsHash != "" {
+		return
+	}
+	if fingerprint, ok := migrationInputFingerprint(p); ok {
+		p.Status.Upgrade.InputsHash = fingerprint
+	}
 }
 
 // migrationBundles resolves the source and target bundles the gate is called with.
@@ -798,12 +812,39 @@ func TestFencedProducersStopped(t *testing.T) {
 		assert.True(t, stopped)
 	})
 
-	t.Run("a workload deleted underneath the fence has no producer left", func(t *testing.T) {
+	// This subtest previously asserted the opposite — that a vanished workload counts as
+	// stopped. It cannot: the operator's own render re-creates its children on every pass, so a
+	// producer the fence recorded as RUNNING and that is now missing is one about to come back,
+	// and calling it stopped hands the drain a virtual host that is about to be published to.
+	t.Run("a workload that was running and has vanished is not stopped", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing, entry)
 		r, _ := migrationReconciler(t, p, interceptor.Funcs{})
 		stopped, err := r.fencedProducersStopped(context.Background(), p)
 		require.NoError(t, err)
-		assert.True(t, stopped)
+		assert.False(t, stopped, "it is re-created by the very next apply, and must be re-fenced")
+	})
+
+	t.Run("a target the fence recorded as absent, and that is still absent", func(t *testing.T) {
+		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
+			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Absent: true})
+		r, _ := migrationReconciler(t, p, interceptor.Funcs{})
+		stopped, err := r.fencedProducersStopped(context.Background(), p)
+		require.NoError(t, err)
+		assert.True(t, stopped, "there was no producer, and there still is none")
+	})
+
+	t.Run("a target recorded as absent that has since been created", func(t *testing.T) {
+		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
+			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Absent: true})
+		sched := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
+			Status:     appsv1.DeploymentStatus{Replicas: 1},
+		}
+		r, _ := migrationReconciler(t, p, interceptor.Funcs{}, sched)
+		stopped, err := r.fencedProducersStopped(context.Background(), p)
+		require.NoError(t, err)
+		assert.False(t, stopped, "a workload that appeared mid-migration is fenced, not ignored")
 	})
 
 	t.Run("a StatefulSet is read the same way", func(t *testing.T) {
@@ -865,20 +906,63 @@ func TestGateMessagingMigrationDegradesOnAnUnknownSourceVersion(t *testing.T) {
 	assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, storedPlatform(t, r).Status.Phase)
 }
 
-// TestGateMessagingMigrationIgnoresAnUnknownRunningVersion: with no migration recorded, a
-// running version this build does not carry simply cannot start one — the gate steps aside
-// rather than inventing a decision from a bundle it had to guess.
-func TestGateMessagingMigrationIgnoresAnUnknownRunningVersion(t *testing.T) {
+// TestGateMessagingMigrationRefusesAnUnknownRunningVersion.
+//
+// This test previously asserted that the gate STEPS ASIDE here, letting the reconcile render
+// the requested version as an ordinary upgrade. That is the unsafe half of a guess: whether a
+// move renames the messaging virtual host is answered from the running version's bundle, so
+// without it the engine cannot tell an additive upgrade from one that needs the whole fence /
+// drain / cut-over sequence — and rendering the target beside an undrained source vhost is
+// precisely what the engine exists to prevent. It is a deterministic, user-correctable state:
+// degrade and stop.
+func TestGateMessagingMigrationRefusesAnUnknownRunningVersion(t *testing.T) {
 	p := migrationGatePlatform()
 	p.Status.ObservedVersion = unknownPlatformVersion
 	_, to := migrationBundles(t)
-	r, _ := migrationReconciler(t, p, interceptor.Funcs{})
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
 
-	render, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
-	require.NoError(t, err)
-	assert.False(t, handled)
-	assert.Equal(t, platformVersion219, render.version)
-	assert.Nil(t, p.Status.Upgrade)
+	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err, "a refusal is a steady state, not a reconcile failure")
+	assert.True(t, handled, "nothing of the requested version may be rendered on a guess")
+	assert.Equal(t, ctrl.Result{}, res, "terminal until a spec edit re-enqueues the platform")
+
+	stored := storedPlatform(t, r)
+	assert.Nil(t, stored.Status.Upgrade, "refusing to start one is not the same as recording one")
+	assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
+	cond := migrationCondition(stored)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonMigrationSourceVersionUnknown, cond.Reason)
+	assert.Contains(t, cond.Message, unknownPlatformVersion)
+	assertNoBrokerCoordinates(t, cond.Message)
+	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"), "and nothing is fenced")
+	assert.Contains(t, strings.Join(drainEvents(rec), " "), reasonMigrationSourceVersionUnknown)
+}
+
+// TestGateMessagingMigrationRefusesAnUnknownRecordedPhase: the recorded phase decides what a
+// pass may do, and one of the phases DELETES the source topology. A value this build has no
+// handler for — written by a newer operator, or corrupted — must stop the engine rather than
+// fall through to the most destructive interpretation of it.
+func TestGateMessagingMigrationRefusesAnUnknownRecordedPhase(t *testing.T) {
+	p := migratingGatePlatform(otilmv1alpha1.MigrationPhase("Teleporting"),
+		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	_, to := migrationBundles(t)
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	_, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.Error(t, err, "an unimplemented phase is an error, never a default action")
+	assert.True(t, handled)
+
+	stored := storedPlatform(t, r)
+	require.NotNil(t, stored.Status.Upgrade, "nothing is unwound: a build that understands the phase resumes here")
+	assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
+	cond := migrationCondition(stored)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonMigrationPhaseUnknown, cond.Reason)
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+		fenced(stored), "the fence is left exactly where it was")
+	assert.Equal(t, int32(0), replicasOf(t, r, "scheduler"))
+	assertNoBrokerCoordinates(t, cond.Message)
 }
 
 // --- the failure paths -------------------------------------------------------

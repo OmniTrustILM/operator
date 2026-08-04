@@ -221,12 +221,17 @@ func (r *Reconciler) managedCoreUserSecretPresent(ctx context.Context, p *otilmv
 // vhost_not_found and retry only on a slow backoff, wedging Core (it publishes to the
 // czertainly exchange and crash-loops with "no exchange ... in vhost" until the topology
 // converges). A NotFound (the Vhost CR was just applied and has no status yet) or any read
-// error is "not ready" so the requeue retries. It shares topologyObjectReady with the staged
-// messaging cutover, which asks the same question of every topology CR the target bundle
-// renders.
+// error is "not ready" so the requeue retries. It shares topologyObjectState with the staged
+// messaging cutover, which asks a STRICTER version of the same question: the cutover also
+// requires the Topology Operator to have reconciled the object's current spec, because a
+// retained object can carry a Ready its previous spec earned. This gate does not — it only
+// needs the vhost to exist in the broker — and it folds the read failures back into "not
+// ready", which the cutover deliberately does not do (it has no requeue-and-retry story of its
+// own, so a silent wait there would be forever).
 func (r *Reconciler) managedVhostReady(ctx context.Context, p *otilmv1alpha1.Platform) bool {
-	return r.topologyObjectReady(ctx, p.Namespace,
+	state, err := r.topologyObjectState(ctx, p.Namespace,
 		platformbuilder.ManagedMessagingVhostGVK(), platformbuilder.ManagedMessagingVhostName(p))
+	return err == nil && state.found && state.ready
 }
 
 // isMessagingPrereqObject reports whether a rendered managed-messaging object is a topology

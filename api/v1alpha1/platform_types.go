@@ -302,12 +302,14 @@ type ManagedMessagingSpec struct {
 	// relies on cannot be broken.
 	// +optional
 	Overrides *runtime.RawExtension `json:"overrides,omitempty"`
-	// DrainTimeout bounds how long a managed-messaging version migration waits for the
-	// source vhost to drain, and separately bounds the wait for cleanup to finish after
-	// cutover. The migration engine polls the source vhost across this window for every
-	// drainable queue to report empty; if the deadline passes with messages still
-	// outstanding the migration stops in the Draining (or CleaningUp) phase rather than
-	// proceeding — see ForceCutoverForVersion to override that stop.
+	// DrainTimeout bounds EACH of the migration's waiting phases separately: how long
+	// Fencing waits for the platform's message producers to actually wind down, how long
+	// Draining waits for the source vhost to empty, and how long CleaningUp waits for the
+	// source vhost to fall idle before it can be reclaimed. Each phase gets the full window,
+	// measured from its own start. The migration engine polls the source vhost across the
+	// Draining window for every drainable queue to report empty; if a deadline passes with
+	// producers still running or messages still outstanding the migration stops in that
+	// phase rather than proceeding — see ForceCutoverForVersion to override that stop.
 	// It is constrained to the Go duration charset (digits, an optional fraction, and one
 	// or more unit suffixes — ns, us, ms, s, m or h, e.g. "15m" or "1h30m") via a CEL rule
 	// rather than a Pattern marker: controller-gen cannot apply +kubebuilder:validation:
@@ -324,9 +326,15 @@ type ManagedMessagingSpec struct {
 	// destructive escape hatch for an operator who has confirmed the remaining messages
 	// are safe to lose.
 	//
-	// The value is TARGET-SCOPED: it must equal the version the migration is cutting over
-	// TO (status.upgrade.toVersion), so a value left over from a past migration can never
-	// silently authorize a future one — each migration requires its own explicit value.
+	// The value is scoped to ONE ATTEMPT, in two parts. It must equal the version the
+	// migration is cutting over TO (status.upgrade.toVersion); and it must be set — or
+	// re-set — AFTER that attempt began. A value this field already carried when the
+	// migration started is recorded as carried over (status.upgrade.forceCarriedOver) and
+	// authorizes nothing until it is cleared and set again, so a value left behind by an
+	// aborted attempt can never silently authorize a later migration to the same version.
+	// Once an attempt acts on the authorization it is recorded as consumed
+	// (status.upgrade.forceAuthorized), so the cleanup still honours a force the cutover
+	// used even if this field is cleared in between.
 	// +optional
 	// +kubebuilder:validation:Pattern=`^[0-9]+\.[0-9]+\.[0-9]+$`
 	ForceCutoverForVersion string `json:"forceCutoverForVersion,omitempty"`

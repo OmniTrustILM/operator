@@ -271,7 +271,13 @@ func (r *Reconciler) applyManagedPhase(ctx context.Context, p *otilmv1alpha1.Pla
 			continue
 		}
 		if aerr := r.applyManaged(ctx, p, obj, desired); aerr != nil {
-			return fmt.Errorf("applying managed %s %s %q: %w", g.kind, obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), aerr)
+			// KIND AND API REASON ONLY. A managed object's NAME is a coordinate (the messaging
+			// topology's names encode the virtual host they are scoped to), and so is the
+			// apiserver's own error text, which quotes the object it refused. safeErrorf
+			// publishes neither while keeping the API error reachable for the transience
+			// classification applyOrDegrade makes.
+			return safeErrorf(aerr, "applying a managed %s %s failed (%s)",
+				g.kind, obj.GetObjectKind().GroupVersionKind().Kind, apiFailureReason(aerr))
 		}
 	}
 	return nil

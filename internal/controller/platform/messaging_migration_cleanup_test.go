@@ -40,8 +40,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,6 +80,7 @@ func sourceTopology(p *otilmv1alpha1.Platform) []client.Object {
 // with, and the scheduler the completion has to restore.
 func cleanupReconciler(t *testing.T, p *otilmv1alpha1.Platform, admin rabbitmq.BrokerAdmin, funcs interceptor.Funcs, objs ...client.Object) (*Reconciler, *record.FakeRecorder) {
 	t.Helper()
+	pinMigrationInputs(p)
 	s := cutoverScheme(t)
 	seeded := append([]client.Object{p, administratorSecret(), fencedSchedulerWorkload()}, objs...)
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(p).
@@ -91,7 +94,7 @@ func cleanupReconciler(t *testing.T, p *otilmv1alpha1.Platform, admin rabbitmq.B
 // fencedSchedulerWorkload is the workload the fence is still holding at zero — the one the
 // completion writes the recorded count back onto.
 func fencedSchedulerWorkload() client.Object {
-	return cutoverWorkload("scheduler", "scheduler:2.19.0", 0, true)
+	return cutoverWorkload("scheduler", "scheduler:2.19.0", platformVersion219, 0, true)
 }
 
 // cleanupPass runs one whole gate pass from a FRESHLY READ Platform, as Reconcile does.
@@ -409,22 +412,56 @@ func TestCleanupStopsWhenTheClassCannotBePersisted(t *testing.T) {
 	assert.Equal(t, len(topology), extantOf(t, r, topology), "a refused status write deletes nothing")
 }
 
-// TestCleanupSurfacesADeleteFailure: a delete that fails must not be mistaken for progress.
+// TestCleanupSurfacesADeleteFailure: a delete that fails must not be mistaken for progress —
+// and what it surfaces may not name the object, because a topology object's name encodes the
+// virtual host it is scoped to.
+//
+// The failure the interceptor returns is a real Kubernetes StatusError, deliberately: a
+// StatusError's OWN text quotes the object it is about, so an error wrapped with %w republishes
+// the coordinate however carefully the wrapper is worded. The degraded condition and the Warning
+// Event are written from exactly this text.
 func TestCleanupSurfacesADeleteFailure(t *testing.T) {
 	p := cleanupPlatform()
 	topology := sourceTopology(p)
 	failDelete := interceptor.Funcs{
-		Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
-			return errors.New("the delete was rejected")
+		Delete: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.DeleteOption) error {
+			return apierrors.NewForbidden(
+				schema.GroupResource{Group: "rabbitmq.com", Resource: "bindings"}, obj.GetName(), errors.New("denied"))
 		},
 	}
-	r, _ := cleanupReconciler(t, p, idleBroker(), failDelete, topology...)
+	r, rec := cleanupReconciler(t, p, idleBroker(), failDelete, topology...)
 
 	_, handled, _, err := cleanupPass(t, r)
 	require.Error(t, err)
 	assert.True(t, handled)
 	assert.Equal(t, len(topology), extantOf(t, r, topology))
 	assertNoBrokerCoordinates(t, err.Error())
+
+	stored := storedPlatform(t, r)
+	for _, name := range namesOf(topology) {
+		assert.NotContains(t, err.Error(), name, "the error text may not name a topology object")
+		assert.NotContains(t, degradedMessageOf(stored), name, "and neither may the condition it becomes")
+		assert.NotContains(t, strings.Join(drainEvents(rec), " "), name)
+	}
+	assertNoBrokerCoordinates(t, degradedMessageOf(stored))
+}
+
+// namesOf returns the object names of a rendered set, which are exactly the strings no
+// condition, Event or log line may carry.
+func namesOf(objs []client.Object) []string {
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.GetName())
+	}
+	return names
+}
+
+// degradedMessageOf returns the platform's Degraded condition message (empty when unset).
+func degradedMessageOf(p *otilmv1alpha1.Platform) string {
+	if c := meta.FindStatusCondition(p.Status.Conditions, conditionDegraded); c != nil {
+		return c.Message
+	}
+	return ""
 }
 
 // --- the forced reclaim ------------------------------------------------------
@@ -633,8 +670,8 @@ func TestOutstandingSourceQueues(t *testing.T) {
 	assert.Equal(t, 1, outstandingSourceQueues(source,
 		append(idleSourceListing(), rabbitmq.QueueState{Name: "nobody-declared-me", MessagesReady: 1})),
 		"a queue no bundle knows about is exactly the case a full snapshot exists to catch")
-	assert.Zero(t, outstandingSourceQueues(source, []rabbitmq.QueueState{{Name: "core", Consumers: 3}}),
-		"consumers are the connection check's business, not the snapshot's")
+	assert.Zero(t, outstandingSourceQueues(source, []rabbitmq.QueueState{{Name: "core"}}),
+		"an empty queue does not block, however many clients are attached to it — that is the connection check's business")
 }
 
 // TestMigrationReclaimClassesTargetTheSourceRender proves what the deletion is aimed at: the

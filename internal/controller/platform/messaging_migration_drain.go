@@ -79,8 +79,19 @@ import (
 // migrationCleanDrainPolls is how many CONSECUTIVE polls must observe every drainable queue
 // empty before the migration may cut over. One poll proves only that a queue was empty at one
 // instant — between two fenced producers' last messages, say — so the drain asks for the same
-// answer several times in a row, at migrationRequeueAfter apart.
+// answer several times in a row, at migrationDrainPollInterval apart.
 const migrationCleanDrainPolls = 3
+
+// migrationDrainPollInterval is the MINIMUM time between two drain samples, enforced from a
+// timestamp on status.upgrade rather than from the requeue the phase asks for.
+//
+// The requeue is not a floor. Every status write the drain makes — the clean-poll count above
+// all — updates the Platform, which the operator's own watch turns into an immediate
+// re-enqueue; that reconcile arrives in milliseconds and would take the next sample straight
+// away. Three "consecutive" polls inside the same second say nothing at all about a virtual
+// host that has stopped receiving traffic, which is the entire claim the barrier rests on. So
+// the drain records when it may next look, and a pass arriving early simply waits.
+const migrationDrainPollInterval = migrationRequeueAfter
 
 // eventMigrationForcedCutover announces that the operator authorised this migration to proceed
 // without a clean drain, accepting the loss of whatever the source virtual host still holds.
@@ -120,6 +131,14 @@ func (r *Reconciler) migrationDrainingPhase(ctx context.Context, p *otilmv1alpha
 		return r.migrationDeadlineExit(ctx, p, src)
 	}
 
+	// SPACING IS PART OF THE BARRIER. A pass that arrives before the recorded floor — which is
+	// most of them, because every status write re-enqueues the Platform — takes no sample and
+	// changes nothing, so the count can only ever be built from polls that are genuinely
+	// spread across time.
+	if !migrationDrainPollDue(p, time.Now()) {
+		return src, false, ctrl.Result{}, nil
+	}
+
 	outstanding, perr := r.pollSourceDrain(ctx, p, src.bundle)
 	if perr != nil {
 		// FAIL CLOSED: a poll that did not complete says nothing about the virtual host, so it
@@ -157,25 +176,38 @@ func (r *Reconciler) recordDrainProgress(ctx context.Context, p *otilmv1alpha1.P
 	return src, false, ctrl.Result{}, nil
 }
 
-// writeCleanDrainPolls records how many consecutive clean polls the drain has seen.
+// writeCleanDrainPolls records the sample the drain has just taken: how many consecutive clean
+// polls it has now seen, and the earliest time it may take the next one.
 //
-// An unchanged count writes nothing — the common case is a drain that is not yet clean, whose
-// counter is already zero — so a long wait costs one status write per CHANGE, not one per
-// poll. A failed write rolls the in-memory count back, keeping status and the copy the rest of
-// the pass reads in agreement.
+// Both move in ONE write because both describe that sample. The floor in particular must be
+// persisted even when the count does not change (the common case is a drain that is not yet
+// clean, whose counter is already zero): the floor is the only thing that stops the very
+// re-enqueue this write causes from taking another sample immediately. A failed write rolls
+// both back, keeping status and the copy the rest of the pass reads in agreement.
 func (r *Reconciler) writeCleanDrainPolls(ctx context.Context, p *otilmv1alpha1.Platform, polls int32) error {
 	u := p.Status.Upgrade
-	if u.CleanDrainPolls == polls {
-		return nil
-	}
-	previous := u.CleanDrainPolls
-	u.CleanDrainPolls = polls
+	previousPolls, previousNext := u.CleanDrainPolls, u.NextDrainPollAt
+
+	next := metav1.NewTime(time.Now().Add(migrationDrainPollInterval))
+	u.CleanDrainPolls, u.NextDrainPollAt = polls, &next
 	if err := r.writeMigrationState(ctx, p, metav1.ConditionTrue,
 		string(otilmv1alpha1.MigrationPhaseDraining), migrationDrainMessage(u)); err != nil {
-		u.CleanDrainPolls = previous
+		u.CleanDrainPolls, u.NextDrainPollAt = previousPolls, previousNext
 		return err
 	}
 	return nil
+}
+
+// migrationDrainPollDue reports whether the drain may take a sample now. An unrecorded floor
+// (a drain that has not polled yet, or one resumed from a record written before the floor
+// existed) is due immediately — the floor bounds the SPACING of samples, and there is nothing
+// to space the first one from.
+func migrationDrainPollDue(p *otilmv1alpha1.Platform, now time.Time) bool {
+	u := p.Status.Upgrade
+	if u == nil || u.NextDrainPollAt == nil || u.NextDrainPollAt.IsZero() {
+		return true
+	}
+	return !now.Before(u.NextDrainPollAt.Time)
 }
 
 // migrationDrainMessage is the draining condition's text: the phase message plus how far the
@@ -185,17 +217,80 @@ func migrationDrainMessage(u *otilmv1alpha1.UpgradeStatus) string {
 		migrationPhaseMessage(u), u.CleanDrainPolls, migrationCleanDrainPolls)
 }
 
-// migrationForceCutoverAuthorized reports whether the platform authorises THIS migration to
-// finish without a clean drain.
+// migrationForceCutoverAuthorized reports whether the platform authorises THIS ATTEMPT to
+// finish without a clean drain, discarding whatever the source virtual host still holds.
 //
-// The authorisation is TARGET-SCOPED: it must name the version the migration is cutting over
-// to, so a value left behind by a past migration can never silently authorise a future one.
+// Target-scoping alone is not enough. The value is a plain version string, so one left behind
+// by an attempt that was aborted or blocked would go on authorising every later migration to
+// that same version — silently, and for the most destructive step the engine has. The
+// authorisation is therefore bound to the ATTEMPT, in three parts:
+//
+//   - it must name the version this migration is cutting over TO;
+//   - it must NOT be the value the field already carried when this attempt began
+//     (status.upgrade.forceCarriedOver, cleared as soon as the field is cleared or changed —
+//     so re-setting it deliberately for this attempt counts, and a leftover never does); and
+//   - once an attempt has ACTED on it (status.upgrade.forceAuthorized), it stays authorised
+//     for the rest of that attempt, so the cleanup honours a force the cutover already used
+//     even if the field is cleared in between.
 func migrationForceCutoverAuthorized(p *otilmv1alpha1.Platform) bool {
-	m := p.Spec.Messaging.Managed
-	if m == nil || m.ForceCutoverForVersion == "" || p.Status.Upgrade == nil {
+	u := p.Status.Upgrade
+	if u == nil {
 		return false
 	}
-	return m.ForceCutoverForVersion == p.Status.Upgrade.ToVersion
+	if u.ForceAuthorized {
+		return true
+	}
+	if u.ForceCarriedOver {
+		return false
+	}
+	m := p.Spec.Messaging.Managed
+	return m != nil && m.ForceCutoverForVersion != "" && m.ForceCutoverForVersion == u.ToVersion
+}
+
+// migrationForceCarriedOver reports whether spec.messaging.managed.forceCutoverForVersion
+// currently names the given target version — the check beginMigration makes to decide whether
+// the value predates the attempt it is about to start.
+func migrationForceCarriedOver(p *otilmv1alpha1.Platform, toVersion string) bool {
+	m := p.Spec.Messaging.Managed
+	return m != nil && m.ForceCutoverForVersion != "" && m.ForceCutoverForVersion == toVersion
+}
+
+// refreshForceAuthorization clears a carried-over marker once the spec value it refers to is
+// gone. That is what makes the authorisation re-armable: the operator clears
+// forceCutoverForVersion (or points it elsewhere), this pass records that the leftover is no
+// longer in play, and setting it again on a later pass is a fresh, deliberate authorisation
+// for THIS attempt.
+//
+// It writes only on the transition, so the steady state costs nothing.
+func (r *Reconciler) refreshForceAuthorization(ctx context.Context, p *otilmv1alpha1.Platform) error {
+	u := p.Status.Upgrade
+	if u == nil || !u.ForceCarriedOver || migrationForceCarriedOver(p, u.ToVersion) {
+		return nil
+	}
+	u.ForceCarriedOver = false
+	if err := r.Status().Update(ctx, p); err != nil {
+		u.ForceCarriedOver = true
+		return err
+	}
+	return nil
+}
+
+// consumeMigrationForce records that this attempt has ACTED on its force authorisation, and
+// persists that BEFORE the step it permits — the engine's ordinary rule that nothing
+// destructive happens against a state the cluster has not accepted. Recording it is also what
+// lets the cleanup finish a forced migration the cutover started, whatever the spec says by
+// then.
+func (r *Reconciler) consumeMigrationForce(ctx context.Context, p *otilmv1alpha1.Platform) error {
+	u := p.Status.Upgrade
+	if u == nil || u.ForceAuthorized {
+		return nil
+	}
+	u.ForceAuthorized = true
+	if err := r.Status().Update(ctx, p); err != nil {
+		u.ForceAuthorized = false
+		return err
+	}
+	return nil
 }
 
 // forceMigrationCutover takes the exit an expired reversible phase's own message offers: cut over
@@ -209,6 +304,14 @@ func migrationForceCutoverAuthorized(p *otilmv1alpha1.Platform) bool {
 // to be reclaimed. fenceWorkloads is idempotent either way: it re-records the live counts when
 // nothing is fenced, and merely re-asserts the zeros when the fence still holds.
 func (r *Reconciler) forceMigrationCutover(ctx context.Context, p *otilmv1alpha1.Platform, src migrationRender) (migrationRender, bool, ctrl.Result, error) {
+	// Record the authorisation as consumed FIRST: from here the migration proceeds on it, and
+	// the cleanup that finishes the job must honour the same decision even if the spec field
+	// is cleared before it gets there.
+	if err := r.consumeMigrationForce(ctx, p); err != nil {
+		res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
+		return src, true, res, aerr
+	}
+
 	if err := r.fenceWorkloads(ctx, p); err != nil {
 		res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, err)
 		return src, true, res, aerr

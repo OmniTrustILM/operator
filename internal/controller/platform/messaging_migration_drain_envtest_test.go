@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
@@ -95,6 +96,20 @@ func (unreachableBroker) Connections(context.Context, string) (int, error) {
 
 func (unreachableBroker) CloseConnections(context.Context, string) error {
 	return errors.New("no broker is reachable")
+}
+
+// advanceDrainPollClock back-dates the recorded next-poll floor so the following reconcile is
+// allowed to take a sample. The drain deliberately refuses to sample twice inside one interval
+// — that spacing is what makes three "consecutive" clean polls mean anything — so a spec that
+// drives the reconciler in a tight loop has to stand in for the time that would have passed.
+func advanceDrainPollClockFor(ns string) {
+	var p otilmv1alpha1.Platform
+	if err := k8sClient.Get(ctx, platformKey(ns), &p); err != nil || p.Status.Upgrade == nil {
+		return
+	}
+	past := metav1.NewTime(time.Now().Add(-time.Second))
+	p.Status.Upgrade.NextDrainPollAt = &past
+	_ = k8sClient.Status().Update(ctx, &p)
 }
 
 // queuesPolled returns how many times the drain has asked this broker for the queue listing.
@@ -170,10 +185,14 @@ var _ = Describe("Messaging migration drain", func() {
 				"a draining platform reports the version it is still running")
 
 			By("emptying the queue and letting the drain sample it")
-			admin.setQueues(sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f", Consumers: 2}))
+			admin.setQueues(sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f"}))
 			polledBefore := queuesPolled(admin)
 
 			Eventually(func() otilmv1alpha1.MigrationPhase {
+				// Each pass stands for one whole migration cadence: the recorded floor is what
+				// keeps two samples from landing in the same instant, so a spec that drove the
+				// reconciler faster than real time has to move it on deliberately.
+				advanceDrainPollClockFor(ns)
 				reconcileOnce(ns)
 				u := getPlatform(ns).Status.Upgrade
 				if u == nil {
@@ -181,7 +200,7 @@ var _ = Describe("Messaging migration drain", func() {
 				}
 				return u.Phase
 			}, platformTimeout, platformInterval).Should(Equal(otilmv1alpha1.MigrationPhaseCuttingOver),
-				"a repeatedly empty source virtual host — bound proxy queue and its live consumer included — hands over to the cutover")
+				"a repeatedly empty source virtual host — the bound proxy queue included — hands over to the cutover")
 
 			// Each pass reads the count back from the cluster, so reaching the threshold at all
 			// proves it was persisted: a reconciler carries nothing from the pass before it.

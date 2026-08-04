@@ -31,10 +31,11 @@ import (
 type MigrationPhase string
 
 // Messaging-migration phase constants, in the order the engine walks them: Fencing (scale
-// the platform's producers/consumers to zero so no new traffic lands on the source vhost),
-// Draining (wait for the source vhost's queues to empty), CuttingOver (repoint the
-// platform's messaging connection at the target-version vhost), and CleaningUp (tear down
-// the source-version topology).
+// the platform's message PRODUCERS — the gateway, the scheduler and the bundled provisioning
+// service — to zero so no new traffic lands on the source vhost; Core, the consumer that
+// empties the queues, deliberately keeps running), Draining (wait for the source vhost's
+// queues to empty), CuttingOver (repoint the platform's messaging connection at the
+// target-version vhost), and CleaningUp (tear down the source-version topology).
 const (
 	MigrationPhaseFencing     MigrationPhase = "Fencing"
 	MigrationPhaseDraining    MigrationPhase = "Draining"
@@ -52,6 +53,15 @@ type FencedWorkload struct {
 	// Replicas is the replica count the workload carried immediately before the fence
 	// scaled it to zero, restored verbatim on Resume.
 	Replicas int32 `json:"replicas"`
+	// Absent records that the workload did not exist when the fence recorded its targets.
+	// The entry is recorded ANYWAY: the fence's list is the complete set of producers the
+	// migration intends to hold down, so a workload the ordinary render creates (or
+	// re-creates) mid-migration is fenced rather than silently allowed to start publishing
+	// outside the fence. It also tells the engine what "stopped" means for this entry —
+	// still absent, rather than observed at zero replicas — and that there is no replica
+	// count to write back when the fence is lifted.
+	// +optional
+	Absent bool `json:"absent,omitempty"`
 }
 
 // UpgradeStatus is the in-flight messaging-migration state. It exists ONLY while a
@@ -71,6 +81,34 @@ type UpgradeStatus struct {
 	// CleanDrainPolls counts consecutive polls that observed every drainable queue empty.
 	// +optional
 	CleanDrainPolls int32 `json:"cleanDrainPolls,omitempty"`
+	// NextDrainPollAt is the earliest time the drain may take its NEXT sample. The
+	// consecutive-clean-poll count is only meaningful if the samples are SPACED: every
+	// status write re-enqueues the Platform through the operator's own watch, so without an
+	// explicit floor three "consecutive" polls could all land inside the same second and
+	// prove nothing about a quiet virtual host. A poll arriving before this time is ignored.
+	// +optional
+	NextDrainPollAt *metav1.Time `json:"nextDrainPollAt,omitempty"`
+	// InputsHash is a coordinate-free fingerprint (a hash — never the values themselves) of
+	// the migration-relevant spec inputs as they stood when the migration began: the
+	// messaging mode and wiring, the source and target virtual hosts, and the provisioning
+	// mode. The engine re-computes it every reconcile and refuses to proceed when it has
+	// changed, because those inputs decide which broker is addressed and which topology
+	// objects are the source and which the target — editing them mid-flight could complete a
+	// migration "successfully" while leaving the original topology orphaned.
+	// +optional
+	InputsHash string `json:"inputsHash,omitempty"`
+	// ForceCarriedOver records that spec.messaging.managed.forceCutoverForVersion ALREADY
+	// named this migration's target version when the attempt began — i.e. it is a value left
+	// behind by an earlier attempt, which cannot authorize this one. It clears the moment the
+	// field is cleared or changed, so re-setting it deliberately for this attempt counts.
+	// +optional
+	ForceCarriedOver bool `json:"forceCarriedOver,omitempty"`
+	// ForceAuthorized records that this attempt has CONSUMED the destructive force-cutover
+	// authorization. It is persisted before the first step the authorization permits, so the
+	// cleanup still honours a force the cutover acted on even if the spec field is cleared in
+	// between.
+	// +optional
+	ForceAuthorized bool `json:"forceAuthorized,omitempty"`
 	// StartedAt is when the migration began (the start of the Fencing phase).
 	StartedAt metav1.Time `json:"startedAt"`
 	// PhaseStartedAt bounds the current phase's deadline independently of the whole run.

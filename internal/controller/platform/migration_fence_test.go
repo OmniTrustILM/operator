@@ -61,6 +61,7 @@ func fencedMigrationPlatform(fenced ...otilmv1alpha1.FencedWorkload) *otilmv1alp
 // Platform's status subresource enabled, as the real apiserver has it).
 func fenceReconcilerFor(t *testing.T, p *otilmv1alpha1.Platform, objs ...client.Object) *Reconciler {
 	t.Helper()
+	pinMigrationInputs(p)
 	s := reconcileScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(p).
 		WithObjects(append([]client.Object{p}, objs...)...).Build()
@@ -77,10 +78,16 @@ func TestFenceWorkloadsWithoutMigration(t *testing.T) {
 	assert.Contains(t, err.Error(), "nothing to fence")
 }
 
-// TestFenceWorkloadsRecordsOnlyExistingWorkloads: a target that is not rendered has no
-// producer to stop and no count to restore, so it is skipped rather than recorded (a
-// recorded entry the restore could not honour would be worse than no entry).
-func TestFenceWorkloadsRecordsOnlyExistingWorkloads(t *testing.T) {
+// TestFenceWorkloadsRecordsEveryIntendedTarget: the fence records the COMPLETE set of producers
+// it means to hold down, absent ones included.
+//
+// This test previously asserted the opposite — that an absent target is skipped — which is the
+// hole it now covers. A skipped target is a target permanently OUTSIDE the fence: the ordinary
+// render creates it on the next apply, at its configured replica count, publishing to the very
+// virtual host the migration is draining, while a fence that only ever inspects its own list
+// sees nothing wrong and advances. Recorded (with no count to restore, because there was no
+// running workload to remember), it is fenced the moment it appears.
+func TestFenceWorkloadsRecordsEveryIntendedTarget(t *testing.T) {
 	p := fencedMigrationPlatform()
 	sched := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
@@ -89,9 +96,75 @@ func TestFenceWorkloadsRecordsOnlyExistingWorkloads(t *testing.T) {
 	r := fenceReconcilerFor(t, p, sched)
 
 	require.NoError(t, r.fenceWorkloads(context.Background(), p))
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{
+	assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
+		{Name: "api-gateway", Kind: "Deployment", Absent: true},
 		{Name: "scheduler", Kind: "Deployment", Replicas: 4},
-	}, p.Status.Upgrade.Fenced, "the absent api-gateway must not be recorded")
+	}, p.Status.Upgrade.Fenced, "the absent api-gateway is recorded too, so it cannot escape the fence")
+}
+
+// TestFenceHoldsDownAWorkloadCreatedMidMigration is the escape the recording closes, end to end:
+// a producer that did not exist when the fence was recorded is created by the ordinary render
+// while the migration waits. It must be patched to zero like any other fenced workload, and the
+// Fencing phase must go on waiting until it is observed stopped.
+func TestFenceHoldsDownAWorkloadCreatedMidMigration(t *testing.T) {
+	p := fencedMigrationPlatform()
+	sched := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
+		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
+	}
+	r := fenceReconcilerFor(t, p, sched)
+	require.NoError(t, r.fenceWorkloads(context.Background(), p))
+
+	stopped, err := r.fencedProducersStopped(context.Background(), p)
+	require.NoError(t, err)
+	assert.True(t, stopped, "an absent target that is still absent has no producer to wait for")
+
+	// The render brings the gateway up: replicas omitted (it is on the fenced list), so the
+	// apiserver's default of one applies, and its pod is running.
+	gateway := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: fenceTestNS},
+		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
+		Status:     appsv1.DeploymentStatus{Replicas: 1},
+	}
+	require.NoError(t, r.Create(context.Background(), gateway))
+
+	stopped, err = r.fencedProducersStopped(context.Background(), p)
+	require.NoError(t, err)
+	assert.False(t, stopped, "a recreated producer holds the fence until it is observed stopped")
+
+	require.NoError(t, r.fenceWorkloads(context.Background(), p))
+	assert.Zero(t, replicasOfIn(t, r, fenceTestNS, "api-gateway"),
+		"the per-reconcile re-assert patches the newly created workload to zero")
+}
+
+// replicasOfIn reads a workload's .spec.replicas in the given namespace, returning -1 when unset.
+func replicasOfIn(t *testing.T, r *Reconciler, namespace, name string) int32 {
+	t.Helper()
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Name: name, Namespace: namespace}, &dep))
+	if dep.Spec.Replicas == nil {
+		return -1
+	}
+	return *dep.Spec.Replicas
+}
+
+// TestRestoreWorkloadOfAnAbsentTargetWritesNoCount: an entry the fence recorded as absent has no
+// replica count to write back — the render's own configured count is the truth the moment the
+// entry is dropped, and inventing a zero here would fight it.
+func TestRestoreWorkloadOfAnAbsentTargetWritesNoCount(t *testing.T) {
+	entry := otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Absent: true}
+	p := fencedMigrationPlatform(entry, otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	gateway := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: fenceTestNS},
+		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(2))},
+	}
+	r := fenceReconcilerFor(t, p, gateway)
+
+	require.NoError(t, r.restoreWorkload(context.Background(), p, entry))
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+		p.Status.Upgrade.Fenced, "the entry is dropped, which is the whole of the restore")
+	assert.Equal(t, int32(2), replicasOfIn(t, r, fenceTestNS, "api-gateway"),
+		"whatever the render put there stands: the fence writes no count of its own")
 }
 
 // TestFenceWorkloadsPreservesRecordedCounts: re-entering after a crash must NOT re-record.

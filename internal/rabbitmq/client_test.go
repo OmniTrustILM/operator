@@ -240,14 +240,17 @@ func TestRequestsCarryBasicAuthAndAcceptJSON(t *testing.T) {
 	}
 }
 
-func TestQueuesDecodesDepthsAndConsumers(t *testing.T) {
+// TestQueuesDecodesDepths: the client decodes the two depths the drain reasons over, and
+// ignores the consumer count the broker also reports — no caller may gate on it (a healthy
+// remote proxy is permanently attached to its own queue), so it is not carried at all.
+func TestQueuesDecodesDepths(t *testing.T) {
 	srv := serveJSON(t, http.StatusOK, queuesBody)
 
 	queues, err := NewClient(srv.URL, testUser, testPassword).Queues(context.Background(), defaultVhost)
 	require.NoError(t, err)
 	assert.Equal(t, []QueueState{
-		{Name: "ilm.q", MessagesReady: 3, MessagesUnacked: 2, Consumers: 1},
-		{Name: "ilm.dlq", MessagesReady: 0, MessagesUnacked: 0, Consumers: 0},
+		{Name: "ilm.q", MessagesReady: 3, MessagesUnacked: 2},
+		{Name: "ilm.dlq", MessagesReady: 0, MessagesUnacked: 0},
 	}, queues)
 }
 
@@ -259,9 +262,9 @@ func TestQueuesEmptyListing(t *testing.T) {
 	assert.Empty(t, queues)
 }
 
-// TestQueuesFailClosedOnIncompleteEntry is the core safety property: a queue whose depth or
-// consumer fields the broker did not report (an unavailable queue) must NEVER be decoded as an
-// empty queue — it must be an error.
+// TestQueuesFailClosedOnIncompleteEntry is the core safety property: a queue whose depth
+// fields the broker did not report (an unavailable queue) must NEVER be decoded as an empty
+// queue — it must be an error.
 func TestQueuesFailClosedOnIncompleteEntry(t *testing.T) {
 	tests := []struct {
 		name string
@@ -270,7 +273,6 @@ func TestQueuesFailClosedOnIncompleteEntry(t *testing.T) {
 		{name: "missing name", body: `[{"messages_ready":0,"messages_unacknowledged":0,"consumers":0}]`},
 		{name: "missing ready depth", body: `[{"name":"ilm.q","messages_unacknowledged":0,"consumers":0}]`},
 		{name: "missing unacked depth", body: `[{"name":"ilm.q","messages_ready":0,"consumers":0}]`},
-		{name: "missing consumers", body: `[{"name":"ilm.q","messages_ready":0,"messages_unacknowledged":0}]`},
 		{name: "queue reported as down", body: `[{"name":"ilm.q","state":"down"}]`},
 	}
 

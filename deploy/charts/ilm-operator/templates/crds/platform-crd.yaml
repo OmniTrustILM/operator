@@ -4317,12 +4317,14 @@ spec:
                       drainTimeout:
                         default: 15m
                         description: |-
-                          DrainTimeout bounds how long a managed-messaging version migration waits for the
-                          source vhost to drain, and separately bounds the wait for cleanup to finish after
-                          cutover. The migration engine polls the source vhost across this window for every
-                          drainable queue to report empty; if the deadline passes with messages still
-                          outstanding the migration stops in the Draining (or CleaningUp) phase rather than
-                          proceeding — see ForceCutoverForVersion to override that stop.
+                          DrainTimeout bounds EACH of the migration's waiting phases separately: how long
+                          Fencing waits for the platform's message producers to actually wind down, how long
+                          Draining waits for the source vhost to empty, and how long CleaningUp waits for the
+                          source vhost to fall idle before it can be reclaimed. Each phase gets the full window,
+                          measured from its own start. The migration engine polls the source vhost across the
+                          Draining window for every drainable queue to report empty; if a deadline passes with
+                          producers still running or messages still outstanding the migration stops in that
+                          phase rather than proceeding — see ForceCutoverForVersion to override that stop.
                           It is constrained to the Go duration charset (digits, an optional fraction, and one
                           or more unit suffixes — ns, us, ms, s, m or h, e.g. "15m" or "1h30m") via a CEL rule
                           rather than a Pattern marker: controller-gen cannot apply +kubebuilder:validation:
@@ -4342,9 +4344,15 @@ spec:
                           destructive escape hatch for an operator who has confirmed the remaining messages
                           are safe to lose.
 
-                          The value is TARGET-SCOPED: it must equal the version the migration is cutting over
-                          TO (status.upgrade.toVersion), so a value left over from a past migration can never
-                          silently authorize a future one — each migration requires its own explicit value.
+                          The value is scoped to ONE ATTEMPT, in two parts. It must equal the version the
+                          migration is cutting over TO (status.upgrade.toVersion); and it must be set — or
+                          re-set — AFTER that attempt began. A value this field already carried when the
+                          migration started is recorded as carried over (status.upgrade.forceCarriedOver) and
+                          authorizes nothing until it is cleared and set again, so a value left behind by an
+                          aborted attempt can never silently authorize a later migration to the same version.
+                          Once an attempt acts on the authorization it is recorded as consumed
+                          (status.upgrade.forceAuthorized), so the cleanup still honours a force the cutover
+                          used even if this field is cleared in between.
                         pattern: ^[0-9]+\.[0-9]+\.[0-9]+$
                         type: string
                       overrides:
@@ -6953,6 +6961,16 @@ spec:
                         FencedWorkload records one workload the fence scaled to zero, so Resume can restore
                         exactly what was there. Kind distinguishes a Deployment from a StatefulSet gateway.
                       properties:
+                        absent:
+                          description: |-
+                            Absent records that the workload did not exist when the fence recorded its targets.
+                            The entry is recorded ANYWAY: the fence's list is the complete set of producers the
+                            migration intends to hold down, so a workload the ordinary render creates (or
+                            re-creates) mid-migration is fenced rather than silently allowed to start publishing
+                            outside the fence. It also tells the engine what "stopped" means for this entry —
+                            still absent, rather than observed at zero replicas — and that there is no replica
+                            count to write back when the fence is lifted.
+                          type: boolean
                         kind:
                           description: 'Kind is the workload''s Kind: "Deployment"
                             or "StatefulSet".'
@@ -6972,9 +6990,42 @@ spec:
                       - replicas
                       type: object
                     type: array
+                  forceAuthorized:
+                    description: |-
+                      ForceAuthorized records that this attempt has CONSUMED the destructive force-cutover
+                      authorization. It is persisted before the first step the authorization permits, so the
+                      cleanup still honours a force the cutover acted on even if the spec field is cleared in
+                      between.
+                    type: boolean
+                  forceCarriedOver:
+                    description: |-
+                      ForceCarriedOver records that spec.messaging.managed.forceCutoverForVersion ALREADY
+                      named this migration's target version when the attempt began — i.e. it is a value left
+                      behind by an earlier attempt, which cannot authorize this one. It clears the moment the
+                      field is cleared or changed, so re-setting it deliberately for this attempt counts.
+                    type: boolean
                   fromVersion:
                     description: FromVersion is the platform version bundle the migration
                       is moving away from.
+                    type: string
+                  inputsHash:
+                    description: |-
+                      InputsHash is a coordinate-free fingerprint (a hash — never the values themselves) of
+                      the migration-relevant spec inputs as they stood when the migration began: the
+                      messaging mode and wiring, the source and target virtual hosts, and the provisioning
+                      mode. The engine re-computes it every reconcile and refuses to proceed when it has
+                      changed, because those inputs decide which broker is addressed and which topology
+                      objects are the source and which the target — editing them mid-flight could complete a
+                      migration "successfully" while leaving the original topology orphaned.
+                    type: string
+                  nextDrainPollAt:
+                    description: |-
+                      NextDrainPollAt is the earliest time the drain may take its NEXT sample. The
+                      consecutive-clean-poll count is only meaningful if the samples are SPACED: every
+                      status write re-enqueues the Platform through the operator's own watch, so without an
+                      explicit floor three "consecutive" polls could all land inside the same second and
+                      prove nothing about a quiet virtual host. A poll arriving before this time is ignored.
+                    format: date-time
                     type: string
                   phase:
                     description: Phase is the current stage of the migration.

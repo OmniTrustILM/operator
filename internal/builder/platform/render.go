@@ -25,6 +25,7 @@ package platform
 import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -327,7 +328,43 @@ func withAdditionalEnv(p *otilmv1alpha1.Platform, c common.Component) common.Com
 // its tail); these passthroughs are global, so they are merged BEFORE the per-component
 // layer (see withGlobalCustomization / withAdditionalEnv for the precedence).
 func withPlatformGlobals(p *otilmv1alpha1.Platform, c common.Component) common.Component {
-	return withGlobalCustomization(p, withAdditionalEnv(p, c))
+	return withPlatformVersion(p, withGlobalCustomization(p, withAdditionalEnv(p, c)))
+}
+
+// PlatformVersionAnnotation is the pod-template annotation every rendered component carries,
+// naming the platform version bundle its pod template was rendered from.
+//
+// It exists because an IMAGE TAG is not a version marker: several components are pinned to the
+// same image across neighbouring bundles (provisioning-rabbitmq is identical in 2.18.0 and
+// 2.19.0), so "this workload runs the target's image" can be true of a workload still
+// configured entirely from the source bundle — a false yes the messaging migration's staged
+// cutover would act on, releasing Core onto a topology its provisioner has not moved to. The
+// annotation is stamped from the SAME resolution the rest of the render uses, so it changes
+// exactly when the rendered pod template does, and the cutover can require it.
+const PlatformVersionAnnotation = "otilm.com/platform-version"
+
+// withPlatformVersion stamps PlatformVersionAnnotation on a resolved component, AFTER the
+// user's own pod annotations (spec.common.podAnnotations / spec.<component>.podAnnotations)
+// have been merged, so the operator's marker cannot be overwritten by the CR.
+func withPlatformVersion(p *otilmv1alpha1.Platform, c common.Component) common.Component {
+	annotations := make(map[string]string, len(c.PodAnnotations)+1)
+	for k, v := range c.PodAnnotations {
+		annotations[k] = v
+	}
+	annotations[PlatformVersionAnnotation] = RenderedPlatformVersion(p)
+	c.PodAnnotations = annotations
+	return c
+}
+
+// RenderedPlatformVersion returns the platform version whose bundle this render resolves
+// against: spec.version when this build carries it, else the operator's DefaultVersion — the
+// same fallback resolveBundle makes, so the annotation can never name a bundle other than the
+// one the images and wiring came from.
+func RenderedPlatformVersion(p *otilmv1alpha1.Platform) string {
+	if _, ok := bom.BundleFor(p.Spec.Version); ok && p.Spec.Version != "" {
+		return p.Spec.Version
+	}
+	return bom.DefaultVersion
 }
 
 // withGlobalCustomization layers the fleet-wide spec.common passthrough onto a resolved

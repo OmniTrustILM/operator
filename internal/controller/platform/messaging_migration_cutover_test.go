@@ -43,6 +43,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -91,6 +92,7 @@ func cutoverPlatform(fenced ...otilmv1alpha1.FencedWorkload) *otilmv1alpha1.Plat
 // subresource, as the real apiserver has it) plus the given objects.
 func cutoverReconciler(t *testing.T, p *otilmv1alpha1.Platform, funcs interceptor.Funcs, objs ...client.Object) (*Reconciler, *record.FakeRecorder) {
 	t.Helper()
+	pinMigrationInputs(p)
 	s := cutoverScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(p).
 		WithObjects(append([]client.Object{p}, objs...)...).WithInterceptorFuncs(funcs).Build()
@@ -118,6 +120,10 @@ func declaredTargetTopology(p *otilmv1alpha1.Platform) []client.Object {
 			continue
 		}
 		declared := u.DeepCopy()
+		declared.SetGeneration(1)
+		// Ready is only Ready FOR THE CURRENT SPEC: the Topology Operator stamps the generation
+		// it reconciled, and the cutover refuses a Ready that belongs to an older one.
+		_ = unstructured.SetNestedField(declared.Object, int64(1), "status", "observedGeneration")
 		_ = unstructured.SetNestedSlice(declared.Object, []interface{}{
 			map[string]interface{}{"type": conditionTypeReady, "status": string(metav1.ConditionTrue)},
 		}, "status", "conditions")
@@ -126,15 +132,23 @@ func declaredTargetTopology(p *otilmv1alpha1.Platform) []client.Object {
 	return out
 }
 
-// cutoverWorkload is a workload carrying the given image, at the given desired replica count,
-// with the rollout status the caller asks for: rolled=true reports the workload controller
-// finished rolling every pod onto the current template.
-func cutoverWorkload(name, image string, replicas int32, rolled bool) *appsv1.Deployment {
+// cutoverWorkload is a workload carrying the given image and the given VERSION's pod-template
+// stamp, at the given desired replica count, with the rollout status the caller asks for:
+// rolled=true reports the workload controller finished rolling every pod onto the current
+// template.
+//
+// The version and the image are separate arguments because they are separate facts, and the
+// cutover leans on the version: several components carry the SAME image across neighbouring
+// bundles, so only the stamp says which bundle the template was rendered from.
+func cutoverWorkload(name, image, version string, replicas int32, rolled bool) *appsv1.Deployment {
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: migrationTestNS, Generation: 4},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr(replicas),
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{platformbuilder.PlatformVersionAnnotation: version},
+				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: image}}},
 			},
 		},
@@ -343,9 +357,9 @@ func TestCutoverHoldsCoreWhileProvisioningIsStillFenced(t *testing.T) {
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		// The trap: fenced at zero, already carrying the target template.
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 0, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 0, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
+		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -373,8 +387,8 @@ func TestCutoverHoldsCoreUntilProvisioningHasRolledOut(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, false),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), 1, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, false),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 	)
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -391,9 +405,9 @@ func TestCutoverRollsCoreOnceProvisioningAnswers(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
+		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -416,10 +430,10 @@ func TestCutoverReopensTheGatewayAndHandsOver(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
-		cutoverWorkload("scheduler", "scheduler:1.1.1", 0, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
+		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
+		cutoverWorkload("scheduler", "scheduler:1.1.1", platformVersion219, 0, true),
 	)
 	r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -493,9 +507,9 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			p := cutoverPlatform(tc.fenced...)
 			seed := declaredTargetTopology(p)
 			seed = append(seed,
-				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, tc.provRolled),
-				cutoverWorkload(coreDeploymentName, coreImageFor(p, tc.coreImage), 1, true),
-				cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
+				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, tc.provRolled),
+				cutoverWorkload(coreDeploymentName, coreImageFor(p, tc.coreImage), tc.coreImage, 1, true),
+				cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 			)
 			r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -543,8 +557,8 @@ func TestCutoverStopsWhenItCannotReadTheRolloutState(t *testing.T) {
 			p := cutoverPlatform(fencedGateway(), fencedScheduler())
 			seed := declaredTargetTopology(p)
 			seed = append(seed,
-				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, true),
-				cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), 1, true),
+				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+				cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
 			)
 			r, _ := cutoverReconciler(t, p, interceptor.Funcs{
 				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -575,9 +589,9 @@ func TestCutoverStopsWhenTheHandOverCannotBePersisted(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
+		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
 	// Writes in order: the stage record, the restore's de-listing, the hand-over. Only the last
 	// one is refused.
@@ -614,6 +628,9 @@ func TestWorkloadRolledOutHandlesBothKinds(t *testing.T) {
 		Spec: appsv1.StatefulSetSpec{
 			Replicas: ptr(int32(1)),
 			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{platformbuilder.PlatformVersionAnnotation: platformVersion219},
+				},
 				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "kong", Image: image}}},
 			},
 		},
@@ -622,52 +639,131 @@ func TestWorkloadRolledOutHandlesBothKinds(t *testing.T) {
 	r, _ := cutoverReconciler(t, cutoverPlatform(), interceptor.Funcs{}, sts)
 	ctx := context.Background()
 
-	rolled, err := r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image)
+	rolled, err := r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion219)
 	require.NoError(t, err)
 	assert.True(t, rolled, "a StatefulSet-typed component rolls out like a Deployment-typed one")
 
-	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, "kong:3.8.0")
+	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, "kong:3.8.0", platformVersion219)
 	require.NoError(t, err)
-	assert.False(t, rolled, "the target image is what makes it the target rollout")
+	assert.False(t, rolled, "the target image is corroborating evidence, and it has to match too")
 
-	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, "nothing-of-this-name", image)
+	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion218)
+	require.NoError(t, err)
+	assert.False(t, rolled, "a template stamped with another version is not the target rollout")
+
+	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, "nothing-of-this-name", image, platformVersion219)
 	require.NoError(t, err)
 	assert.False(t, rolled, "a workload that has not been applied yet is not an error")
 }
 
-// TestTopologyObjectReadyFailsClosed pins the one-directional answer stage 1 depends on: only an
-// explicit Ready=True is a yes. Everything else — absent, no status, a condition list the
-// operator cannot parse, an explicit False — holds the cutover.
-func TestTopologyObjectReadyFailsClosed(t *testing.T) {
+// TestTopologyObjectDeclaredFailsClosed pins the one-directional answer stage 1 depends on: only an
+// explicit Ready=True, for the CURRENT spec, is a yes. Everything else — absent, no status, an
+// explicit False, or a Ready the object earned before its latest spec was reconciled — holds the
+// cutover, and a condition list the operator cannot parse is an ERROR rather than a silent wait.
+func TestTopologyObjectDeclaredFailsClosed(t *testing.T) {
 	gvk := platformbuilder.ManagedMessagingVhostGVK()
-	topologyObject := func(name string, conditions []interface{}) *unstructured.Unstructured {
+	topologyObject := func(name string, generation, observed int64, conditions []interface{}) *unstructured.Unstructured {
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(gvk)
 		u.SetName(name)
 		u.SetNamespace(migrationTestNS)
+		u.SetGeneration(generation)
+		if observed > 0 {
+			_ = unstructured.SetNestedField(u.Object, observed, "status", "observedGeneration")
+		}
 		if conditions != nil {
 			_ = unstructured.SetNestedSlice(u.Object, conditions, "status", "conditions")
 		}
 		return u
 	}
+	ready := []interface{}{
+		map[string]interface{}{"type": "SomethingElse", "status": string(metav1.ConditionTrue)},
+		map[string]interface{}{"type": conditionTypeReady, "status": string(metav1.ConditionTrue)},
+	}
 	seed := []client.Object{
-		topologyObject("no-status", nil),
-		topologyObject("unparseable", []interface{}{"not-a-condition"}),
-		topologyObject("not-ready", []interface{}{
+		topologyObject("no-status", 1, 0, nil),
+		topologyObject("unparseable", 1, 1, []interface{}{"not-a-condition"}),
+		topologyObject("not-ready", 1, 1, []interface{}{
 			map[string]interface{}{"type": conditionTypeReady, "status": string(metav1.ConditionFalse)},
 		}),
-		topologyObject("declared", []interface{}{
-			map[string]interface{}{"type": "SomethingElse", "status": string(metav1.ConditionTrue)},
-			map[string]interface{}{"type": conditionTypeReady, "status": string(metav1.ConditionTrue)},
-		}),
+		// The stale case: Ready=True, but earned by the spec BEFORE the one the operator just
+		// applied. Accepting it would let the cutover roll Core onto a topology the broker has
+		// not been told about yet.
+		topologyObject("stale-ready", 4, 3, ready),
+		topologyObject("declared", 4, 4, ready),
 	}
 	r, _ := cutoverReconciler(t, cutoverPlatform(), interceptor.Funcs{}, seed...)
 	ctx := context.Background()
 
-	for _, name := range []string{"absent", "no-status", "unparseable", "not-ready"} {
-		assert.False(t, r.topologyObjectReady(ctx, migrationTestNS, gvk, name), name)
+	for _, name := range []string{"absent", "no-status", "not-ready", "stale-ready"} {
+		got, err := r.topologyObjectDeclared(ctx, migrationTestNS, gvk, name)
+		require.NoError(t, err, name)
+		assert.False(t, got, name)
 	}
-	assert.True(t, r.topologyObjectReady(ctx, migrationTestNS, gvk, "declared"))
+
+	_, err := r.topologyObjectDeclared(ctx, migrationTestNS, gvk, "unparseable")
+	require.Error(t, err, "an unreadable status is surfaced, not turned into an endless wait")
+
+	got, err := r.topologyObjectDeclared(ctx, migrationTestNS, gvk, "declared")
+	require.NoError(t, err)
+	assert.True(t, got)
+}
+
+// TestTopologyObjectDeclaredSurfacesAReadFailure: stage 1 has no deadline behind it, so an
+// apiserver that will not answer must reach the platform's status rather than sit in a stage
+// that looks like ordinary waiting — and it must do so without naming the object, whose name
+// carries the virtual-host scope.
+func TestTopologyObjectDeclaredSurfacesAReadFailure(t *testing.T) {
+	gvk := platformbuilder.ManagedMessagingVhostGVK()
+	r, _ := cutoverReconciler(t, cutoverPlatform(), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, isTopology := obj.(*unstructured.Unstructured); isTopology {
+				return apierrors.NewInternalError(errors.New("etcd is unavailable"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+
+	_, err := r.topologyObjectDeclared(context.Background(), migrationTestNS, gvk, "ilm-2-19-0-vhost")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "ilm-2-19-0-vhost", "a topology object's name is a coordinate")
+	assertNoBrokerCoordinates(t, err.Error())
+}
+
+// TestCutoverRefusesAProvisioningServiceStillOnTheSourceTemplate is the false-yes the image
+// check alone cannot catch: 2.18.0 and 2.19.0 pin provisioning-rabbitmq to the SAME image, so a
+// provisioning service still configured entirely from the source bundle — pointing at the
+// virtual host the migration is leaving — satisfies "runs the target's image" perfectly. Releasing
+// Core on that answer rolls it onto a topology its provisioner has not moved to.
+func TestCutoverRefusesAProvisioningServiceStillOnTheSourceTemplate(t *testing.T) {
+	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+	sourceImage := provisioningImageFor(p, platformVersion218)
+	require.Equal(t, provisioningImageOf(p), sourceImage,
+		"the whole point of this case: the two bundles pin the same provisioning image")
+
+	seed := declaredTargetTopology(p)
+	seed = append(seed,
+		// Target image, fully rolled out — and stamped with the SOURCE version.
+		cutoverWorkload(provisioningWorkloadName, sourceImage, platformVersion218, 2, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
+	)
+	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
+
+	render, _, _, err := cutoverPass(t, r)
+	require.NoError(t, err)
+	assert.True(t, render.holdCore,
+		"a provisioning service still on the source template may not release Core, whatever image it runs")
+	stored := storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase)
+	assert.Contains(t, migrationCondition(stored).Message, cutoverStageProvisioning.String())
+}
+
+// provisioningImageFor resolves the image a given platform VERSION renders for the provisioning
+// service.
+func provisioningImageFor(p *otilmv1alpha1.Platform, version string) string {
+	render := p.DeepCopy()
+	render.Spec.Version = version
+	return platformbuilder.ResolveProvisioning(render).Image
 }
 
 // TestCutoverStopsWhenTheStageCannotBePersisted proves the stage is written down BEFORE the step
@@ -677,8 +773,8 @@ func TestCutoverStopsWhenTheStageCannotBePersisted(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler(), fencedProvisioning())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 0, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), 1, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 0, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 	)
 	r, _ := cutoverReconciler(t, p, failingStatusUpdate(errors.New("status write refused")), seed...)
 
@@ -696,9 +792,9 @@ func TestCutoverStopsWhenAProducerCannotBeRestored(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), 2, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
+		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
 	r, _ := cutoverReconciler(t, p, failingPatch(errors.New("patch refused")), seed...)
 
@@ -719,7 +815,7 @@ func TestCutoverWithoutADeployedProvisioningServiceSkipsThatStage(t *testing.T) 
 	p := cutoverPlatform(fencedGateway(), fencedScheduler())
 	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{Mode: "external", APIURL: "http://provisioner.example.com"}
 	seed := declaredTargetTopology(p)
-	seed = append(seed, cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), 1, true))
+	seed = append(seed, cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true))
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
 	render, _, _, err := cutoverPass(t, r)
