@@ -3642,12 +3642,24 @@ spec:
 					"--type=merge", "-p", `{"spec":{"version":"2.19.0","messaging":{"managed":{"drainTimeout":"10m"}}}}`))
 				Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version to 2.19.0")
 
-				By("following the migration through its phases to completion")
-				phases := awaitMigrationPhases(ns, migratePlatformName, 30*time.Minute, 5*time.Second)
-				for _, phase := range []string{"Draining", "CuttingOver", "CleaningUp"} {
-					Expect(phases).To(ContainElement(phase),
-						"the migration must pass through %s; observed: %v", phase, phases)
-				}
+				By("following the migration through to completion")
+				awaitMigrationPhases(ns, migratePlatformName, 30*time.Minute, 5*time.Second)
+
+				By("verifying every phase was entered, from the event trail (a fast phase can outrun any poller)")
+				// The condition is a live field a sampling loop can miss — a healthy CleaningUp lasts
+				// seconds — but the operator emits one MessagingMigrationPhase event per transition,
+				// and those persist. The trail is the assertion; the sampled reasons above are only
+				// the progress diagnostic.
+				Eventually(func(g Gomega) {
+					trail, err := utils.Run(exec.Command("kubectl", "get", "events", "-n", ns,
+						"--field-selector", "reason=MessagingMigrationPhase",
+						"-o", `jsonpath={range .items[*]}{.message}{"\n"}{end}`))
+					g.Expect(err).NotTo(HaveOccurred(), "the phase-transition events should be readable")
+					for _, phase := range []string{"Draining", "CuttingOver", "CleaningUp"} {
+						g.Expect(trail).To(ContainSubstring("entered phase "+phase),
+							"the operator must record entering phase %s in the event trail", phase)
+					}
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 
 				By("verifying the TARGET topology is declared and Ready (vhost /, ilm + ilm-proxy, provider.status-poll)")
 				Eventually(func(g Gomega) {
