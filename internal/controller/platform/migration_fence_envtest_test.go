@@ -29,7 +29,6 @@ import (
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,19 +77,16 @@ func getPlatform(ns string) *otilmv1alpha1.Platform {
 	return &p
 }
 
-// startMigration records an in-flight migration on status.upgrade with NO workloads fenced
-// yet — the state fenceWorkloads is entered from.
+// startMigration puts a platform into the state fenceWorkloads is entered from: spec.version
+// asking for the target, and a migration recorded on status.upgrade with NO workloads fenced
+// yet.
+//
+// spec.version must name the TARGET. A recorded migration whose target the spec no longer asks
+// for is, by the trigger layer's own matrix, a REVERT — the engine would abort it and lift the
+// fence, which is the opposite of what these specs are here to observe.
 func startMigration(ns string) {
-	EventuallyWithOffset(1, func(g Gomega) {
-		var p otilmv1alpha1.Platform
-		g.Expect(k8sClient.Get(ctx, platformKey(ns), &p)).To(Succeed())
-		now := metav1.Now()
-		p.Status.Upgrade = &otilmv1alpha1.UpgradeStatus{
-			FromVersion: platformVersion218, ToVersion: platformVersion219,
-			Phase: otilmv1alpha1.MigrationPhaseFencing, StartedAt: now, PhaseStartedAt: now,
-		}
-		g.Expect(k8sClient.Status().Update(ctx, &p)).To(Succeed())
-	}, platformTimeout, platformInterval).Should(Succeed())
+	requestPlatformVersion(ns, platformVersion219)
+	recordMigration(ns, otilmv1alpha1.MigrationPhaseFencing)
 }
 
 // awaitWorkload waits for a rendered workload to exist and returns its (possibly nil)
@@ -151,6 +147,24 @@ func replicasFieldOwners(ns, kind, name string) []string {
 	return owners
 }
 
+// fenceProducers drives fenceWorkloads by hand on a freshly read Platform.
+//
+// The read-and-retry matters: the suite's manager is reconciling the same in-flight migration,
+// so a hand-driven status write can lose a benign optimistic-lock race. Both halves of the
+// fence are idempotent, so a retry repeats no effect — it just gets a current object.
+func fenceProducers(ns string) {
+	EventuallyWithOffset(1, func() error {
+		return fenceReconciler().fenceWorkloads(ctx, getPlatform(ns))
+	}, platformTimeout, platformInterval).Should(Succeed())
+}
+
+// restoreProducer lifts the fence from one workload, with the same read-and-retry.
+func restoreProducer(ns string, w otilmv1alpha1.FencedWorkload) {
+	EventuallyWithOffset(1, func() error {
+		return fenceReconciler().restoreWorkload(ctx, getPlatform(ns), w)
+	}, platformTimeout, platformInterval).Should(Succeed())
+}
+
 // expectFenceHoldsAcrossReconciles runs five full reconciles and asserts the workload is at
 // zero after every one of them, and stays there afterwards. Five passes is the point: a fence
 // that merely survives the pass that set it would pass a single-reconcile test and still be
@@ -194,8 +208,7 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("fencing the producers: the complete record is written before the first patch")
 			startMigration(ns)
-			live := getPlatform(ns)
-			Expect(fenceReconciler().fenceWorkloads(ctx, live)).To(Succeed())
+			fenceProducers(ns)
 
 			recorded := getPlatform(ns).Status.Upgrade.Fenced
 			Expect(recorded).To(ConsistOf(
@@ -213,22 +226,19 @@ var _ = Describe("Messaging migration fence", func() {
 				"the fence — and nothing else — must own the fenced workload's replica count")
 
 			By("restoring the exact recorded count and clearing the entry")
-			live = getPlatform(ns)
 			restored := otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}
-			Expect(fenceReconciler().restoreWorkload(ctx, live, restored)).To(Succeed())
+			restoreProducer(ns, restored)
 			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(Equal(int32(3)))
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ConsistOf(
 				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
 			), "only the restored workload leaves the list")
 
 			By("re-entering a completed restore (crash-safety): idempotent, no second effect")
-			live = getPlatform(ns)
-			Expect(fenceReconciler().restoreWorkload(ctx, live, restored)).To(Succeed())
+			restoreProducer(ns, restored)
 			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(Equal(int32(3)))
 
 			By("handing .spec.replicas back to the operator's apply once the entry is gone")
-			_, err := fenceReconciler().Reconcile(ctx, ctrl.Request{NamespacedName: platformKey(ns)})
-			Expect(err).NotTo(HaveOccurred())
+			reconcileOnce(ns)
 			// The reconciler's apply claims the field again the moment the entry is gone, which
 			// is the load-bearing half. The fence's own claim may LINGER alongside it, because
 			// Server-Side Apply shares ownership rather than seizing it when the applied value
@@ -261,7 +271,7 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("fencing it as a StatefulSet")
 			startMigration(ns)
-			Expect(fenceReconciler().fenceWorkloads(ctx, getPlatform(ns))).To(Succeed())
+			fenceProducers(ns)
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ContainElement(
 				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2},
 			), "the effective workload kind must be recorded, not assumed")
@@ -270,9 +280,7 @@ var _ = Describe("Messaging migration fence", func() {
 			Expect(replicasFieldOwners(ns, "StatefulSet", "api-gateway")).To(ConsistOf(fenceFieldManagerName))
 
 			By("restoring the StatefulSet's recorded count")
-			live := getPlatform(ns)
-			Expect(fenceReconciler().restoreWorkload(ctx, live,
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2})).To(Succeed())
+			restoreProducer(ns, otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2})
 			Expect(workloadSpecReplicas(ns, "StatefulSet", "api-gateway")).To(Equal(int32(2)))
 		})
 
@@ -293,7 +301,7 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("fencing the HPA-owned component")
 			startMigration(ns)
-			Expect(fenceReconciler().fenceWorkloads(ctx, getPlatform(ns))).To(Succeed())
+			fenceProducers(ns)
 
 			// The count under an HPA is whatever the cluster currently runs, which is what
 			// restore must put back — the fence records the LIVE value rather than a spec one.

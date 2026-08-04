@@ -280,6 +280,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return res, err
 	}
 
+	// MESSAGING-MIGRATION GATE. It sits HERE — immediately after version resolution and
+	// BEFORE any gate that applies something belonging to the requested version — because a
+	// version bump that RENAMES the messaging virtual host must be sequenced (fence the
+	// producers, drain the source vhost, cut over, reclaim) rather than applied: rendering the
+	// target topology beside a source vhost that still holds messages is exactly the outcome
+	// the engine exists to prevent. It returns the version and bundle the REST of this
+	// reconcile must use — the requested ones when no migration is in the way, the SOURCE ones
+	// while a migration holds the platform back (it re-pins the in-memory spec.version to
+	// match, so the builders resolve the same bundle). A handled=true result means the gate
+	// short-circuited the reconcile.
+	mig, handled, res, err := r.gateMessagingMigration(ctx, &platform, bundle, resolvedVersion)
+	if handled || err != nil {
+		return res, err
+	}
+	bundle = mig.bundle
+
 	// Desired set: the keys of every object applied this reconcile, used by the
 	// post-apply prune to garbage-collect de-rendered children. Populated as objects
 	// are applied (Reconciler.apply / the composed-Secret reconcilers add their keys).
@@ -358,16 +374,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Prune de-rendered children, register the password admin, measure readiness, persist
 	// status, and pick the soonest applicable requeue. A prune/readiness/status failure routes
 	// by transience; the adjunct requeue flags collected across this pass decide the cadence.
-	return r.finalizeReconcile(ctx, &platform, desired, resolvedVersion, requeue, oidcRequeue, mgd)
+	return r.finalizeReconcile(ctx, &platform, desired, mig, requeue, oidcRequeue, mgd)
 }
 
 // finalizeReconcile completes a successful reconcile pass: it prunes de-rendered children,
 // registers the optional password admin, MEASURES readiness from the required Deployments,
 // persists status, and picks the soonest applicable requeue. A prune / readiness-check / status
 // failure routes by transience (requeue vs degrade); a benign optimistic-lock status conflict
-// requeues quietly. requeue/oidcRequeue and the managed-dependency flags carried in mgd feed the
-// final requeue cadence.
-func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, resolvedVersion string, requeue, oidcRequeue bool, mgd managedDependencyState) (ctrl.Result, error) {
+// requeues quietly. requeue/oidcRequeue, the managed-dependency flags carried in mgd, and the
+// migration gate's own cadence carried in mig feed the final requeue cadence.
+func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, mig migrationRender, requeue, oidcRequeue bool, mgd managedDependencyState) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Prune de-rendered children: after a SUCCESSFUL apply of the full desired set,
@@ -413,9 +429,11 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	r.setReadinessStatus(platform, ready)
 	platform.Status.ObservedGeneration = platform.Generation
 	// Report the version the operator actually reconciled against (spec.version, or the
-	// operator's newest when unset). It is set only on this success path; an unknown
-	// version returned early (steadyState) and left the prior ObservedVersion untouched.
-	platform.Status.ObservedVersion = resolvedVersion
+	// operator's newest when unset — and, while a messaging migration holds the platform
+	// back, the version it is still RUNNING rather than the one it is moving to). It is set
+	// only on this success path; an unknown version returned early (steadyState) and left the
+	// prior ObservedVersion untouched.
+	platform.Status.ObservedVersion = mig.version
 	if err := r.Status().Update(ctx, platform); err != nil {
 		// A competing write updated the Platform between our cached read and this status write
 		// (common during bring-up: watched child Secrets/Deployments from the upstream operators
@@ -434,6 +452,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	// their own timescale; while Progressing we also lay down a backstop requeue (the
 	// Deployment watch is the primary trigger).
 	return nextRequeueResult(requeueSignals{
+		migration: mig.requeue,
 		adminUser: adminUserRequeue,
 		oidc:      oidcRequeue,
 		database:  mgd.dbRequeue,
@@ -447,6 +466,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 // requeueSignals carries the per-adjunct requeue flags Reconcile collects across a pass, so
 // nextRequeueResult can pick the soonest applicable requeue in one place.
 type requeueSignals struct {
+	migration bool
 	adminUser bool
 	oidc      bool
 	database  bool
@@ -457,11 +477,20 @@ type requeueSignals struct {
 }
 
 // nextRequeueResult picks the soonest applicable requeue for a successfully reconciled
-// Platform, preserving the original priority order: admin-user, OIDC, managed database,
-// managed messaging, managed Keycloak, still-progressing required Deployments, then an edge /
+// Platform: an in-flight messaging migration first, then admin-user, OIDC, managed database,
+// managed messaging, managed Keycloak, still-progressing required Deployments, and an edge /
 // admin-cert dependency. No applicable signal means a steady state (no requeue).
+//
+// The migration comes FIRST because it is the only signal whose cadence drives a sequence
+// forward rather than re-checking a dependency: its phases advance on nothing but the next
+// reconcile, and it is decided ahead of every other gate, so deferring to one of theirs would
+// let an unrelated dependency set the pace of an upgrade.
 func nextRequeueResult(s requeueSignals) ctrl.Result {
 	switch {
+	case s.migration:
+		// A migration phase is waiting on something it must re-check itself (the producers
+		// winding down, the source virtual host emptying): look again shortly.
+		return ctrl.Result{RequeueAfter: migrationRequeueAfter}
 	case s.adminUser:
 		// Keycloak-not-ready / password-Secret-missing / transient realm-user failure: retry
 		// soon (same adjunct timescale as admin registration / OIDC wiring).
