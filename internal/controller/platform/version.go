@@ -92,14 +92,18 @@ func teardownPlatformVersion(p *otilmv1alpha1.Platform) string {
 // between can leave a platform whose managed objects belong to a DIFFERENT bundle than either
 // spec.version or status.observedVersion names; sweeping every known bundle reclaims that
 // topology regardless of which version the failure happened at, without having to track which
-// bundle was actually applied.
+// bundle was actually applied. Each of these copies keeps the platform's OWN
+// spec.messaging.virtualHost (pinned or not), so a user-pinned vhost — unscoped on every
+// bundle, unconditionally (see topologyScope in the builder package) — is already reclaimed
+// here without any extra help.
 //
 // A further LEGACY-SCOPE copy pins the RUNNING version (teardownPlatformVersion) but forces
 // spec.messaging.virtualHost to bom.LegacyUnscopedVirtualHost, reproducing the UNSCOPED
-// managed-messaging object names an operator predating vhost-scoped topology naming rendered.
-// A platform with a CUSTOM virtualHost had those unscoped names before vhost scoping shipped;
-// the same platform now renders vhost-scoped ones, so without this copy its original CRs would
-// be orphaned — rabbitmq.com kinds are prune-excluded, so nothing else ever reclaims them.
+// managed-messaging object names an operator predating vhost-scoped topology naming rendered
+// for an UNPINNED platform whose bundle default vhost was never the legacy one (so far, only
+// 2.19.0's "/"). It is added ONLY when spec.messaging.virtualHost is unset: a user-pinned
+// vhost already renders unscoped names via the per-version copies above, so forcing the
+// legacy vhost onto it too would only repeat a set mergeManagedObjects already dedupes away.
 //
 // Rendering this whole set is safe: deleting an object that was never created is a no-op
 // (handleManagedInfraDeletion tolerates NotFound), and mergeManagedObjects dedupes the objects
@@ -111,6 +115,10 @@ func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platfor
 		render := p.DeepCopy()
 		render.Spec.Version = v
 		out = append(out, render)
+	}
+
+	if p.Spec.Messaging.VirtualHost != "" {
+		return out
 	}
 
 	legacy := p.DeepCopy()

@@ -31,11 +31,20 @@ import (
 )
 
 // TestTopologyScopeLegacyIsEmpty proves the legacy vhost keeps today's unscoped names
-// while any other vhost gets a deterministic, DNS-safe scope.
+// while any other, non-user-pinned vhost gets a deterministic, DNS-safe scope.
 func TestTopologyScopeLegacyIsEmpty(t *testing.T) {
-	assert.Equal(t, "", topologyScope(bom.LegacyUnscopedVirtualHost))
-	assert.Equal(t, "-default", topologyScope("/"))
-	assert.Equal(t, "-myvhost", topologyScope("myvhost"))
+	assert.Equal(t, "", topologyScope(bom.LegacyUnscopedVirtualHost, false))
+	assert.Equal(t, "-default", topologyScope("/", false))
+	assert.Equal(t, "-myvhost", topologyScope("myvhost", false))
+}
+
+// TestTopologyScopeUserPinnedIsEmpty proves a user-pinned vhost keeps unscoped names
+// regardless of its value — including "/", the one value a bundle default (2.19.0) also
+// resolves to — because a pinned vhost never migrates (see topology_naming.go).
+func TestTopologyScopeUserPinnedIsEmpty(t *testing.T) {
+	assert.Equal(t, "", topologyScope("myvhost", true))
+	assert.Equal(t, "", topologyScope("/", true), `a vhost pinned to "/" is also unscoped`)
+	assert.Equal(t, "", topologyScope(bom.LegacyUnscopedVirtualHost, true))
 }
 
 // TestVhostSlugIsTotal proves the slug is defined, DNS-safe and bounded for every input,

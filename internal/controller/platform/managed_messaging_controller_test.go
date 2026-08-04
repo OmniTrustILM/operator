@@ -313,32 +313,34 @@ func TestHandleDeletionRetainIgnoresTheUnionRender(t *testing.T) {
 		"Retain must leave the partially applied version's topology intact")
 }
 
-// TestHandleDeletionReclaimsLegacyScopedCustomVhostTopology closes Task 1's residual hazard: a
-// platform with a CUSTOM spec.messaging.virtualHost had UNSCOPED object names under an
-// operator predating vhost-scoped naming (topologyScope only leaves the legacy vhost
-// unscoped). The SAME platform, on this operator, now renders vhost-scoped names for that
-// custom vhost — so unless teardown ALSO reclaims the legacy-scoped names, the objects it
-// actually created (still legacy-named) are orphaned: rabbitmq.com kinds are prune-excluded,
-// so nothing else would ever reclaim them.
-func TestHandleDeletionReclaimsLegacyScopedCustomVhostTopology(t *testing.T) {
+// TestHandleDeletionReclaimsLegacyScopedTopologyFor2190 closes the residual teardown hazard
+// left once a user-pinned vhost is unscoped unconditionally (topologyScope): an UNPINNED
+// platform still has one, on the 2.19.0 bundle, whose OWN default vhost ("/") diverges from
+// the legacy one. An operator predating vhost-scoped naming rendered UNSCOPED object names
+// regardless of vhost, but THIS operator renders SCOPED names for an unpinned 2.19.0 platform
+// — so unless teardown ALSO reclaims the legacy-scoped names, the objects it actually created
+// (while still running that older operator) are orphaned: rabbitmq.com kinds are
+// prune-excluded, so nothing else would ever reclaim them.
+func TestHandleDeletionReclaimsLegacyScopedTopologyFor2190(t *testing.T) {
 	s := managedMQScheme(t)
-
-	const customVhost = "custom-vhost"
 
 	// What actually EXISTS in the cluster: this platform's topology, rendered before vhost
 	// scoping shipped (i.e. unscoped, as if it had the legacy vhost's empty scope).
 	legacy := managedMQPlatformCR()
+	legacy.Spec.Version = platformVersion219
 	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
 	legacyObjs := platformbuilder.ResolveManagedMessaging(legacy)
 	require.NotEmpty(t, legacyObjs)
 
-	// Precondition that gives this test teeth: the platform's REAL configured (custom) vhost
-	// renders a DIFFERENT (scoped) Vhost CR name than the legacy-scoped one actually seeded.
+	// Precondition that gives this test teeth: the platform's own (unpinned) 2.19.0 default
+	// vhost renders a DIFFERENT (scoped) Vhost CR name than the legacy-scoped one actually
+	// seeded.
 	p := managedMQPlatformCR()
-	p.Spec.Messaging.VirtualHost = customVhost
+	p.Spec.Version = platformVersion219
+	p.Status.ObservedVersion = platformVersion219
 	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyDelete
 	require.NotEqual(t, platformbuilder.ManagedMessagingVhostName(legacy), platformbuilder.ManagedMessagingVhostName(p),
-		"precondition: a custom vhost scopes the object names differently from the legacy vhost")
+		"precondition: the 2.19.0 default vhost scopes the object names differently from the legacy vhost")
 	require.Contains(t, topologyObjectNames(legacyObjs), platformbuilder.ManagedMessagingVhostName(legacy),
 		"precondition: the seeded legacy render actually carries the unscoped Vhost CR name")
 
@@ -353,7 +355,7 @@ func TestHandleDeletionReclaimsLegacyScopedCustomVhostTopology(t *testing.T) {
 	require.NoError(t, r.handleDeletion(context.Background(), p))
 
 	assert.Equal(t, 0, countTopologyObjects(t, r, legacy),
-		"teardown must reclaim the legacy-scoped topology a custom-vhost platform actually created")
+		"teardown must reclaim the legacy-scoped topology an unpinned 2.19.0 platform actually created")
 
 	e := drainEvent(rec)
 	assert.Contains(t, e, "DeletedMessaging")

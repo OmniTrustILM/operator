@@ -38,6 +38,20 @@ package platform
 // scope is what makes an upgraded operator re-render those platforms byte-identically
 // (TestLegacyTopologyNamesAreFrozen is the safety net).
 //
+// THE USER-PINNED VHOST PIN: a vhost the platform pinned itself, via
+// spec.messaging.virtualHost, ALSO maps to an EMPTY scope — for exactly the same reason as
+// the legacy pin, one vhost over. Scoping exists solely so a migration's source and target
+// topology can be disjoint and coexist while the cutover is in flight; a user override always
+// wins over the bundle default (see managedVirtualHost in managed_messaging.go), so a pinned
+// vhost resolves to the SAME value under every bundle. That platform therefore never
+// experiences the vhost RENAME a version upgrade causes — it never migrates, and so it never
+// needs a disjoint name. Without this pin, a live 2.17.0/2.18.0 platform with a custom
+// virtualHost (a supported, documented field, unscoped today for the same reason the legacy
+// vhost is) would re-render SCOPED names the moment the operator picked up vhost-scoped
+// naming, orphaning its own already-applied CRs exactly like an unpinned legacy-vhost platform
+// would without its pin (TestUserPinnedVhostTopologyNamesAreFrozen is the safety net for this
+// one).
+//
 // The broker Users and the credentials Secrets the Topology Operator generates from them
 // are NOT scoped: users are broker-global, their specs are identical across the bundles,
 // and their "<user>-user-credentials" Secret names are wired into every component's
@@ -74,9 +88,11 @@ const (
 
 // topologyScope returns the name infix that scopes a managed topology's Kubernetes object
 // names to one vhost: the empty string for the legacy vhost (pinning the names live
-// platforms already carry), and "-<vhostSlug>" for every other vhost.
-func topologyScope(vhost string) string {
-	if vhost == bom.LegacyUnscopedVirtualHost {
+// platforms already carry) or when userPinned is true (pinning the names a user-pinned
+// vhost already carries, for the same reason — see the USER-PINNED VHOST PIN note above),
+// and "-<vhostSlug>" for every other vhost.
+func topologyScope(vhost string, userPinned bool) string {
+	if vhost == bom.LegacyUnscopedVirtualHost || userPinned {
 		return ""
 	}
 	return "-" + vhostSlug(vhost)

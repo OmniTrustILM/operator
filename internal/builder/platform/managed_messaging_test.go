@@ -160,6 +160,61 @@ func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
 	})
 }
 
+// TestUserPinnedVhostTopologyNamesAreFrozen proves a user-pinned spec.messaging.virtualHost
+// renders the SAME unscoped topology CR names as an operator predating vhost-scoped naming
+// (commit 7ef6d9e) — exactly the legacy-vhost freeze above, one vhost over. A pinned vhost
+// resolves to the same value under every bundle (a user override always wins over the bundle
+// default), so that platform never experiences the vhost RENAME a version migration causes:
+// it never migrates, and so it never needs a disjoint name. Never relax this test: a
+// user-pinned vhost must map to an EMPTY scope, unconditionally.
+func TestUserPinnedVhostTopologyNamesAreFrozen(t *testing.T) {
+	want := []string{
+		"ilm-messaging",
+		"ilm-messaging-administrator",
+		"ilm-messaging-administrator-permission",
+		"ilm-messaging-binding-czertainly-core-actions",
+		"ilm-messaging-binding-czertainly-core-audit-logs",
+		"ilm-messaging-binding-czertainly-core-events",
+		"ilm-messaging-binding-czertainly-core-notifications",
+		"ilm-messaging-binding-czertainly-core-scheduler",
+		"ilm-messaging-binding-czertainly-core-validation",
+		"ilm-messaging-binding-czertainly-time-quality-config",
+		"ilm-messaging-binding-czertainly-time-quality-config-request",
+		"ilm-messaging-binding-czertainly-time-quality-results",
+		"ilm-messaging-core",
+		"ilm-messaging-core-permission",
+		"ilm-messaging-exchange-czertainly",
+		"ilm-messaging-exchange-czertainly-proxy",
+		"ilm-messaging-monitor",
+		"ilm-messaging-monitor-permission",
+		"ilm-messaging-provisioner",
+		"ilm-messaging-provisioner-permission",
+		"ilm-messaging-proxy",
+		"ilm-messaging-proxy-permission",
+		"ilm-messaging-queue-core",
+		"ilm-messaging-queue-core-actions",
+		"ilm-messaging-queue-core-audit-logs",
+		"ilm-messaging-queue-core-events",
+		"ilm-messaging-queue-core-notifications",
+		"ilm-messaging-queue-core-scheduler",
+		"ilm-messaging-queue-core-validation",
+		"ilm-messaging-queue-time-quality-config",
+		"ilm-messaging-queue-time-quality-config-request",
+		"ilm-messaging-queue-time-quality-results",
+		"ilm-messaging-vhost",
+	}
+
+	t.Run("custom vhost on the 2.18.0 bundle", func(t *testing.T) {
+		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = "myvhost" })
+		assert.Equal(t, want, renderedNames(t, ResolveManagedMessaging(p)))
+	})
+
+	t.Run(`vhost pinned to "/" on the 2.18.0 bundle`, func(t *testing.T) {
+		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = "/" })
+		assert.Equal(t, want, renderedNames(t, ResolveManagedMessaging(p)))
+	})
+}
+
 // namesOfKinds returns the sorted metadata.names of the rendered objects whose Kind is one
 // of kinds.
 func namesOfKinds(objs []client.Object, kinds ...string) []string {
@@ -371,10 +426,12 @@ func TestResolveManagedMessagingVhost(t *testing.T) {
 	ref, _, _ := unstructured.NestedString(vhost.Object, "spec", "rabbitmqClusterReference", "name")
 	assert.Equal(t, testMessagingName, ref, "every topology CR references the managed cluster")
 
-	// A non-legacy vhost scopes every vhost-bound object name (the users stay unscoped).
-	assert.Equal(t, "ilm-messaging-myvhost-vhost", vhost.GetName())
-	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindPermission), "ilm-messaging-myvhost-core-permission")
-	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindQueue), "ilm-messaging-myvhost-queue-core-audit-logs")
+	// A user-pinned vhost keeps every vhost-bound object name UNSCOPED: it resolves to the
+	// same value on every bundle, so this platform never migrates and never needs a
+	// disjoint name (see TestUserPinnedVhostTopologyNamesAreFrozen and topologyScope).
+	assert.Equal(t, "ilm-messaging-vhost", vhost.GetName())
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindPermission), "ilm-messaging-core-permission")
+	assert.Contains(t, namesOfKinds(ResolveManagedMessaging(p), rmqKindQueue), "ilm-messaging-queue-core-audit-logs")
 }
 
 func TestResolveManagedMessagingVhostDefault(t *testing.T) {

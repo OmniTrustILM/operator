@@ -160,8 +160,8 @@ func ManagedMessagingVhostGVK() schema.GroupVersionKind {
 // ManagedMessagingVhostName returns the stable k8s object name of the Vhost CR the operator
 // renders: "<platform>-messaging<scope>-vhost" (NOT the vhost's spec.name, which is the
 // broker vhost the components connect to). It is a fixed function of the operator-owned
-// cluster name and the vhost scope, so a legacy-vhost platform keeps the exact name it
-// already carries while another vhost gets its own Vhost CR.
+// cluster name and the vhost scope, so a legacy-vhost or user-pinned-vhost platform keeps the
+// exact name it already carries while another vhost gets its own Vhost CR.
 func ManagedMessagingVhostName(p *otilmv1alpha1.Platform) string {
 	return scopedTopologyName(p, managedVirtualHost(p), "vhost")
 }
@@ -187,6 +187,16 @@ func managedVirtualHost(p *otilmv1alpha1.Platform) string {
 		return v
 	}
 	return resolveBundle(p).Messaging.DefaultVirtualHost
+}
+
+// vhostIsUserPinned reports whether managedVirtualHost's result came from the platform's own
+// spec.messaging.virtualHost rather than the bundle default. scopedTopologyName feeds this
+// into topologyScope: a user-pinned vhost resolves to the SAME value under every bundle (the
+// override always wins over the default), so that platform never experiences the vhost RENAME
+// a version upgrade causes and its topology names must stay unscoped forever — see
+// topology_naming.go.
+func vhostIsUserPinned(p *otilmv1alpha1.Platform) bool {
+	return p.Spec.Messaging.VirtualHost != ""
 }
 
 // ResolveManagedMessaging returns the RabbitMQ objects the operator provisions for a
@@ -415,10 +425,13 @@ func buildBinding(p *otilmv1alpha1.Platform, vhost string, b bom.MessagingBindin
 // scopedTopologyName composes the object name of a vhost-bound topology CR from the
 // operator-owned cluster name, the vhost scope, and a suffix. The scope is EMPTY for the
 // legacy vhost, so a live 2.17.0/2.18.0 platform re-renders the exact names it already
-// carries; any other vhost gets its own name space, which is what lets a source and a
-// target topology coexist during a migration (see topology_naming.go).
+// carries; it is ALSO empty whenever the platform pinned its own spec.messaging.virtualHost,
+// since a pinned vhost resolves to the same value on every bundle and so never migrates (see
+// topologyScope in topology_naming.go). Any OTHER vhost — one only a bundle default
+// introduced — gets its own name space, which is what lets a source and a target topology
+// coexist during a migration.
 func scopedTopologyName(p *otilmv1alpha1.Platform, vhost, suffix string) string {
-	return ManagedMessagingName(p) + topologyScope(vhost) + "-" + suffix
+	return ManagedMessagingName(p) + topologyScope(vhost, vhostIsUserPinned(p)) + "-" + suffix
 }
 
 // topologyObjectName composes a stable, DNS-safe object name for a topology CR from the
