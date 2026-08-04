@@ -182,6 +182,12 @@ type Reconciler struct {
 	// waiting, missing Secret, singleton loser, prune). It is wired in cmd/main.go;
 	// the event helpers are nil-safe so unit tests that omit it do not panic.
 	Recorder record.EventRecorder
+	// BrokerAdmins builds the RabbitMQ management-API client a messaging migration polls the
+	// source virtual host's queue depths with, from the managed broker's management endpoint
+	// and the administrator credentials the reconciler reads by reference. When nil it
+	// defaults to the real HTTP client; tests inject a factory returning a scripted broker so
+	// the drain is exercised without one.
+	BrokerAdmins brokerAdminFactory
 }
 
 // eventf records a namespaced Event on the Platform, formatting the message from args.

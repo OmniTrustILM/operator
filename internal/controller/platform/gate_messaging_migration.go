@@ -203,6 +203,7 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 		return r.migrationFencingPhase(ctx, p, render)
 
 	case otilmv1alpha1.MigrationPhaseDraining:
+		// messaging_migration_drain.go: poll the source virtual host until it is empty.
 		return r.migrationDrainingPhase(ctx, p, render)
 
 	default:
@@ -243,19 +244,6 @@ func (r *Reconciler) migrationFencingPhase(ctx context.Context, p *otilmv1alpha1
 		}
 	}
 
-	return r.holdOnSourceVersion(ctx, p, render)
-}
-
-// migrationDrainingPhase waits for the source virtual host to empty.
-//
-// The poll itself — asking the broker's management API whether every drainable queue has
-// gone quiet — is the broker-side step that lands with the rest of the engine. Until then the
-// phase only HOLDS: the producers stay fenced, the platform keeps rendering and serving its
-// source version, and the deadline below is what ends the wait.
-func (r *Reconciler) migrationDrainingPhase(ctx context.Context, p *otilmv1alpha1.Platform, render migrationRender) (migrationRender, bool, ctrl.Result, error) {
-	if migrationPhaseDeadlineExceeded(p, time.Now()) {
-		return r.blockMigration(ctx, p, render)
-	}
 	return r.holdOnSourceVersion(ctx, p, render)
 }
 

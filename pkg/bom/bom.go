@@ -766,11 +766,21 @@ type MessagingUser struct {
 	Read      string
 }
 
+// Exchange types the topologies declare. The platform's direct exchange carries the
+// components' own traffic (one routing key per static queue); the TOPIC exchange is the
+// proxy exchange, the one whose bindings are created at runtime as remote proxies enrol —
+// which is why a consumer of this data identifies the proxy exchange by TYPE rather than by
+// a version-specific name (2.19.0 renamed both).
+const (
+	ExchangeTypeDirect = "direct"
+	ExchangeTypeTopic  = "topic"
+)
+
 // MessagingExchange is one exchange in the topology.
 type MessagingExchange struct {
 	// Name is the exchange name (an app-level name, e.g. "czertainly").
 	Name string
-	// Type is the exchange type ("direct" / "topic").
+	// Type is the exchange type (ExchangeTypeDirect / ExchangeTypeTopic).
 	Type string
 	// Durable marks the exchange durable.
 	Durable bool
@@ -787,6 +797,27 @@ type MessagingQueue struct {
 	// into the Queue CR's spec.arguments only when non-empty. Integer values MUST be int64 (the
 	// unstructured render rejects a plain int).
 	Arguments map[string]interface{}
+}
+
+// Queue x-argument names the topologies declare.
+const (
+	// queueArgMaxLength bounds how many messages the queue retains.
+	queueArgMaxLength = "x-max-length"
+	// queueArgOverflow selects what the broker does once that bound is reached.
+	queueArgOverflow = "x-overflow"
+)
+
+// IsLatestOnlyRetention reports whether the queue is declared as a LATEST-ONLY RETENTION
+// queue: one bounded to a single message, whose publisher keeps refreshing it so consumers
+// can read the current value at any time.
+//
+// Such a queue is DESIGNED to be non-empty in steady state, which makes it the one class a
+// drain must not wait on — a migration that required it to empty would never finish. The
+// answer is derived from the declared arguments rather than from a list of names, so a queue
+// added to a future bundle with the same retention shape inherits the rule automatically.
+func (q MessagingQueue) IsLatestOnlyRetention() bool {
+	limit, declared := q.Arguments[queueArgMaxLength].(int64)
+	return declared && limit == 1
 }
 
 // MessagingBinding is one exchange→queue binding in the topology.
@@ -898,7 +929,7 @@ const (
 // It returns a FRESH map on every call: MessagingQueue.Arguments is a reference type,
 // and map literals must never be shared between MessagingTopology values.
 func latestOnlyQueueArguments() map[string]interface{} {
-	return map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}
+	return map[string]interface{}{queueArgMaxLength: int64(1), queueArgOverflow: "drop-head"}
 }
 
 // messagingTopology2180 is the platform's RabbitMQ topology for platform version 2.18.0:
@@ -922,8 +953,8 @@ var messagingTopology2180 = MessagingTopology{
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^czertainly$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeCzertainly, Type: "direct", Durable: true},
-		{Name: exchangeCzertainlyProxy, Type: "topic", Durable: true},
+		{Name: exchangeCzertainly, Type: ExchangeTypeDirect, Durable: true},
+		{Name: exchangeCzertainlyProxy, Type: ExchangeTypeTopic, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},
@@ -976,8 +1007,8 @@ var messagingTopology2190 = MessagingTopology{
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeIlm, Type: "direct", Durable: true},
-		{Name: exchangeIlmProxy, Type: "topic", Durable: true},
+		{Name: exchangeIlm, Type: ExchangeTypeDirect, Durable: true},
+		{Name: exchangeIlmProxy, Type: ExchangeTypeTopic, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},
@@ -1026,7 +1057,7 @@ var messagingTopology2170 = MessagingTopology{
 		{Role: MessagingUserCore, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeCzertainly, Type: "direct", Durable: true},
+		{Name: exchangeCzertainly, Type: ExchangeTypeDirect, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},

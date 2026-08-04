@@ -361,6 +361,38 @@ func TestTopologyHasUserRole(t *testing.T) {
 	}
 }
 
+// TestLatestOnlyRetentionQueues pins which queues a consumer of this data may treat as DESIGNED
+// to sit non-empty — the exemption a messaging migration's drain must not wait on, derived from
+// the declared arguments so a future bundle's retention queue inherits it. Getting this wrong in
+// either direction is serious: a missed exemption hangs every migration, a spurious one lets a
+// queue holding real messages be reclaimed.
+func TestLatestOnlyRetentionQueues(t *testing.T) {
+	retention := func(version string) []string {
+		b, ok := BundleFor(version)
+		assert.True(t, ok, "bundle %s", version)
+		var names []string
+		for _, q := range b.Messaging.Queues {
+			if q.IsLatestOnlyRetention() {
+				names = append(names, q.Name)
+			}
+		}
+		return names
+	}
+
+	want := []string{testQueueTimeQualityConfig, "time-quality.config-request"}
+	assert.ElementsMatch(t, want, retention(testVersion2180))
+	assert.ElementsMatch(t, want, retention(testVersion2190))
+	assert.Empty(t, retention(testVersion2170), "2.17.0 declares no time-quality queues at all")
+
+	assert.False(t, MessagingQueue{Name: "plain"}.IsLatestOnlyRetention(), "a queue with no arguments retains nothing")
+	assert.False(t, MessagingQueue{
+		Name: "bounded", Arguments: map[string]interface{}{queueArgMaxLength: int64(5000)},
+	}.IsLatestOnlyRetention(), "a merely bounded queue is still expected to empty")
+	assert.False(t, MessagingQueue{
+		Name: "mistyped", Arguments: map[string]interface{}{queueArgMaxLength: 1},
+	}.IsLatestOnlyRetention(), "arguments are int64 by contract; anything else is not a retention queue")
+}
+
 // TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
 // helm-charts 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a
 // provisioning-exchange bug through review once already.

@@ -214,6 +214,7 @@ var _ = BeforeSuite(func() {
 		Scheme:        mgr.GetScheme(),
 		Capabilities:  fakeCaps,                                // injected so SetupWithManager won't overwrite it with the real mapper
 		OIDCRegistrar: fakeOIDC,                                // injected so OIDC-wiring specs drive the outcome
+		BrokerAdmins:  fakeBrokerAdmins.factory,                // injected so no drain ever opens a socket from a test
 		Recorder:      mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())

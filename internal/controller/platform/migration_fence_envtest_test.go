@@ -60,6 +60,7 @@ func fenceReconciler() *Reconciler {
 		Scheme:        mgr.GetScheme(),
 		Capabilities:  fakeCaps,
 		OIDCRegistrar: fakeOIDC,
+		BrokerAdmins:  fakeBrokerAdmins.factory,
 		Recorder:      mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained
 	}
 }
