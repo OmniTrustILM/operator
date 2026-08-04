@@ -29,6 +29,7 @@ import (
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -310,6 +311,52 @@ func TestHandleDeletionRetainIgnoresTheUnionRender(t *testing.T) {
 		"Retain must leave the observed version's topology intact")
 	assert.Equal(t, len(requestedObjs), countTopologyObjects(t, r, requested),
 		"Retain must leave the partially applied version's topology intact")
+}
+
+// TestHandleDeletionReclaimsLegacyScopedCustomVhostTopology closes Task 1's residual hazard: a
+// platform with a CUSTOM spec.messaging.virtualHost had UNSCOPED object names under an
+// operator predating vhost-scoped naming (topologyScope only leaves the legacy vhost
+// unscoped). The SAME platform, on this operator, now renders vhost-scoped names for that
+// custom vhost — so unless teardown ALSO reclaims the legacy-scoped names, the objects it
+// actually created (still legacy-named) are orphaned: rabbitmq.com kinds are prune-excluded,
+// so nothing else would ever reclaim them.
+func TestHandleDeletionReclaimsLegacyScopedCustomVhostTopology(t *testing.T) {
+	s := managedMQScheme(t)
+
+	const customVhost = "custom-vhost"
+
+	// What actually EXISTS in the cluster: this platform's topology, rendered before vhost
+	// scoping shipped (i.e. unscoped, as if it had the legacy vhost's empty scope).
+	legacy := managedMQPlatformCR()
+	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
+	legacyObjs := platformbuilder.ResolveManagedMessaging(legacy)
+	require.NotEmpty(t, legacyObjs)
+
+	// Precondition that gives this test teeth: the platform's REAL configured (custom) vhost
+	// renders a DIFFERENT (scoped) Vhost CR name than the legacy-scoped one actually seeded.
+	p := managedMQPlatformCR()
+	p.Spec.Messaging.VirtualHost = customVhost
+	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyDelete
+	require.NotEqual(t, platformbuilder.ManagedMessagingVhostName(legacy), platformbuilder.ManagedMessagingVhostName(p),
+		"precondition: a custom vhost scopes the object names differently from the legacy vhost")
+	require.Contains(t, topologyObjectNames(legacyObjs), platformbuilder.ManagedMessagingVhostName(legacy),
+		"precondition: the seeded legacy render actually carries the unscoped Vhost CR name")
+
+	seed := []client.Object{p}
+	for _, obj := range legacyObjs {
+		seed = append(seed, obj.(*unstructured.Unstructured).DeepCopy())
+	}
+	rec := record.NewFakeRecorder(32)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(seed...).Build()
+	r := &Reconciler{Client: c, Scheme: s, Recorder: rec}
+
+	require.NoError(t, r.handleDeletion(context.Background(), p))
+
+	assert.Equal(t, 0, countTopologyObjects(t, r, legacy),
+		"teardown must reclaim the legacy-scoped topology a custom-vhost platform actually created")
+
+	e := drainEvent(rec)
+	assert.Contains(t, e, "DeletedMessaging")
 }
 
 func TestHandleDeletionExternalMessagingNoManagedTeardown(t *testing.T) {

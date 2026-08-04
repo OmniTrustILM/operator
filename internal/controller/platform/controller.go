@@ -871,12 +871,14 @@ func (r *Reconciler) handleFinalizer(ctx context.Context, p *otilmv1alpha1.Platf
 //     their data intact; Delete reclaims them. These CRs carry no controller owner ref and
 //     are prune-excluded, so this handler is the only thing that deletes them.
 //
-// VERSION: teardown renders against the version the platform is ACTUALLY RUNNING
-// (teardownPlatformVersion — status.observedVersion, else spec.version) and, when an upgrade is
-// in flight, the requested version too — the deduplicated UNION of both renders, so neither a
-// blocked upgrade's live topology nor a partially applied one's new objects is orphaned. Each
-// render is pinned onto a DEEP COPY so the finalizer-removal Update that follows never persists
-// a spec change. See teardownRenderPlatforms and teardownGate.
+// VERSION: teardown renders against every bundle version this operator ships
+// (bom.AllVersions()) PLUS a legacy-scope variant of the version the platform is ACTUALLY
+// RUNNING (teardownPlatformVersion — status.observedVersion, else spec.version) — the
+// deduplicated UNION of all of them, so a partially applied upgrade's new objects, a blocked
+// upgrade's live topology, and a custom-vhost platform's pre-vhost-scoping (legacy-named)
+// topology are never orphaned. Each render is pinned onto a DEEP COPY so the finalizer-removal
+// Update that follows never persists a spec change. See teardownRenderPlatforms and
+// teardownGate.
 //
 // On a teardown failure the handler returns the non-nil error so handleFinalizer keeps the
 // finalizer (requeues) and the teardown is retried, rather than removing the finalizer and

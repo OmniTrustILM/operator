@@ -23,14 +23,20 @@ SOFTWARE.
 package platform
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 // TestEffectivePlatformVersion locks the pin-on-create precedence: explicit spec.version wins;
@@ -79,63 +85,84 @@ func TestTeardownPlatformVersion(t *testing.T) {
 	}
 }
 
-// TestTeardownRenderPlatforms locks the version SET teardown renders against. The running
-// version is always first; the requested version is added ONLY when an upgrade is genuinely in
-// flight (set, resolvable, and different), because a released upgrade applies the new version's
-// managed objects before status.observedVersion is persisted — a crash in between would
-// otherwise orphan them (see handleDeletion).
+// TestTeardownRenderPlatforms locks the version SET teardown renders against: one copy per
+// bom.AllVersions() (every bundle this operator ships, released and preview — reclaiming
+// whichever bundle's managed objects were actually applied, however a partially applied
+// upgrade or downgrade left them), PLUS one legacy-scope copy that pins the RUNNING version
+// (teardownPlatformVersion) but forces spec.messaging.virtualHost to
+// bom.LegacyUnscopedVirtualHost — reproducing the UNSCOPED object names a platform with a
+// CUSTOM virtualHost carried before vhost-scoped naming shipped, so those are reclaimed too
+// (see handleDeletion).
 func TestTeardownRenderPlatforms(t *testing.T) {
-	cases := []struct {
-		name, spec, observed string
-		want                 []string
-	}{
-		{
-			name: "upgrade in flight: both the running and the requested version render",
-			spec: platformVersion218, observed: platformVersion217,
-			want: []string{platformVersion217, platformVersion218},
-		},
-		{
-			name: "agreeing spec and pin: one render",
-			spec: platformVersion218, observed: platformVersion218,
-			want: []string{platformVersion218},
-		},
-		{
-			name: "empty spec.version: the pin alone (nothing else was ever applied)",
-			spec: "", observed: platformVersion218,
-			want: []string{platformVersion218},
-		},
-		{
-			name: "unresolvable requested version rendered nothing, so it is skipped",
-			spec: "9.9.9", observed: platformVersion218,
-			want: []string{platformVersion218},
-		},
-		{
-			name: "no pin yet: the requested version alone",
-			spec: platformVersion218, observed: "",
-			want: []string{platformVersion218},
-		},
-		{
-			name: "nothing set: a single empty render (the bundle layer defaults it)",
-			spec: "", observed: "",
-			want: []string{""},
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			p := &otilmv1alpha1.Platform{}
-			p.Spec.Version = c.spec
-			p.Status.ObservedVersion = c.observed
+	const customVhost = "custom-vhost"
 
-			got := teardownRenderPlatforms(p)
-			versions := make([]string, 0, len(got))
-			for _, rp := range got {
-				versions = append(versions, rp.Spec.Version)
-			}
-			assert.Equal(t, c.want, versions)
-			assert.Equal(t, c.spec, p.Spec.Version,
-				"the render pin must live on deep copies only — never on the stored spec")
-		})
+	p := &otilmv1alpha1.Platform{}
+	p.Spec.Version = platformVersion219
+	p.Status.ObservedVersion = platformVersion218
+	p.Spec.Messaging.VirtualHost = customVhost
+
+	got := teardownRenderPlatforms(p)
+
+	allVersions := bom.AllVersions()
+	require.Len(t, got, len(allVersions)+1,
+		"one render per bom.AllVersions() bundle, plus the legacy-scope variant")
+
+	for i, v := range allVersions {
+		assert.Equal(t, v, got[i].Spec.Version, "render %d must pin bundle version %s", i, v)
+		assert.Equal(t, customVhost, got[i].Spec.Messaging.VirtualHost,
+			"a bundle-version render keeps the platform's own configured vhost")
 	}
+
+	legacy := got[len(got)-1]
+	assert.Equal(t, platformVersion218, legacy.Spec.Version,
+		"the legacy-scope variant pins the RUNNING version (status.observedVersion wins), not the requested one")
+	assert.Equal(t, bom.LegacyUnscopedVirtualHost, legacy.Spec.Messaging.VirtualHost,
+		"the legacy-scope variant forces the pre-scoping vhost so it renders unscoped names")
+
+	assert.Equal(t, platformVersion219, p.Spec.Version,
+		"the render pin must live on deep copies only — never on the stored spec")
+	assert.Equal(t, customVhost, p.Spec.Messaging.VirtualHost,
+		"the legacy-vhost pin must live on a deep copy only — never on the stored spec")
+}
+
+// TestTeardownRenderPlatformsRetainDeletesNothing pins the deletion-safety invariant across
+// the larger rendered set: however many platform copies teardownRenderPlatforms now renders,
+// deletionPolicy=Retain must still leave every managed object in the cluster untouched. It
+// exercises the same platform shape as TestTeardownRenderPlatforms (a version mismatch AND a
+// custom virtualHost, i.e. every render this function can produce) through the real deletion
+// path, not just the render count.
+func TestTeardownRenderPlatformsRetainDeletesNothing(t *testing.T) {
+	s := managedMQScheme(t)
+
+	p := managedMQPlatformCR()
+	p.Spec.Version = platformVersion219
+	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyRetain
+	p.Status.ObservedVersion = platformVersion218
+	p.Spec.Messaging.VirtualHost = "custom-vhost"
+
+	legacy := managedMQPlatformCR()
+	legacy.Spec.Version = platformVersion218
+	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
+
+	current := managedMQPlatformCR()
+	current.Spec.Version = platformVersion218
+	current.Spec.Messaging.VirtualHost = "custom-vhost"
+
+	legacyObjs := platformbuilder.ResolveManagedMessaging(legacy)
+	currentObjs := platformbuilder.ResolveManagedMessaging(current)
+	require.NotEmpty(t, legacyObjs)
+	require.NotEmpty(t, currentObjs)
+
+	seed := append([]client.Object{p}, seedTopologyUnion(legacyObjs, currentObjs)...)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(seed...).Build()
+	r := &Reconciler{Client: c, Scheme: s, Recorder: record.NewFakeRecorder(32)}
+
+	require.NoError(t, r.handleDeletion(context.Background(), p))
+
+	assert.Equal(t, len(legacyObjs), countTopologyObjects(t, r, legacy),
+		"Retain must leave the legacy-scoped (pre-Task-1) topology intact")
+	assert.Equal(t, len(currentObjs), countTopologyObjects(t, r, current),
+		"Retain must leave the current vhost-scoped topology intact")
 }
 
 // TestMergeManagedObjects locks the dedupe the teardown union relies on: objects the two version

@@ -83,37 +83,40 @@ func teardownPlatformVersion(p *otilmv1alpha1.Platform) string {
 }
 
 // teardownRenderPlatforms returns the platform copies the DELETION teardown renders against —
-// DEEP COPIES with spec.version pinned for rendering only, so the finalizer-removal Update that
-// follows never persists a spec change.
+// DEEP COPIES with spec.version (and, for one, spec.messaging.virtualHost) pinned for
+// rendering only, so the finalizer-removal Update that follows never persists a spec change.
 //
-// The RUNNING version (teardownPlatformVersion) always comes first: it names the objects that
-// certainly exist. A second copy pinned to the REQUESTED spec.version is appended when an
-// upgrade is in flight — spec.version is set, resolves to a known bundle, and differs from the
-// running version — because a released upgrade APPLIES the new version's managed objects BEFORE
-// status.observedVersion is persisted. If reconcile (or that status write) fails in between and
-// the Platform is then deleted with deletionPolicy=Delete, rendering only the running version
-// would ORPHAN the new-version-only upstream CRs, which are prune-excluded by design and so are
-// reclaimed by nothing else.
+// One copy is rendered per bom.AllVersions() — every bundle this operator ships, released and
+// preview. A released upgrade APPLIES the new version's managed objects BEFORE
+// status.observedVersion is persisted, so a reconcile (or that status write) failing in
+// between can leave a platform whose managed objects belong to a DIFFERENT bundle than either
+// spec.version or status.observedVersion names; sweeping every known bundle reclaims that
+// topology regardless of which version the failure happened at, without having to track which
+// bundle was actually applied.
 //
-// Rendering the UNION is safe in the other direction too: deleting an object that was never
-// created is a no-op (handleManagedInfraDeletion tolerates NotFound), and an unresolvable or
-// equal requested version falls back to the single effective render.
+// A further LEGACY-SCOPE copy pins the RUNNING version (teardownPlatformVersion) but forces
+// spec.messaging.virtualHost to bom.LegacyUnscopedVirtualHost, reproducing the UNSCOPED
+// managed-messaging object names an operator predating vhost-scoped topology naming rendered.
+// A platform with a CUSTOM virtualHost had those unscoped names before vhost scoping shipped;
+// the same platform now renders vhost-scoped ones, so without this copy its original CRs would
+// be orphaned — rabbitmq.com kinds are prune-excluded, so nothing else ever reclaims them.
+//
+// Rendering this whole set is safe: deleting an object that was never created is a no-op
+// (handleManagedInfraDeletion tolerates NotFound), and mergeManagedObjects dedupes the objects
+// the renders have in common.
 func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platform {
-	running := p.DeepCopy()
-	running.Spec.Version = teardownPlatformVersion(p)
-	out := []*otilmv1alpha1.Platform{running}
+	versions := bom.AllVersions()
+	out := make([]*otilmv1alpha1.Platform, 0, len(versions)+1)
+	for _, v := range versions {
+		render := p.DeepCopy()
+		render.Spec.Version = v
+		out = append(out, render)
+	}
 
-	requested := p.Spec.Version
-	if requested == "" || requested == running.Spec.Version {
-		return out
-	}
-	if _, ok := bom.BundleFor(requested); !ok {
-		// An unsupported version rendered nothing, so there is nothing extra to reclaim.
-		return out
-	}
-	inFlight := p.DeepCopy()
-	inFlight.Spec.Version = requested
-	return append(out, inFlight)
+	legacy := p.DeepCopy()
+	legacy.Spec.Version = teardownPlatformVersion(p)
+	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
+	return append(out, legacy)
 }
 
 // isPlatformDowngrade reports whether requested is strictly OLDER (by semver) than running.
