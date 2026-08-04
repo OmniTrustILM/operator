@@ -4314,6 +4314,39 @@ spec:
                       Operator + Messaging Topology Operator). Required when mode=managed; ignored
                       otherwise.
                     properties:
+                      drainTimeout:
+                        default: 15m
+                        description: |-
+                          DrainTimeout bounds how long a managed-messaging version migration waits for the
+                          source vhost to drain, and separately bounds the wait for cleanup to finish after
+                          cutover. The migration engine polls the source vhost across this window for every
+                          drainable queue to report empty; if the deadline passes with messages still
+                          outstanding the migration stops in the Draining (or CleaningUp) phase rather than
+                          proceeding — see ForceCutoverForVersion to override that stop.
+                          It is constrained to the Go duration charset (digits, an optional fraction, and one
+                          or more unit suffixes — ns, us, ms, s, m or h, e.g. "15m" or "1h30m") via a CEL rule
+                          rather than a Pattern marker: controller-gen cannot apply +kubebuilder:validation:
+                          Pattern directly to a metav1.Duration-typed field (it is a cross-package type
+                          reference, not a plain string, at schema-generation time).
+                        type: string
+                        x-kubernetes-validations:
+                        - message: drainTimeout must be a Go duration string, e.g.
+                            15m or 1h30m
+                          rule: self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$')
+                      forceCutoverForVersion:
+                        description: |-
+                          ForceCutoverForVersion authorizes the migration engine to cut traffic over to the
+                          target version's vhost EVEN THOUGH the source vhost has not drained cleanly within
+                          DrainTimeout, AND to run cleanup that DISCARDS whatever remains in the source vhost —
+                          including force-closing any connections still open on it. This is a deliberately
+                          destructive escape hatch for an operator who has confirmed the remaining messages
+                          are safe to lose.
+
+                          The value is TARGET-SCOPED: it must equal the version the migration is cutting over
+                          TO (status.upgrade.toVersion), so a value left over from a past migration can never
+                          silently authorize a future one — each migration requires its own explicit value.
+                        pattern: ^[0-9]+\.[0-9]+\.[0-9]+$
+                        type: string
                       overrides:
                         description: |-
                           Overrides is a JSON-merge patch (RFC 7396) applied onto the rendered RabbitmqCluster
@@ -4441,6 +4474,20 @@ spec:
                           no /mq route.
                         type: boolean
                     type: object
+                  migrationAcknowledgedForVersion:
+                    description: |-
+                      MigrationAcknowledgedForVersion is the external-broker escape hatch for a messaging
+                      version migration: when mode=external the operator does not own the broker and
+                      cannot migrate a foreign topology itself, so a platform upgrade whose target version
+                      changes the messaging topology (e.g. 2.18.0 -> 2.19.0) is REFUSED until this is set
+                      to the target version, attesting that the operator has migrated their own broker
+                      topology to match.
+
+                      The value is TARGET-SCOPED: it must equal the version being upgraded TO, so a stale
+                      acknowledgement from a past upgrade can never silently authorize the next one.
+                      Ignored when mode=managed (the operator migrates the managed broker itself).
+                    pattern: ^[0-9]+\.[0-9]+\.[0-9]+$
+                    type: string
                   mode:
                     default: external
                     description: |-
@@ -6883,6 +6930,79 @@ spec:
                 - Running
                 - Degraded
                 type: string
+              upgrade:
+                description: |-
+                  Upgrade is the in-flight messaging-migration state. It is present ONLY while a
+                  migration is running — the engine sets it before the first side effect and clears
+                  it once the migration completes — so its absence means no migration is in progress,
+                  not merely that none has ever run.
+                properties:
+                  cleanDrainPolls:
+                    description: CleanDrainPolls counts consecutive polls that observed
+                      every drainable queue empty.
+                    format: int32
+                    type: integer
+                  fenced:
+                    description: |-
+                      Fenced lists the workloads the Fencing phase scaled to zero, so Resume can restore
+                      each one's original replica count.
+                    items:
+                      description: |-
+                        FencedWorkload records one workload the fence scaled to zero, so Resume can restore
+                        exactly what was there. Kind distinguishes a Deployment from a StatefulSet gateway.
+                      properties:
+                        kind:
+                          description: 'Kind is the workload''s Kind: "Deployment"
+                            or "StatefulSet".'
+                          type: string
+                        name:
+                          description: Name is the workload's object name.
+                          type: string
+                        replicas:
+                          description: |-
+                            Replicas is the replica count the workload carried immediately before the fence
+                            scaled it to zero, restored verbatim on Resume.
+                          format: int32
+                          type: integer
+                      required:
+                      - kind
+                      - name
+                      - replicas
+                      type: object
+                    type: array
+                  fromVersion:
+                    description: FromVersion is the platform version bundle the migration
+                      is moving away from.
+                    type: string
+                  phase:
+                    description: Phase is the current stage of the migration.
+                    enum:
+                    - Fencing
+                    - Draining
+                    - CuttingOver
+                    - CleaningUp
+                    type: string
+                  phaseStartedAt:
+                    description: PhaseStartedAt bounds the current phase's deadline
+                      independently of the whole run.
+                    format: date-time
+                    type: string
+                  startedAt:
+                    description: StartedAt is when the migration began (the start
+                      of the Fencing phase).
+                    format: date-time
+                    type: string
+                  toVersion:
+                    description: ToVersion is the platform version bundle the migration
+                      is cutting over to.
+                    type: string
+                required:
+                - fromVersion
+                - phase
+                - phaseStartedAt
+                - startedAt
+                - toVersion
+                type: object
             type: object
         type: object
     served: true
