@@ -198,44 +198,9 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 		return render, true, res, aerr
 	}
 
-	if measured.stage == cutoverStageProvisioning {
-		// Releasing these is the stage's own step: they are fenced workloads, so nothing else
-		// will ever scale them back up, and Core's init containers cannot finish without them.
-		// The target render has already been applied to each — including while it was fenced —
-		// so what comes back up publishes to the target virtual host, never the source one.
-		for _, name := range cutoverPreCoreReleases {
-			// A DEFERRED release needs no answer HERE. The workload stays on
-			// status.upgrade.fenced, and measureCutover reads that list before it measures
-			// anything else, so the next pass measures this very stage again and Core goes on
-			// being held. Stage 4 has no such re-measurement behind it, which is why it checks.
-			if _, rerr := r.releaseFencedWorkload(ctx, p, name); rerr != nil {
-				res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
-				return render, true, res, aerr
-			}
-		}
-	}
-
-	if measured.stage == cutoverStageGateway {
-		// The gateway is restored BEFORE the phase moves on, so the cleanup can never inherit a
-		// platform whose door is still shut with nothing left that would open it. It is the last
-		// workload the fence holds: everything Core starts behind came back at stage 2.
-		//
-		// A release that DEFERS — the door still on the source pod template — is not a release,
-		// and handing over on it would be the very thing the deferral prevents: the cleanup's own
-		// final restore is not template-guarded, so it would reopen the gateway onto the topology
-		// it is reclaiming. So the hand-over waits, and the next pass (after this reconcile's own
-		// apply has retargeted the workload) measures the same stage and completes it.
-		cleared, rerr := r.releaseFencedWorkload(ctx, p, gatewayWorkloadName)
-		if rerr != nil {
-			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
-			return render, true, res, aerr
-		}
-		if cleared {
-			if terr := r.transitionMigrationPhase(ctx, p, otilmv1alpha1.MigrationPhaseCleaningUp); terr != nil {
-				res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, terr)
-				return render, true, res, aerr
-			}
-		}
+	if reason, serr := r.cutoverStageStep(ctx, p, measured); serr != nil {
+		res, aerr := r.applyOrDegrade(ctx, p, reason, serr)
+		return render, true, res, aerr
 	}
 
 	// The render is handed back UNTOUCHED apart from the two flags: the target version and its
@@ -246,6 +211,48 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 	render.holdCore = !measured.stage.rollsCore()
 	render.requeue = true
 	return render, false, ctrl.Result{}, nil
+}
+
+// cutoverStageStep performs the side effect the measured stage authorises, returning the
+// condition reason to degrade with when it fails. Stages 1 and 3 have no step of their own:
+// their work — declaring the topology, rolling Core — is the reconcile's ordinary apply.
+func (r *Reconciler) cutoverStageStep(ctx context.Context, p *otilmv1alpha1.Platform, measured cutoverMeasurement) (string, error) {
+	switch measured.stage {
+	case cutoverStageProvisioning:
+		// Releasing these is the stage's own step: they are fenced workloads, so nothing else
+		// will ever scale them back up, and Core's init containers cannot finish without them.
+		// The target render has already been applied to each — including while it was fenced —
+		// so what comes back up publishes to the target virtual host, never the source one.
+		for _, name := range cutoverPreCoreReleases {
+			// A DEFERRED release needs no answer HERE. The workload stays on
+			// status.upgrade.fenced, and measureCutover reads that list before it measures
+			// anything else, so the next pass measures this very stage again and Core goes on
+			// being held. Stage 4 has no such re-measurement behind it, which is why it checks.
+			if _, err := r.releaseFencedWorkload(ctx, p, name); err != nil {
+				return reasonMigrationFenceError, err
+			}
+		}
+	case cutoverStageGateway:
+		// The gateway is restored BEFORE the phase moves on, so the cleanup can never inherit a
+		// platform whose door is still shut with nothing left that would open it. It is the last
+		// workload the fence holds: everything Core starts behind came back at stage 2.
+		//
+		// A release that DEFERS — the door still on the source pod template — is not a release,
+		// and handing over on it would be the very thing the deferral prevents: the cleanup's own
+		// final restore is not template-guarded, so it would reopen the gateway onto the topology
+		// it is reclaiming. So the hand-over waits, and the next pass (after this reconcile's own
+		// apply has retargeted the workload) measures the same stage and completes it.
+		cleared, err := r.releaseFencedWorkload(ctx, p, gatewayWorkloadName)
+		if err != nil {
+			return reasonMigrationFenceError, err
+		}
+		if cleared {
+			if err := r.transitionMigrationPhase(ctx, p, otilmv1alpha1.MigrationPhaseCleaningUp); err != nil {
+				return reasonMigrationStateError, err
+			}
+		}
+	}
+	return "", nil
 }
 
 // cutoverMeasurement is what one pass's reads say about the cutover: the stage it has reached
