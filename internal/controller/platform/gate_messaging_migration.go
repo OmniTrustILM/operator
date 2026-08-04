@@ -132,6 +132,12 @@ type migrationRender struct {
 	bundle bom.Bundle
 	// requeue asks for the migration cadence at the end of the pass.
 	requeue bool
+	// holdCore withholds Core's WORKLOAD from this pass's apply while everything else is
+	// rendered normally. The staged cutover sets it until the topology and the provisioning
+	// service the rolled Core depends on are in place — see migrationCuttingOverPhase. Core's
+	// other children (its Service, ServiceAccount and ConfigMaps) are applied throughout; only
+	// the pod template is held, so Core goes on serving the version it is already running.
+	holdCore bool
 }
 
 // gateMessagingMigration decides and carries out this reconcile's messaging-migration work.
@@ -206,12 +212,18 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 		// messaging_migration_drain.go: poll the source virtual host until it is empty.
 		return r.migrationDrainingPhase(ctx, p, render)
 
+	case otilmv1alpha1.MigrationPhaseCuttingOver:
+		// messaging_migration_cutover.go: move the platform onto the target topology in
+		// dependency order. It is the first phase that renders the TARGET, so the source
+		// re-pin deliberately does not apply to it.
+		return r.migrationCuttingOverPhase(ctx, p, render)
+
 	default:
-		// CuttingOver and CleaningUp are past the point of no return, so neither the deadline
-		// nor the source re-pin applies to them. Their broker-side work — repointing the
-		// platform at the target topology and reclaiming the source one — lands with the
-		// later steps of the engine; until then the phase simply holds its recorded state and
-		// re-checks, which is what keeps the persisted state and the resume path honest.
+		// CleaningUp is past the point of no return, so neither the deadline nor the source
+		// re-pin applies to it. Its broker-side work — reclaiming the source topology once the
+		// platform is serving from the target one — lands with the last step of the engine;
+		// until then the phase simply holds its recorded state and re-checks, which is what
+		// keeps the persisted state and the resume path honest.
 		return render, true, ctrl.Result{RequeueAfter: migrationRequeueAfter}, nil
 	}
 }

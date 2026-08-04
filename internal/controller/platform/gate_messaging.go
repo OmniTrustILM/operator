@@ -221,27 +221,12 @@ func (r *Reconciler) managedCoreUserSecretPresent(ctx context.Context, p *otilmv
 // vhost_not_found and retry only on a slow backoff, wedging Core (it publishes to the
 // czertainly exchange and crash-loops with "no exchange ... in vhost" until the topology
 // converges). A NotFound (the Vhost CR was just applied and has no status yet) or any read
-// error is "not ready" so the requeue retries.
+// error is "not ready" so the requeue retries. It shares topologyObjectReady with the staged
+// messaging cutover, which asks the same question of every topology CR the target bundle
+// renders.
 func (r *Reconciler) managedVhostReady(ctx context.Context, p *otilmv1alpha1.Platform) bool {
-	var u unstructured.Unstructured
-	u.SetGroupVersionKind(platformbuilder.ManagedMessagingVhostGVK())
-	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.ManagedMessagingVhostName(p)}, &u); err != nil {
-		return false
-	}
-	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
-	if !found {
-		return false
-	}
-	for _, c := range conds {
-		cm, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if cm["type"] == conditionTypeReady && cm["status"] == string(metav1.ConditionTrue) {
-			return true
-		}
-	}
-	return false
+	return r.topologyObjectReady(ctx, p.Namespace,
+		platformbuilder.ManagedMessagingVhostGVK(), platformbuilder.ManagedMessagingVhostName(p))
 }
 
 // isMessagingPrereqObject reports whether a rendered managed-messaging object is a topology

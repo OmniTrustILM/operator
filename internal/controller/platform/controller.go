@@ -125,6 +125,13 @@ const (
 	// Core's Available readiness is gated on it per the design (a functional auth
 	// provider). It mirrors the builder's clean, unscoped component name.
 	authDeploymentName = "auth"
+	// gatewayWorkloadName is the api-gateway's workload/Service name — the door external
+	// traffic enters through, which the messaging migration fences and reopens by name.
+	gatewayWorkloadName = "api-gateway"
+	// provisioningWorkloadName is the bundled provisioning service's workload/Service name.
+	// The staged cutover addresses it by name because Core's provision-instance-queue init
+	// container cannot complete until it answers.
+	provisioningWorkloadName = "provisioning-rabbitmq"
 )
 
 // The first-admin CERTIFICATE registration is performed IN-POD by Core's postStart hook
@@ -332,7 +339,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// object the Platform owns (everything except the edge). A composed-Secret or apply
 	// failure routes by transience (requeue vs degrade); a handled=true result short-circuits
 	// the reconcile.
-	if handled, res, err := r.composeAndApplyBase(ctx, &platform, bundle, desired, mgd.dbReady); handled || err != nil {
+	if handled, res, err := r.composeAndApplyBase(ctx, &platform, mig, desired, mgd.dbReady); handled || err != nil {
 		return res, err
 	}
 
@@ -740,7 +747,12 @@ func (r *Reconciler) gateManagedDependencies(ctx context.Context, platform *otil
 // composed-Secret write or an SSA apply that fails routes by transience (requeue vs degrade);
 // handled is true when a step short-circuited the reconcile. dbReady gates the auth-DB
 // composition (skipped while a managed database is not yet ready).
-func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, bundle bom.Bundle, desired desiredSet, dbReady bool) (handled bool, res ctrl.Result, err error) {
+//
+// mig carries the migration gate's answer: the bundle every builder here resolves against, and
+// (during a staged messaging cutover) whether Core's workload must be WITHHELD from this pass's
+// apply so Core keeps running the pod template it is already Ready on.
+func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, mig migrationRender, desired desiredSet, dbReady bool) (handled bool, res ctrl.Result, err error) {
+	bundle := mig.bundle
 	// Compose the auth .NET DB connection string into an operator-managed Secret
 	// before applying workloads, so auth's secretKeyRef resolves. Skip it while a
 	// managed database is not yet ready (its generated credentials Secret does not exist
@@ -813,6 +825,16 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 	// deploys Core once with all config up front — this makes the operator match that.
 	coreExists, coreReady, coreFrozenChecksum := r.coreWorkloadStatus(ctx, platform)
 	for _, obj := range platformbuilder.RenderPlatformBase(platform) {
+		// A staged messaging cutover WITHHOLDS Core's workload until the target topology is
+		// declared and the provisioning service is answering again: Core's proxy-path init
+		// container retries against that service until it responds, so rolling Core onto the
+		// target bundle any earlier produces a pod that can never become Ready. Everything else
+		// (including Core's own Service/ServiceAccount/ConfigMaps) is applied normally, and the
+		// withheld workload stays in the desired set so the post-apply prune keeps it.
+		if mig.holdCore && isCoreWorkload(obj) {
+			desired.add(r, obj)
+			continue
+		}
 		// Stamp the per-component config checksums onto their pod templates so a change in config
 		// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
 		// relayed OIDC client Secret + in-pod scripts ConfigMap) and the gateway (kong.yml). Each

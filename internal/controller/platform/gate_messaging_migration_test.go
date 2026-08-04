@@ -366,25 +366,39 @@ func TestGateMessagingMigrationResumesDraining(t *testing.T) {
 	assert.Empty(t, drainEvents(rec), "re-entering a phase is not a transition and announces nothing")
 }
 
-// TestGateMessagingMigrationForwardOnlyPhasesDoNotRender: past the cutover there is nothing to
-// go back to, so those phases neither re-pin nor let the pass render — they hold their state
-// and re-check on the migration's own cadence.
-func TestGateMessagingMigrationForwardOnlyPhasesDoNotRender(t *testing.T) {
-	for _, phase := range []otilmv1alpha1.MigrationPhase{
-		otilmv1alpha1.MigrationPhaseCuttingOver, otilmv1alpha1.MigrationPhaseCleaningUp,
-	} {
-		t.Run(string(phase), func(t *testing.T) {
-			p := migratingGatePlatform(phase)
-			_, to := migrationBundles(t)
-			r, _ := migrationReconciler(t, p, interceptor.Funcs{})
+// TestGateMessagingMigrationCleaningUpDoesNotRender: the last phase has nothing left to render —
+// the platform is already serving the target — so it holds its state and re-checks on the
+// migration's own cadence. (Its forward-only sibling, CuttingOver, is the phase that DOES render
+// the target; messaging_migration_cutover_test.go drives it.)
+func TestGateMessagingMigrationCleaningUpDoesNotRender(t *testing.T) {
+	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseCleaningUp)
+	_, to := migrationBundles(t)
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{})
 
-			_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
-			require.NoError(t, err)
-			assert.True(t, handled, "the reconcile stops at the gate")
-			assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
-			assert.Equal(t, phase, storedPlatform(t, r).Status.Upgrade.Phase, "the recorded phase is unchanged")
-		})
-	}
+	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err)
+	assert.True(t, handled, "the reconcile stops at the gate")
+	assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseCleaningUp, storedPlatform(t, r).Status.Upgrade.Phase,
+		"the recorded phase is unchanged")
+}
+
+// TestGateMessagingMigrationCuttingOverKeepsTheTargetPin is the counterpart of the re-pin the
+// waiting phases apply: past the drain there is nothing to hold back for, so the gate must hand
+// the reconcile the TARGET bundle — and must NOT put spec.version back to the source, which
+// would make every builder render the version the migration is leaving.
+func TestGateMessagingMigrationCuttingOverKeepsTheTargetPin(t *testing.T) {
+	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseCuttingOver)
+	_, to := migrationBundles(t)
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{})
+
+	render, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err)
+	assert.False(t, handled, "the reconcile continues — applying the target is what the cutover is for")
+	assert.Equal(t, to, render.bundle, "the cutover renders the TARGET bundle")
+	assert.Equal(t, platformVersion219, render.version)
+	assert.Equal(t, platformVersion219, p.Spec.Version, "the source re-pin must not reach the cutover")
+	assert.True(t, render.holdCore, "with no target topology declared, Core is withheld from the apply")
 }
 
 // TestGateMessagingMigrationRefusesAnUnrelatedVersion: a third version asked for mid-migration
