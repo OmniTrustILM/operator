@@ -63,7 +63,7 @@ The switch is `database.pgBouncer.managed`. Full explanation:
 | Sample | Shows |
 |---|---|
 | [`platform_2170.yaml`](./platform_2170.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.17.0. |
-| [`platform_2190_preview.yaml`](./platform_2190_preview.yaml) | Pin the **platform** bundle to the ILM 2.19.0 **preview** — opt-in only, never the default, and a *live* platform cannot be upgraded onto it (fresh installs only). |
+| [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0 — released, but not yet the operator's default. |
 | [`platform_managed_pinned_versions.yaml`](./platform_managed_pinned_versions.yaml) | Pin each **managed engine** version (PostgreSQL / RabbitMQ / Keycloak) + the major-upgrade guard. |
 
 See [`docs/versions.md`](../../docs/versions.md) for the supported matrix and

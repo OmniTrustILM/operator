@@ -35,7 +35,7 @@ import (
 )
 
 // TestResolveBundleEmptyVersionIsDefault proves that an unset spec.version resolves the
-// operator's newest (DefaultVersion) bundle, so the out-of-the-box render is unchanged.
+// operator's default (DefaultVersion) bundle, so the out-of-the-box render is unchanged.
 func TestResolveBundleEmptyVersionIsDefault(t *testing.T) {
 	p := basePlatform() // sets no spec.version
 	def, _ := bom.BundleFor("")

@@ -48,8 +48,9 @@ const reasonPreviewVersionUpgradeBlocked = "PreviewVersionUpgradeBlocked"
 //     operator (which changes the built-in DefaultVersion) never silently upgrades a running
 //     platform;
 //  3. otherwise "" — only on the very first reconcile of a version-less platform, which
-//     bom.BundleFor resolves to the operator's newest (DefaultVersion); that resolved version
-//     is then recorded on status.observedVersion, pinning it for every subsequent reconcile.
+//     bom.BundleFor resolves to the operator's default (DefaultVersion, not necessarily its
+//     newest bundle); that resolved version is then recorded on status.observedVersion,
+//     pinning it for every subsequent reconcile.
 //
 // It returns "" only in case 3 (BundleFor maps "" to DefaultVersion). The pin lives in
 // status, never in spec, so the policy does NOT fight a GitOps actor that owns the spec.

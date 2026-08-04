@@ -442,7 +442,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	r.setReadinessStatus(platform, ready)
 	platform.Status.ObservedGeneration = platform.Generation
 	// Report the version the operator actually reconciled against (spec.version, or the
-	// operator's newest when unset — and, while a messaging migration holds the platform
+	// operator's default when unset — and, while a messaging migration holds the platform
 	// back, the version it is still RUNNING rather than the one it is moving to). It is set
 	// only on this success path; an unknown version returned early (steadyState) and left the
 	// prior ObservedVersion untouched.
@@ -601,7 +601,7 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	}
 
 	// Resolve the version bundle ONCE per reconcile from the effective version (empty →
-	// the operator's newest). An UNKNOWN version is a deterministic user mistake, NOT a
+	// the operator's default). An UNKNOWN version is a deterministic user mistake, NOT a
 	// crash: like the singleton loser it is a terminal steady state (no error, no busy
 	// requeue) until a spec edit re-enqueues — surfaced as Degraded with an actionable
 	// message listing the versions THIS operator build carries. The supported set grows

@@ -1134,7 +1134,7 @@ var _ = Describe("Platform Controller", func() {
 			}
 		}
 
-		It("reports status.observedVersion = the operator's newest when spec.version is unset", func() {
+		It("reports status.observedVersion = the operator's default when spec.version is unset", func() {
 			const ns = "ilm-version-default"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
 
@@ -1147,7 +1147,7 @@ var _ = Describe("Platform Controller", func() {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
 				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
 				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion),
-					"an unset spec.version resolves the operator's newest version")
+					"an unset spec.version resolves the operator's default version")
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
@@ -1212,7 +1212,7 @@ var _ = Describe("Platform Controller", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
 					return err
 				}
-				got.Spec.Version = "" // unset → the operator's newest
+				got.Spec.Version = "" // unset → the operator's default
 				return k8sClient.Update(ctx, &got)
 			}, platformTimeout, platformInterval).Should(Succeed())
 
@@ -1230,7 +1230,7 @@ var _ = Describe("Platform Controller", func() {
 			const ns = "ilm-version-downgrade"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
 
-			By("reaching Running with observedVersion pinned to the operator's newest")
+			By("reaching Running with observedVersion pinned to the operator's default")
 			markRequiredDeploymentsReady(ns)
 			Eventually(func(g Gomega) {
 				var got otilmv1alpha1.Platform
@@ -1262,65 +1262,22 @@ var _ = Describe("Platform Controller", func() {
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
-		It("refuses upgrading a live platform onto a preview bundle, but allows a fresh preview install", func() {
-			By("reaching Running on the operator's newest (released) version")
-			const ns = "ilm-version-preview-upgrade"
-			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
+		It("allows a fresh platform to pin directly to the released 2.19.0 bundle", func() {
+			// 2.19.0 is released (not preview) but not DefaultVersion — a fresh install must
+			// still be able to name it explicitly. The preview-upgrade guard no longer applies
+			// to a released bundle; see TestPreviewUpgradeRefused (version_test.go) for that
+			// guard's own coverage, and the messaging-migration suite for what governs a LIVE
+			// platform's move onto 2.19.0.
+			const ns = "ilm-version-2190-fresh"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion219))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
+
+			By("verifying the fresh install proceeds to Running, pinned to 2.19.0")
 			Eventually(func(g Gomega) {
 				var got otilmv1alpha1.Platform
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
-				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion))
-			}, platformTimeout, platformInterval).Should(Succeed())
-
-			By("requesting an upgrade to the unreleased 2.19.0 preview bundle")
-			Eventually(func() error {
-				var got otilmv1alpha1.Platform
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
-					return err
-				}
-				got.Spec.Version = platformVersion219
-				return k8sClient.Update(ctx, &got)
-			}, platformTimeout, platformInterval).Should(Succeed())
-
-			By("verifying it goes Degraded/PreviewVersionUpgradeBlocked and the running version is NOT moved")
-			Eventually(func(g Gomega) {
-				var got otilmv1alpha1.Platform
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
-				cond := meta.FindStatusCondition(got.Status.Conditions, "Degraded")
-				g.Expect(cond).NotTo(BeNil(), "an upgrade onto a preview bundle must set a Degraded condition")
-				g.Expect(cond.Reason).To(Equal(reasonPreviewVersionUpgradeBlocked))
-				g.Expect(cond.Message).To(ContainSubstring(platformVersion219))
-				// status.observedVersion stays at the running (released) version — the platform is
-				// NOT upgraded onto the preview bundle.
-				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion),
-					"the running version must remain in effect when a preview upgrade is refused")
-			}, platformTimeout, platformInterval).Should(Succeed())
-
-			By("verifying the core Deployment is NOT re-rendered/rolled onto the blocked preview image")
-			Consistently(func(g Gomega) {
-				var dep appsv1.Deployment
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &dep)).To(Succeed())
-				g.Expect(coreContainer(g, dep).Image).To(HaveSuffix(":"+bom.DefaultVersion),
-					"a blocked preview upgrade must not roll the core Deployment onto the preview version's image")
-			}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
-
-			By("creating a FRESH platform pinned directly to the same preview version")
-			const freshNS = "ilm-version-preview-fresh"
-			Expect(k8sClient.Create(ctx, newVersionedPlatform(freshNS, platformVersion219))).To(Succeed())
-			markRequiredDeploymentsReady(freshNS)
-
-			By("verifying the fresh install proceeds to Running, pinned to the preview version")
-			Eventually(func(g Gomega) {
-				var got otilmv1alpha1.Platform
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: freshNS}, &got)).To(Succeed())
 				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
 				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion219))
-				cond := meta.FindStatusCondition(got.Status.Conditions, conditionDegraded)
-				if cond != nil {
-					g.Expect(cond.Reason).NotTo(Equal(reasonPreviewVersionUpgradeBlocked),
-						"a fresh preview install must not be blocked by the upgrade guard")
-				}
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
@@ -1329,14 +1286,14 @@ var _ = Describe("Platform Controller", func() {
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
 
-			By("reaching Running on the operator's newest (released) version")
+			By("reaching Running on the operator's default (released) version")
 			Eventually(func(g Gomega) {
 				var got otilmv1alpha1.Platform
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
 				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion))
 			}, platformTimeout, platformInterval).Should(Succeed())
 
-			By("requesting the blocked preview upgrade so the platform goes Degraded")
+			By("requesting an upgrade that renames the EXTERNAL messaging topology without acknowledgement, so the platform goes Degraded")
 			Eventually(func() error {
 				var got otilmv1alpha1.Platform
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
@@ -1351,7 +1308,7 @@ var _ = Describe("Platform Controller", func() {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
 				g.Expect(meta.IsStatusConditionTrue(got.Status.Conditions, conditionDegraded)).To(BeTrue())
 				g.Expect(meta.FindStatusCondition(got.Status.Conditions, conditionDegraded).Reason).
-					To(Equal(reasonPreviewVersionUpgradeBlocked))
+					To(Equal(reasonExternalMessagingMigrationRequired))
 			}, platformTimeout, platformInterval).Should(Succeed())
 
 			By("reverting spec.version to the version actually running")

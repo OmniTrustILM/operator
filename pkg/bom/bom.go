@@ -25,7 +25,7 @@ SOFTWARE.
 // profile (default connection-string template, Secret-key names, target env-var
 // names), the managed-RabbitMQ messaging topology, and the managed-infra default
 // versions for ONE platform version. It is versioned DATA — the reconciler selects
-// a bundle (spec.version, defaulting to the operator's newest) and reads it, the CR
+// a bundle (spec.version, defaulting to DefaultVersion) and reads it, the CR
 // overrides it, so no env-var names are hard-coded in reconcile logic.
 //
 // Decoupling: because the BOM is a MAP keyed by version (not a single compile-time
@@ -41,9 +41,13 @@ import (
 	semver "github.com/Masterminds/semver/v3"
 )
 
-// DefaultVersion is the newest RELEASED bundle the operator ships — the FRESH-INSTALL
-// fallback, i.e. the version a brand-new Platform with an empty spec.version resolves to
-// (and then pins on status.observedVersion).
+// DefaultVersion is the operator's FRESH-INSTALL fallback — the version a brand-new Platform
+// with an empty spec.version resolves to (and then pins on status.observedVersion). It MUST
+// name a RELEASED bundle (TestDefaultVersionIsReleased), but it is NOT required to be the
+// NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
+// (Bundle.Released), made whenever the operator is ready to change what a version-less
+// fresh install lands on — a newer released bundle can exist, reachable via an explicit
+// spec.version, before DefaultVersion moves to it.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
@@ -168,8 +172,10 @@ type Bundle struct {
 	// (preview) bundles resolve ONLY via an explicit spec.version — they are excluded
 	// from the advertised SupportedVersions(), are not eligible to be DefaultVersion,
 	// and a LIVE platform cannot be upgraded onto one (see the controller's
-	// preview-upgrade guard). The release-day flip PR sets Released and moves
-	// DefaultVersion.
+	// preview-upgrade guard). A release-day flip PR sets Released; moving DefaultVersion
+	// to the newly-released bundle is a SEPARATE decision the same or a later PR makes —
+	// releasing a version does not, by itself, change what a version-less fresh install
+	// resolves to.
 	Released bool
 
 	// Managed-infrastructure default versions for this platform version. They are the
@@ -246,11 +252,12 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
 	},
-	// 2.19.0 — PREVIEW until the operator ships it as default: resolvable only via
-	// explicit spec.version, excluded from SupportedVersions, not
-	// DefaultVersion-eligible, and live platforms cannot upgrade onto it
-	// (preview-upgrade guard) until the flip PR sets Released. Image coordinates
-	// verified against the released helm-charts 2.19.0 tag.
+	// 2.19.0 — RELEASED: advertised via SupportedVersions, and a live platform can be
+	// upgraded onto it (the messaging migration engine governs a managed-broker move; an
+	// external broker needs spec.messaging.migrationAcknowledgedForVersion). It is NOT
+	// DefaultVersion — that stays 2.18.0 until a separate PR moves it, so a version-less
+	// fresh install is unaffected by this release. Image coordinates verified against the
+	// released helm-charts 2.19.0 tag.
 	//
 	// COMPLETENESS: parts of this bundle are carried as version DATA that no builder reads
 	// yet. The wiring's TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and
@@ -279,7 +286,7 @@ var bundles = map[string]Bundle{
 		Wiring:          wiring2190,
 		Messaging:       messagingTopology2190,
 		HasProvisioning: true,
-		Released:        false,
+		Released:        true,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
@@ -322,8 +329,9 @@ var bundles = map[string]Bundle{
 }
 
 // BundleFor returns the bundle for a platform version. An empty version selects the
-// DefaultVersion bundle (the operator's newest RELEASED bundle — a preview is reachable
-// only by naming it explicitly). ok is false for an unknown version —
+// DefaultVersion bundle (the operator's fresh-install default — not necessarily the newest
+// RELEASED bundle; a preview, and a released bundle DefaultVersion has not moved to yet, are
+// both reachable only by naming them explicitly). ok is false for an unknown version —
 // the caller (the reconciler) degrades with an actionable supported-versions message
 // rather than rendering against a non-existent bundle. The supported set grows over
 // time, so this is a RUNTIME check, not a frozen CEL enum.
@@ -361,8 +369,10 @@ func AllVersions() []string {
 
 // sortVersions sorts a version list ASCENDING by semver IN PLACE and returns it. It is the
 // single ordering used by SupportedVersions and AllVersions, so the advertised set and the
-// full key set can never disagree on "newest is last" — the invariant the DefaultVersion
-// check and the CLI both rely on. Ordering is semver, never lexicographic (2.9.0 < 2.10.0).
+// full key set can never disagree on "newest is last" — the invariant the CLI relies on to
+// find the newest released version. (DefaultVersion is a separate pointer into this data — see
+// its own doc comment — so it is not required to land on that last entry.) Ordering is semver,
+// never lexicographic (2.9.0 < 2.10.0).
 func sortVersions(out []string) []string {
 	sort.Slice(out, func(i, j int) bool { return semverLess(out[i], out[j]) })
 	return out

@@ -78,12 +78,12 @@ const (
 func readOnlyRootFS() *bool { b := true; return &b }
 
 // resolveBundle returns the version bundle the render uses for this Platform: the bundle
-// selected by spec.version, or — defensively — the operator's newest (DefaultVersion)
-// bundle when the version is unknown. The controller already REJECTS an unknown
-// spec.version BEFORE rendering (Reconcile resolves bom.BundleFor once and degrades with
-// an actionable supported-versions message), so an unknown version never reaches a
-// builder in practice; the fallback only keeps the pure builders (and the unit tests,
-// which call them directly) total rather than panicking. spec.version=="" →
+// selected by spec.version, or — defensively — the operator's default (DefaultVersion, not
+// necessarily its newest) bundle when the version is unknown. The controller already
+// REJECTS an unknown spec.version BEFORE rendering (Reconcile resolves bom.BundleFor once
+// and degrades with an actionable supported-versions message), so an unknown version never
+// reaches a builder in practice; the fallback only keeps the pure builders (and the unit
+// tests, which call them directly) total rather than panicking. spec.version=="" →
 // the DefaultVersion bundle, so the out-of-the-box render is unchanged.
 //
 // Resolving here (off p.Spec.Version) is what makes spec.version REAL end to end: every

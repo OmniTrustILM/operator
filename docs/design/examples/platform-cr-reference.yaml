@@ -36,13 +36,14 @@ metadata:
 spec:
   # [IMPLEMENTED] version — selects the platform version bundle (tested component images +
   # env wiring + managed-RabbitMQ topology) the operator reconciles this Platform against.
-  # Empty (the default) = the operator's NEWEST shipped version, so an existing CR keeps
-  # today's behaviour. One operator build carries a supported RANGE of versions (run a canary
-  # version in one namespace, or take an operator fix without moving the platform). NOT a CEL
-  # enum (the supported set grows over time): an unknown version degrades with an actionable
+  # Empty (the default) = the operator's DEFAULT shipped version — not necessarily the newest
+  # bundle it carries, see docs/versions.md — so an existing CR keeps today's behaviour. One
+  # operator build carries a supported RANGE of versions (run a canary version in one
+  # namespace, or take an operator fix without moving the platform). NOT a CEL enum (the
+  # supported set grows over time): an unknown version degrades with an actionable
   # supported-versions message, never a crash. status.observedVersion reports the resolved
   # version.
-  version: ""                          # e.g. "2.18.0"; empty pins the operator's newest at creation (no auto-upgrade)
+  version: ""                          # e.g. "2.18.0"; empty pins the operator's default at creation (no auto-upgrade)
 
   # [IMPLEMENTED] platform-wide
   deletionPolicy: Retain               # Retain (default) | Delete

@@ -170,7 +170,7 @@ func TestMessagingTopology(t *testing.T) {
 }
 
 // TestBundleForEmptyResolvesDefault proves an empty version selects the DefaultVersion
-// bundle (the operator's newest) — the out-of-the-box behaviour when spec.version is unset.
+// bundle — the out-of-the-box behaviour when spec.version is unset.
 func TestBundleForEmptyResolvesDefault(t *testing.T) {
 	empty, ok := BundleFor("")
 	assert.True(t, ok, "empty version resolves the default bundle")
@@ -221,28 +221,23 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 	}
 }
 
-// TestSupportedVersionsExplicit pins the advertised (released) version set exactly —
-// adding a preview bundle must NOT change this list until the release-day flip PR
-// marks it Released and updates this expectation.
+// TestSupportedVersionsExplicit pins the advertised (released) version set exactly — a new
+// bundle changes this list only once its own release-day flip PR marks it Released and
+// updates this expectation.
 func TestSupportedVersionsExplicit(t *testing.T) {
-	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
 }
 
-// TestDefaultVersionIsReleased replaces the old "newest key" invariant: DefaultVersion
-// must be a RELEASED bundle (the release-day flip is what makes a preview eligible), and
-// must be the NEWEST released one — SupportedVersions is semver-ascending, so the default
-// is its last entry. That second assertion is the guard against a release-day flip that
-// marks a newer bundle Released but forgets to move DefaultVersion, which would leave fresh
-// installs silently landing on the older release.
+// TestDefaultVersionIsReleased is the ONE invariant DefaultVersion must satisfy: it must name
+// a RELEASED bundle (an empty spec.version can never land a fresh install on a preview). It
+// does NOT need to be the NEWEST released bundle — a release-day flip PR is free to mark a
+// bundle Released without moving DefaultVersion to it (2.19.0 is exactly this case: released,
+// reachable via an explicit spec.version or upgrade, but not yet the fresh-install default) —
+// moving DefaultVersion is a separate, deliberate decision.
 func TestDefaultVersionIsReleased(t *testing.T) {
 	b, ok := BundleFor(DefaultVersion)
 	assert.True(t, ok)
 	assert.True(t, b.Released, "DefaultVersion must point at a released bundle")
-
-	released := SupportedVersions()
-	require.NotEmpty(t, released)
-	assert.Equal(t, released[len(released)-1], DefaultVersion,
-		"DefaultVersion must be the NEWEST released version (the last SupportedVersions entry)")
 }
 
 // TestVersionOrderingIsSemver proves ordering is numeric per segment, not lexicographic
@@ -288,7 +283,7 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
 	assert.Equal(t, testVersion2190, AllVersions()[len(AllVersions())-1],
-		"the preview bundle is the newest key, and only AllVersions carries it")
+		"2.19.0 is the newest key in both lists (it is released, so SupportedVersions carries it too)")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -393,17 +388,17 @@ func TestLatestOnlyRetentionQueues(t *testing.T) {
 	}.IsLatestOnlyRetention(), "arguments are int64 by contract; anything else is not a retention queue")
 }
 
-// TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
-// helm-charts 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a
-// provisioning-exchange bug through review once already.
+// TestBundle2190 pins the ENTIRE 2.19.0 contract, extracted from the helm-charts
+// 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a provisioning-exchange
+// bug through review once already.
 func TestBundle2190(t *testing.T) {
 	b, ok := BundleFor(testVersion2190)
 	assert.True(t, ok, "2.19.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.19.0 stays preview until the release-day flip PR")
+	assert.True(t, b.Released, "2.19.0 is released (but not DefaultVersion — see bom.go)")
 	assert.True(t, b.HasProvisioning)
 
-	// Advertised set must NOT change while 2.19.0 is preview.
-	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+	// Advertised set now includes 2.19.0 (released), still excludes nothing preview.
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
 	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, AllVersions())
 
 	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag

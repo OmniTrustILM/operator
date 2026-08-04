@@ -1139,10 +1139,11 @@ const (
 type PlatformSpec struct {
 	// Version selects which platform version bundle the operator reconciles this
 	// Platform against — the tested set of component images, env-var wiring, and managed-
-	// RabbitMQ topology for that version. When empty (the default) the operator uses its
-	// NEWEST shipped version, so an existing CR keeps today's behaviour. One operator build
-	// carries a supported RANGE of versions, so you can run a canary version in one
-	// namespace, or take an operator fix without moving the platform.
+	// RabbitMQ topology for that version. When empty, the operator uses its DEFAULT shipped
+	// version (not necessarily the newest one it carries — a newer released version can
+	// exist and is reachable by naming it explicitly), so an existing CR keeps today's
+	// behaviour. One operator build carries a supported RANGE of versions, so you can run a
+	// canary version in one namespace, or take an operator fix without moving the platform.
 	//
 	// This is intentionally NOT a CEL enum: the supported set grows as the operator ships
 	// new versions, so the value is validated at RUNTIME (and, in a later milestone, by the
@@ -1447,9 +1448,10 @@ type PlatformStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ObservedVersion is the platform version bundle the operator resolved and
 	// reconciled this Platform against — spec.version when set and known, otherwise the
-	// operator's newest (default) version. It lags spec.version only while a reconcile is
-	// in flight; an unknown spec.version leaves it at the last successfully-reconciled
-	// version and surfaces the error on the Degraded condition.
+	// operator's default version (not necessarily the newest one it carries). It lags
+	// spec.version only while a reconcile is in flight; an unknown spec.version leaves it
+	// at the last successfully-reconciled version and surfaces the error on the Degraded
+	// condition.
 	// +optional
 	ObservedVersion string `json:"observedVersion,omitempty"`
 	// Conditions represent the latest available observations of the platform's state.

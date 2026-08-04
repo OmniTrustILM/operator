@@ -39,11 +39,11 @@ metadata:
 spec:
   # ── platform version bundle selection ──
   # Selects the tested component images + env wiring + managed-RabbitMQ topology for a
-  # platform version. Empty (the default) = the operator's NEWEST shipped version, so an
-  # existing CR keeps today's behaviour. One operator build supports a RANGE of versions; an
-  # unknown version degrades with a supported-versions message. status.observedVersion reports
-  # the resolved version.
-  version: "2.18.0"                          # omit/"" pins the operator's newest at creation (no auto-upgrade)
+  # platform version. Empty (the default) = the operator's DEFAULT shipped version — not
+  # necessarily the newest bundle it carries — so an existing CR keeps today's behaviour. One
+  # operator build supports a RANGE of versions; an unknown version degrades with a
+  # supported-versions message. status.observedVersion reports the resolved version.
+  version: "2.18.0"                          # omit/"" pins the operator's default at creation (no auto-upgrade)
 
   # ── platform-wide knobs ──
   deletionPolicy: Retain            # Retain (default) | Delete

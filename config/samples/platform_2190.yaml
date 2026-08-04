@@ -1,17 +1,12 @@
-# platform_2190_preview.yaml — a Platform pinned to the ILM 2.19.0 PREVIEW bundle.
+# platform_2190.yaml — a Platform pinned to the ILM 2.19.0 bundle.
 #
-# 2.19.0 is a PREVIEW version bundle: its coordinates are recorded and rendered, but the
-# operator does not ship it as the default yet. That has three consequences you must accept
-# before applying this:
-#   - OPT-IN ONLY. The bundle resolves solely because spec.version names it explicitly. It is
-#     excluded from the operator's advertised supported versions, so nothing selects it by
-#     accident.
-#   - NOT THE DEFAULT. Omitting spec.version keeps you on the newest RELEASED bundle (2.18.0).
-#   - NO UPGRADE PATH YET. A LIVE platform cannot be moved onto a preview: setting
-#     spec.version: "2.19.0" on a running platform is refused with
-#     Degraded/PreviewVersionUpgradeBlocked and the platform keeps running its current
-#     version. Only a FRESH platform, pinned at creation like this one, comes up on 2.19.0.
-# Use it to validate the 2.19.0 contract on a throwaway namespace, not to upgrade production.
+# 2.19.0 is a RELEASED, supported bundle — it is just not the operator's DEFAULT yet (that
+# stays 2.18.0; omit spec.version to get the default). Two ways to land on 2.19.0:
+#   - FRESH INSTALL. Pin spec.version to "2.19.0" at creation, like this sample.
+#   - UPGRADE. Setting spec.version: "2.19.0" on a running platform now upgrades it: a managed
+#     broker is moved by the operator's own messaging migration engine (fencing/drain/cutover),
+#     an external broker requires you to migrate it yourself and acknowledge the move via
+#     spec.messaging.migrationAcknowledgedForVersion. See docs/upgrades.md for the procedure.
 #
 # WHAT 2.19.0 CHANGES (the operator wires all of it — you configure no env-var names):
 #   - images: core and frontend-administrator 2.19.0, auth 1.7.0, scheduler 1.1.1,
@@ -39,7 +34,7 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
-  version: "2.19.0"                   # opt in to the preview bundle; fresh platforms only
+  version: "2.19.0"                   # pin the released 2.19.0 bundle (not yet the default)
   database:
     mode: external
     host: postgres.example.com

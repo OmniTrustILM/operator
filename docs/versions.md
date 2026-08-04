@@ -22,11 +22,15 @@ This operator build ships the following tested bundles. The engine columns are t
 
 | Platform version | PostgreSQL | RabbitMQ | Keycloak |
 | ---------------- | ---------- | -------- | -------- |
+| 2.19.0 | 18 | 4.3.1 | 26.6.3 |
 | **2.18.0** (default) | 18 | 4.3.1 | 26.6.3 |
 | 2.17.0 | 16 | 4.2.0 | 26.4.0 |
 
-`2.18.0` is the operator's **newest** bundle, so it is the default selected when
-`spec.version` is empty at creation.
+`2.18.0` is the operator's **default** — the bundle selected when `spec.version` is empty at
+creation. It is not necessarily the newest bundle this build carries: a newer release (like
+`2.19.0` here) can ship and be fully supported before the default moves to it, so pin
+`spec.version` explicitly to use it. See [upgrades.md](upgrades.md) to move a running platform
+onto it.
 
 You select a bundle with **`spec.version`**.
 
@@ -35,7 +39,7 @@ apiVersion: otilm.com/v1alpha1
 kind: Platform
 metadata: { name: ilm, namespace: ilm }
 spec:
-  version: "2.18.0"     # a tested bundle; omit/"" pins the operator's NEWEST at creation (no auto-upgrade)
+  version: "2.18.0"     # a tested bundle; omit/"" pins the operator's DEFAULT at creation (no auto-upgrade)
   database:  { mode: managed }
   messaging: { mode: managed }
 ```
@@ -47,7 +51,7 @@ upgrades a *running platform*:
 
 - **`spec.version` set to a supported version** → that bundle is used. Setting it to a newer
   version is the explicit — and only — way to **upgrade** the platform.
-- **`spec.version` empty, first reconcile** → the operator resolves its **NEWEST** shipped
+- **`spec.version` empty, first reconcile** → the operator resolves its **DEFAULT** shipped
   bundle and records it on `status.observedVersion`, **pinning** it.
 - **`spec.version` empty, thereafter** → the operator keeps using the **pinned**
   `status.observedVersion`, *not* whatever a newer operator build defaults to. A platform
@@ -72,7 +76,7 @@ kubectl get platform -n ilm
 ```
 
 `status.observedVersion` always reflects the *resolved* version — the concrete version
-string even when `spec.version` is empty (the pinned version: the operator's newest at
+string even when `spec.version` is empty (the pinned version: the operator's default at
 creation, held steady thereafter).
 
 ## The supported-range model
@@ -100,7 +104,7 @@ kubectl describe platform ilm -n ilm
 # Conditions:
 #   Type      Status  Reason              Message
 #   Degraded  True    UnsupportedVersion  platform version "9.9.9" is not supported by this
-#                                         operator; supported versions: 2.17.0, 2.18.0
+#                                         operator; supported versions: 2.17.0, 2.18.0, 2.19.0
 ```
 
 A `Warning` Event with reason `UnsupportedVersion` is recorded alongside the condition.

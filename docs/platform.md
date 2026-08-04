@@ -370,11 +370,11 @@ release. `spec.version` selects a bundle:
 
 ```yaml
 spec:
-  version: "2.18.0"   # omit / "" pins the operator's NEWEST at creation (no auto-upgrade; bump to upgrade)
+  version: "2.18.0"   # omit / "" pins the operator's DEFAULT at creation (no auto-upgrade; bump to upgrade)
 ```
 
-- Empty (the default) = the operator's newest version, so an existing CR keeps today's
-  behaviour.
+- Empty (the default) = the operator's default version — not necessarily the newest bundle it
+  carries (see [versions.md](./versions.md)) — so an existing CR keeps today's behaviour.
 - One operator build supports a **range** of versions — run a canary version in one
   namespace, or take an operator fix without moving the platform.
 - It is **not** a fixed enum (the supported set grows): an **unknown** version is a
