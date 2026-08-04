@@ -54,12 +54,19 @@ package platform
 //  4. GATEWAY — the door is reopened and the migration hands over to the cleanup.
 //
 // RELEASING A PRODUCER AT STAGE 2 DOES NOT PUT IT BACK ON THE SOURCE TOPOLOGY, which is what
-// makes stage 2 safe for producers as well as for the provisioner. From the FIRST CuttingOver
-// pass the ordinary reconcile applies the TARGET render to every workload this phase does not
-// hold back — including a fenced one, whose pod template is updated even at zero replicas,
-// because the fence holds .spec.replicas alone and under its own field manager. A workload
-// released here therefore starts pods on the TARGET template and publishes only to the target
-// virtual host, which the cleanup never touches.
+// makes stage 2 safe for producers as well as for the provisioner. The ordinary reconcile
+// applies the TARGET render to every workload this phase does not hold back — including a fenced
+// one, whose pod template is updated even at zero replicas, because the fence holds
+// .spec.replicas alone and under its own field manager. A workload released here therefore
+// starts pods on the TARGET template and publishes only to the target virtual host, which the
+// cleanup never touches.
+//
+// THAT IS A PRECONDITION, NOT AN ASSUMPTION, so every release CHECKS it. This phase runs ahead
+// of the reconcile's own apply and the phases before it applied the SOURCE render, so a fenced
+// workload is still on the source template until the first CuttingOver apply lands — and a
+// target topology left declared by an abandoned earlier attempt makes the very first pass
+// measure stage 2. releaseFencedWorkload therefore reads the live pod template and lifts the
+// fence only once it is the target's.
 //
 // So the invariant is NOT "no producer runs until the source topology has been reclaimed" — it
 // never was: stage 4 reopens the gateway to real user traffic, producing real messages, before
@@ -182,7 +189,7 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 		// The target render has already been applied to each — including while it was fenced —
 		// so what comes back up publishes to the target virtual host, never the source one.
 		for _, name := range cutoverPreCoreReleases {
-			if rerr := r.restoreFencedWorkload(ctx, p, name); rerr != nil {
+			if rerr := r.releaseFencedWorkload(ctx, p, name); rerr != nil {
 				res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
 				return render, true, res, aerr
 			}
@@ -193,7 +200,7 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 		// The gateway is restored BEFORE the phase moves on, so the cleanup can never inherit a
 		// platform whose door is still shut with nothing left that would open it. It is the last
 		// workload the fence holds: everything Core starts behind came back at stage 2.
-		if rerr := r.restoreFencedWorkload(ctx, p, gatewayWorkloadName); rerr != nil {
+		if rerr := r.releaseFencedWorkload(ctx, p, gatewayWorkloadName); rerr != nil {
 			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
 			return render, true, res, aerr
 		}
@@ -421,27 +428,70 @@ func (r *Reconciler) coreRolledOut(ctx context.Context, p *otilmv1alpha1.Platfor
 
 // workloadRolledOut reports whether the named workload carries the TARGET VERSION's pod
 // template — proved by the version annotation the render stamps AND by the expected image —
-// and has finished rolling out onto it, handling either workload kind (a component is rendered
-// as a Deployment by default, or a StatefulSet when its workloadType says so). A workload of
-// neither kind has not been applied yet, which is not-rolled-out rather than an error.
+// and has finished rolling out onto it. A workload that has not been applied yet is
+// not-rolled-out rather than an error.
+//
+// A WORKLOAD CONFIGURED FOR ZERO REPLICAS IS REFUSED HERE, not answered. rolloutComplete calls
+// a zero-replica workload rolled out, which is the right reading where the zero is the FENCE's
+// own — but this check is the cutover measuring progress toward SERVING, and there the zero is
+// the platform's own configuration: a Service that will never have an endpoint, an init
+// container that can never finish polling it, and a phase with no deadline waiting on the
+// result. Fenced workloads never reach this check: cutoverStage answers from fence membership
+// before it measures anything.
 func (r *Reconciler) workloadRolledOut(ctx context.Context, namespace, name, image, version string) (bool, error) {
+	live, err := r.readWorkload(ctx, namespace, name)
+	if err != nil || !live.found {
+		return false, err
+	}
+	if live.state.desired == 0 {
+		return false, workloadScaledToZero(name)
+	}
+	return podTemplateIsTarget(live.template, image, version) && rolloutComplete(live.state), nil
+}
+
+// workloadScaledToZero is what the cutover says about a component it needs SERVING that the
+// platform configures for no pods at all. It names the workload and the single action that
+// unblocks the migration — workload names and replica counts only, never a coordinate — and it
+// is deliberately a stop rather than a wait: the engine cannot know when, or whether, the
+// operator means to scale the component up.
+func workloadScaledToZero(name string) error {
+	return fmt.Errorf("the messaging migration's cutover needs workload %q to be serving before it can continue, but it is "+
+		"configured for 0 replicas, so it never will; scale that component to at least 1 replica and the migration resumes "+
+		"on its own", name)
+}
+
+// liveWorkload is what one read tells the cutover about a workload: the pod template the
+// operator's apply left on it, and the counts its controller reports. found=false means the
+// workload has not been applied yet — neither an error nor evidence of anything.
+type liveWorkload struct {
+	template *corev1.PodTemplateSpec
+	state    rolloutState
+	found    bool
+}
+
+// readWorkload reads one workload of EITHER kind (a component is rendered as a Deployment by
+// default, or a StatefulSet when its workloadType says so) and projects it onto the single shape
+// this phase measures. Both questions the cutover asks of a live workload — is the target
+// template on it, has it finished rolling onto it — are answered from this one read, so neither
+// can drift into handling the two kinds differently.
+func (r *Reconciler) readWorkload(ctx context.Context, namespace, name string) (liveWorkload, error) {
 	var dep appsv1.Deployment
 	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &dep)
 	if err == nil {
-		return podTemplateIsTarget(&dep.Spec.Template, image, version) && rolloutComplete(deploymentRolloutState(&dep)), nil
+		return liveWorkload{template: &dep.Spec.Template, state: deploymentRolloutState(&dep), found: true}, nil
 	}
 	if !apierrors.IsNotFound(err) {
-		return false, fmt.Errorf("reading Deployment %q to check the cutover rollout: %w", name, err)
+		return liveWorkload{}, fmt.Errorf("reading Deployment %q for the cutover: %w", name, err)
 	}
 
 	var sts appsv1.StatefulSet
 	if serr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sts); serr != nil {
 		if apierrors.IsNotFound(serr) {
-			return false, nil
+			return liveWorkload{}, nil
 		}
-		return false, fmt.Errorf("reading StatefulSet %q to check the cutover rollout: %w", name, serr)
+		return liveWorkload{}, fmt.Errorf("reading StatefulSet %q for the cutover: %w", name, serr)
 	}
-	return podTemplateIsTarget(&sts.Spec.Template, image, version) && rolloutComplete(statefulSetRolloutState(&sts)), nil
+	return liveWorkload{template: &sts.Spec.Template, state: statefulSetRolloutState(&sts), found: true}, nil
 }
 
 // podTemplateIsTarget reports whether a pod template is the one the TARGET version renders.
@@ -551,15 +601,67 @@ func fencedWorkloadFor(p *otilmv1alpha1.Platform, name string) (otilmv1alpha1.Fe
 	return otilmv1alpha1.FencedWorkload{}, false
 }
 
-// restoreFencedWorkload lifts the fence from ONE named workload, leaving every other fenced
-// workload exactly where it is. A workload the fence no longer holds is a no-op, so a stage
+// releaseFencedWorkload lifts the fence from ONE named workload, leaving every other fenced
+// workload exactly where it is — but only once the TARGET render has actually reached that
+// workload's pod template. A workload the fence no longer holds is a no-op, so a stage
 // re-entered after a crash repeats nothing.
-func (r *Reconciler) restoreFencedWorkload(ctx context.Context, p *otilmv1alpha1.Platform, name string) error {
+//
+// THE TEMPLATE CHECK IS THE POINT. This phase runs BEFORE the reconcile's own Server-Side Apply,
+// and every phase before it applied the SOURCE render, so a fenced workload carries the source
+// pod template until the first CuttingOver apply lands. Normally that first pass measures stage
+// 1 and the question never arises — but a target topology left declared by an abandoned earlier
+// attempt makes stage 2 the very first measurement, and a producer released there would start
+// pods on the SOURCE template and publish into the virtual host the drain has just emptied and
+// the cleanup is about to delete.
+//
+// So the live template is compared against the target's, on exactly the evidence the rollout
+// checks use, and a workload that is not on it yet stays fenced for this pass. Nothing is
+// counted or recorded: the base apply later in this same reconcile renders the target, and the
+// next pass re-measures the same stage and releases it.
+//
+// A workload that does not EXIST is released: there is no pod to start on the wrong template,
+// and the render creates it from the target bundle at the count the spec asks for.
+func (r *Reconciler) releaseFencedWorkload(ctx context.Context, p *otilmv1alpha1.Platform, name string) error {
 	w, fenced := fencedWorkloadFor(p, name)
 	if !fenced {
 		return nil
 	}
+
+	image, err := cutoverReleaseImage(p, name)
+	if err != nil {
+		return err
+	}
+	live, err := r.readWorkload(ctx, p.Namespace, name)
+	if err != nil {
+		return err
+	}
+	if live.found && !podTemplateIsTarget(live.template, image, migrationTargetVersion(p)) {
+		// Workload name and phase only: neither is a broker coordinate.
+		log.FromContext(ctx).V(1).Info("messaging migration cutover: a fenced workload stays held until the target render reaches it",
+			"phase", otilmv1alpha1.MigrationPhaseCuttingOver, "workload", name)
+		return nil
+	}
 	return r.restoreWorkload(ctx, p, w)
+}
+
+// cutoverReleaseImage resolves the image the render pins for a workload the cutover releases —
+// the corroborating half of "the target render has reached this workload".
+//
+// An unknown name is an ERROR rather than an empty answer. An empty image can never match a
+// template, so a workload nobody taught this function about would be one the cutover held fenced
+// forever, silently; adding a name to cutoverPreCoreReleases has to be paired with a case here.
+func cutoverReleaseImage(p *otilmv1alpha1.Platform, name string) (string, error) {
+	switch name {
+	case provisioningWorkloadName:
+		return platformbuilder.ResolveProvisioning(p).Image, nil
+	case schedulerWorkloadName:
+		return platformbuilder.ResolveScheduler(p).Image, nil
+	case gatewayWorkloadName:
+		return platformbuilder.ResolveGateway(p).Image, nil
+	default:
+		return "", fmt.Errorf("the messaging migration's cutover cannot resolve the rendered image for workload %q, "+
+			"so it cannot tell whether the target render has reached it", name)
+	}
 }
 
 // recordCutoverStage persists the stage the cutover has reached, before the step that stage
