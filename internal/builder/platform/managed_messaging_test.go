@@ -98,41 +98,7 @@ func renderedNames(t *testing.T, objs []client.Object) []string {
 func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
 	t.Run("default bundle (2.18.0)", func(t *testing.T) {
 		p := managedMQPlatform(nil) // vhost unset -> the 2.18.0 bundle default
-		assert.Equal(t, []string{
-			"ilm-messaging",
-			"ilm-messaging-administrator",
-			"ilm-messaging-administrator-permission",
-			"ilm-messaging-binding-czertainly-core-actions",
-			"ilm-messaging-binding-czertainly-core-audit-logs",
-			"ilm-messaging-binding-czertainly-core-events",
-			"ilm-messaging-binding-czertainly-core-notifications",
-			"ilm-messaging-binding-czertainly-core-scheduler",
-			"ilm-messaging-binding-czertainly-core-validation",
-			"ilm-messaging-binding-czertainly-time-quality-config",
-			"ilm-messaging-binding-czertainly-time-quality-config-request",
-			"ilm-messaging-binding-czertainly-time-quality-results",
-			"ilm-messaging-core",
-			"ilm-messaging-core-permission",
-			"ilm-messaging-exchange-czertainly",
-			"ilm-messaging-exchange-czertainly-proxy",
-			"ilm-messaging-monitor",
-			"ilm-messaging-monitor-permission",
-			"ilm-messaging-provisioner",
-			"ilm-messaging-provisioner-permission",
-			"ilm-messaging-proxy",
-			"ilm-messaging-proxy-permission",
-			"ilm-messaging-queue-core",
-			"ilm-messaging-queue-core-actions",
-			"ilm-messaging-queue-core-audit-logs",
-			"ilm-messaging-queue-core-events",
-			"ilm-messaging-queue-core-notifications",
-			"ilm-messaging-queue-core-scheduler",
-			"ilm-messaging-queue-core-validation",
-			"ilm-messaging-queue-time-quality-config",
-			"ilm-messaging-queue-time-quality-config-request",
-			"ilm-messaging-queue-time-quality-results",
-			"ilm-messaging-vhost",
-		}, renderedNames(t, ResolveManagedMessaging(p)))
+		assert.Equal(t, frozenUnscopedTopologyNames, renderedNames(t, ResolveManagedMessaging(p)))
 	})
 
 	t.Run("2.17.0 bundle", func(t *testing.T) {
@@ -168,51 +134,56 @@ func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
 // it never migrates, and so it never needs a disjoint name. Never relax this test: a
 // user-pinned vhost must map to an EMPTY scope, unconditionally.
 func TestUserPinnedVhostTopologyNamesAreFrozen(t *testing.T) {
-	want := []string{
-		"ilm-messaging",
-		"ilm-messaging-administrator",
-		"ilm-messaging-administrator-permission",
-		"ilm-messaging-binding-czertainly-core-actions",
-		"ilm-messaging-binding-czertainly-core-audit-logs",
-		"ilm-messaging-binding-czertainly-core-events",
-		"ilm-messaging-binding-czertainly-core-notifications",
-		"ilm-messaging-binding-czertainly-core-scheduler",
-		"ilm-messaging-binding-czertainly-core-validation",
-		"ilm-messaging-binding-czertainly-time-quality-config",
-		"ilm-messaging-binding-czertainly-time-quality-config-request",
-		"ilm-messaging-binding-czertainly-time-quality-results",
-		"ilm-messaging-core",
-		"ilm-messaging-core-permission",
-		"ilm-messaging-exchange-czertainly",
-		"ilm-messaging-exchange-czertainly-proxy",
-		"ilm-messaging-monitor",
-		"ilm-messaging-monitor-permission",
-		"ilm-messaging-provisioner",
-		"ilm-messaging-provisioner-permission",
-		"ilm-messaging-proxy",
-		"ilm-messaging-proxy-permission",
-		"ilm-messaging-queue-core",
-		"ilm-messaging-queue-core-actions",
-		"ilm-messaging-queue-core-audit-logs",
-		"ilm-messaging-queue-core-events",
-		"ilm-messaging-queue-core-notifications",
-		"ilm-messaging-queue-core-scheduler",
-		"ilm-messaging-queue-core-validation",
-		"ilm-messaging-queue-time-quality-config",
-		"ilm-messaging-queue-time-quality-config-request",
-		"ilm-messaging-queue-time-quality-results",
-		"ilm-messaging-vhost",
-	}
-
 	t.Run("custom vhost on the 2.18.0 bundle", func(t *testing.T) {
 		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = "myvhost" })
-		assert.Equal(t, want, renderedNames(t, ResolveManagedMessaging(p)))
+		assert.Equal(t, frozenUnscopedTopologyNames, renderedNames(t, ResolveManagedMessaging(p)))
 	})
 
 	t.Run(`vhost pinned to "/" on the 2.18.0 bundle`, func(t *testing.T) {
 		p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.VirtualHost = "/" })
-		assert.Equal(t, want, renderedNames(t, ResolveManagedMessaging(p)))
+		assert.Equal(t, frozenUnscopedTopologyNames, renderedNames(t, ResolveManagedMessaging(p)))
 	})
+}
+
+// frozenUnscopedTopologyNames is the EXACT set of topology CR names an operator predating
+// vhost-scoped naming applied on the 2.18.0 bundle, spelled out in full so a rename is a diff
+// rather than a derivation. Both freezes above assert against this one list because they are
+// the same freeze reached two ways — the legacy vhost, and a user-pinned one — and a list that
+// existed twice could be relaxed on one side alone.
+var frozenUnscopedTopologyNames = []string{
+	"ilm-messaging",
+	"ilm-messaging-administrator",
+	"ilm-messaging-administrator-permission",
+	"ilm-messaging-binding-czertainly-core-actions",
+	"ilm-messaging-binding-czertainly-core-audit-logs",
+	"ilm-messaging-binding-czertainly-core-events",
+	"ilm-messaging-binding-czertainly-core-notifications",
+	"ilm-messaging-binding-czertainly-core-scheduler",
+	"ilm-messaging-binding-czertainly-core-validation",
+	"ilm-messaging-binding-czertainly-time-quality-config",
+	"ilm-messaging-binding-czertainly-time-quality-config-request",
+	"ilm-messaging-binding-czertainly-time-quality-results",
+	"ilm-messaging-core",
+	"ilm-messaging-core-permission",
+	"ilm-messaging-exchange-czertainly",
+	"ilm-messaging-exchange-czertainly-proxy",
+	"ilm-messaging-monitor",
+	"ilm-messaging-monitor-permission",
+	"ilm-messaging-provisioner",
+	"ilm-messaging-provisioner-permission",
+	"ilm-messaging-proxy",
+	"ilm-messaging-proxy-permission",
+	"ilm-messaging-queue-core",
+	"ilm-messaging-queue-core-actions",
+	"ilm-messaging-queue-core-audit-logs",
+	"ilm-messaging-queue-core-events",
+	"ilm-messaging-queue-core-notifications",
+	"ilm-messaging-queue-core-scheduler",
+	"ilm-messaging-queue-core-validation",
+	"ilm-messaging-queue-time-quality-config",
+	"ilm-messaging-queue-time-quality-config-request",
+	"ilm-messaging-queue-time-quality-results",
+	"ilm-messaging-vhost",
 }
 
 // namesOfKinds returns the sorted metadata.names of the rendered objects whose Kind is one
@@ -455,7 +426,7 @@ func TestResolveManagedMessagingUsers(t *testing.T) {
 		tags []string
 	}
 	wants := []want{
-		{"ilm-messaging-administrator", []string{"administrator"}},
+		{testMessagingAdminUser, []string{"administrator"}},
 		{"ilm-messaging-provisioner", []string{"administrator"}},
 		{"ilm-messaging-proxy", nil},
 		{"ilm-messaging-core", nil},
@@ -491,7 +462,7 @@ func TestResolveManagedMessagingPermissions(t *testing.T) {
 		configure, write, read string
 	}
 	wants := []want{
-		{"ilm-messaging-administrator-permission", "ilm-messaging-administrator", ".*", ".*", ".*"},
+		{testMessagingAdminPerm, testMessagingAdminUser, ".*", ".*", ".*"},
 		{"ilm-messaging-provisioner-permission", "ilm-messaging-provisioner", ".*", ".*", ".*"},
 		{"ilm-messaging-proxy-permission", "ilm-messaging-proxy", "", "^czertainly-proxy$", `^proxy\..*$`},
 		// Core's read MUST include the time-quality monitor's request/result queues (2.18.0) —

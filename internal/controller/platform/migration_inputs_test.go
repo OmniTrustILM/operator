@@ -76,7 +76,7 @@ func TestMigrationInputDriftBlocksTheMigration(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining,
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 			r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
 
 			// The edit lands after the migration was recorded — a GitOps push mid-flight.
@@ -95,7 +95,7 @@ func TestMigrationInputDriftBlocksTheMigration(t *testing.T) {
 			assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, stored.Status.Upgrade.Phase,
 				"a migration whose inputs moved may not advance a phase")
 			assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
-			assert.Equal(t, int32(0), replicasOf(t, r, "scheduler"), "and the fence stays exactly as it was")
+			assert.Equal(t, int32(0), replicasOf(t, r, schedulerWorkloadName), "and the fence stays exactly as it was")
 
 			cond := migrationCondition(stored)
 			require.NotNil(t, cond)
@@ -153,7 +153,7 @@ func TestMigrationInputFingerprintKeepsCoordinatesOut(t *testing.T) {
 // it was never given.
 func TestMigrationInputsAreAdoptedWhenUnrecorded(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining,
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
 
 	adopted := storedPlatform(t, r)

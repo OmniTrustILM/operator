@@ -83,19 +83,19 @@ func (b *brokerAdminRegistry) factory(_, username, _ string) rabbitmq.BrokerAdmi
 type unreachableBroker struct{}
 
 func (unreachableBroker) Queues(context.Context, string) ([]rabbitmq.QueueState, error) {
-	return nil, errors.New("no broker is reachable")
+	return nil, errors.New(errNoBrokerReachable)
 }
 
 func (unreachableBroker) BoundQueues(context.Context, string, string) ([]string, error) {
-	return nil, errors.New("no broker is reachable")
+	return nil, errors.New(errNoBrokerReachable)
 }
 
 func (unreachableBroker) Connections(context.Context, string) (int, error) {
-	return 0, errors.New("no broker is reachable")
+	return 0, errors.New(errNoBrokerReachable)
 }
 
 func (unreachableBroker) CloseConnections(context.Context, string) error {
-	return errors.New("no broker is reachable")
+	return errors.New(errNoBrokerReachable)
 }
 
 // advanceDrainPollClock back-dates the recorded next-poll floor so the following reconcile is

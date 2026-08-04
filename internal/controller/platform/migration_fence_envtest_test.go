@@ -200,12 +200,12 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("waiting for the producers to be applied with their configured counts")
 			var sched appsv1.Deployment
-			awaitWorkload(ns, "scheduler", &sched)
+			awaitWorkload(ns, schedulerWorkloadName, &sched)
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(3)))
 			var gw appsv1.Deployment
-			awaitWorkload(ns, "api-gateway", &gw)
+			awaitWorkload(ns, gatewayWorkloadName, &gw)
 
 			By("fencing the producers: the complete record is written before the first patch")
 			startMigration(ns)
@@ -213,30 +213,30 @@ var _ = Describe("Messaging migration fence", func() {
 
 			recorded := getPlatform(ns).Status.Upgrade.Fenced
 			Expect(recorded).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 			), "the fence must record each workload's kind and the count it carried")
 
 			By("holding the scheduler at zero across five reconciles")
-			expectFenceHoldsAcrossReconciles(ns, "Deployment", "scheduler")
-			Expect(workloadSpecReplicas(ns, "Deployment", "api-gateway")).To(BeZero(),
+			expectFenceHoldsAcrossReconciles(ns, kindDeployment, schedulerWorkloadName)
+			Expect(workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)).To(BeZero(),
 				"every fenced producer is held down, not just the first")
 
 			By("attributing .spec.replicas to the fence's own field manager")
-			Expect(replicasFieldOwners(ns, "Deployment", "scheduler")).To(ConsistOf(fenceFieldManagerName),
+			Expect(replicasFieldOwners(ns, kindDeployment, schedulerWorkloadName)).To(ConsistOf(fenceFieldManagerName),
 				"the fence — and nothing else — must own the fenced workload's replica count")
 
 			By("restoring the exact recorded count and clearing the entry")
-			restored := otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}
+			restored := otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}
 			restoreProducer(ns, restored)
-			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(Equal(int32(3)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(Equal(int32(3)))
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
 			), "only the restored workload leaves the list")
 
 			By("re-entering a completed restore (crash-safety): idempotent, no second effect")
 			restoreProducer(ns, restored)
-			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(Equal(int32(3)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(Equal(int32(3)))
 
 			By("handing .spec.replicas back to the operator's apply once the entry is gone")
 			reconcileOnce(ns)
@@ -247,11 +247,11 @@ var _ = Describe("Messaging migration fence", func() {
 			// is harmless: the fence writes only for workloads still on the list, and the next
 			// value the apply changes takes the field outright.
 			Eventually(func() []string {
-				return replicasFieldOwners(ns, "Deployment", "scheduler")
+				return replicasFieldOwners(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(ContainElement("ilm-operator"),
 				"a workload removed from the list is rendered with its replicas again")
-			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(Equal(int32(3)))
-			Expect(workloadSpecReplicas(ns, "Deployment", "api-gateway")).To(BeZero(),
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(Equal(int32(3)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)).To(BeZero(),
 				"the still-listed workload is unaffected by another's restore")
 		})
 
@@ -265,24 +265,24 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("waiting for the gateway StatefulSet")
 			var gw appsv1.StatefulSet
-			awaitWorkload(ns, "api-gateway", &gw)
+			awaitWorkload(ns, gatewayWorkloadName, &gw)
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "StatefulSet", "api-gateway")
+				return workloadSpecReplicas(ns, kindStatefulSet, gatewayWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(2)))
 
 			By("fencing it as a StatefulSet")
 			startMigration(ns)
 			fenceProducers(ns)
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ContainElement(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindStatefulSet, Replicas: 2},
 			), "the effective workload kind must be recorded, not assumed")
 
-			expectFenceHoldsAcrossReconciles(ns, "StatefulSet", "api-gateway")
-			Expect(replicasFieldOwners(ns, "StatefulSet", "api-gateway")).To(ConsistOf(fenceFieldManagerName))
+			expectFenceHoldsAcrossReconciles(ns, kindStatefulSet, gatewayWorkloadName)
+			Expect(replicasFieldOwners(ns, kindStatefulSet, gatewayWorkloadName)).To(ConsistOf(fenceFieldManagerName))
 
 			By("restoring the StatefulSet's recorded count")
-			restoreProducer(ns, otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2})
-			Expect(workloadSpecReplicas(ns, "StatefulSet", "api-gateway")).To(Equal(int32(2)))
+			restoreProducer(ns, otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindStatefulSet, Replicas: 2})
+			Expect(workloadSpecReplicas(ns, kindStatefulSet, gatewayWorkloadName)).To(Equal(int32(2)))
 		})
 
 		It("holds an HPA-configured component at zero (the operator never re-asserts a count)", func() {
@@ -298,7 +298,7 @@ var _ = Describe("Messaging migration fence", func() {
 
 			By("waiting for the HPA-owned scheduler Deployment")
 			var sched appsv1.Deployment
-			awaitWorkload(ns, "scheduler", &sched)
+			awaitWorkload(ns, schedulerWorkloadName, &sched)
 
 			By("fencing the HPA-owned component")
 			startMigration(ns)
@@ -307,14 +307,14 @@ var _ = Describe("Messaging migration fence", func() {
 			// The count under an HPA is whatever the cluster currently runs, which is what
 			// restore must put back — the fence records the LIVE value rather than a spec one.
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ContainElement(
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 1},
 			))
 
 			// envtest runs no HPA controller, so this pins the half of the assumption the
 			// operator is responsible for: with autoscaling configured, neither the render nor
 			// the apply ever writes a replica count over the fence's zero.
-			expectFenceHoldsAcrossReconciles(ns, "Deployment", "scheduler")
-			Expect(replicasFieldOwners(ns, "Deployment", "scheduler")).To(ConsistOf(fenceFieldManagerName),
+			expectFenceHoldsAcrossReconciles(ns, kindDeployment, schedulerWorkloadName)
+			Expect(replicasFieldOwners(ns, kindDeployment, schedulerWorkloadName)).To(ConsistOf(fenceFieldManagerName),
 				"the fence owns .spec.replicas outright even where an HPA is configured")
 		})
 	})

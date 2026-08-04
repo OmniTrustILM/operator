@@ -68,9 +68,15 @@ const (
 	testQueueTQResults   = "time-quality.results"
 	testQueueTQConfigReq = "time-quality.config-request"
 	testQueueTQConfig    = "time-quality.config"
+	// The administrator User and its Permission, referenced by the per-user expectation tables
+	// (the frozen name lists spell every name out on purpose and are left literal).
+	testMessagingAdminUser = "ilm-messaging-administrator"
+	testMessagingAdminPerm = "ilm-messaging-administrator-permission"
 
 	// messaging_connection_test.go.
 	testILMMQ = "ilm-mq"
+	// testExternalMQHost is the broker host an external-messaging spec carries.
+	testExternalMQHost = "rabbitmq.example.com"
 
 	// platform_host_test.go.
 	testHTTPSScheme  = "https://"
@@ -104,12 +110,15 @@ const (
 	testMQWaitLoop        = `while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done`
 	testCurlImage         = "hub.omnitrustregistry.com/ilm/curl:8.16.0"
 	testProvInstanceQueue = "provision-instance-queue"
-	testTrustedCerts      = "trusted-certificates"
-	testEphemeralMsg      = "ephemeral volume must be present"
-	testLivenessMsg       = "liveness probe disabled by default"
-	testConfigJS          = "config.js"
-	testCABundle          = "ca-bundle"
-	testTLSCA             = "tls-ca"
+	// testProvInstanceQueueMsg is the assertion message every proxy+provisioning render case
+	// shares.
+	testProvInstanceQueueMsg = "provision-instance-queue must render on the proxy+provisioning path"
+	testTrustedCerts         = "trusted-certificates"
+	testEphemeralMsg         = "ephemeral volume must be present"
+	testLivenessMsg          = "liveness probe disabled by default"
+	testConfigJS             = "config.js"
+	testCABundle             = "ca-bundle"
+	testTLSCA                = "tls-ca"
 
 	// trustedcerts_test.go.
 	testMyTrust = "my-trust"

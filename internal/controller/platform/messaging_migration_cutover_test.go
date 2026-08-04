@@ -205,15 +205,15 @@ func retargetWorkload(t *testing.T, r *Reconciler, name, image, version string) 
 // fencedProvisioning / fencedGateway / fencedScheduler are the fence records the drain hands the
 // cutover: the three producers, at the counts restore must write back.
 func fencedProvisioning() otilmv1alpha1.FencedWorkload {
-	return otilmv1alpha1.FencedWorkload{Name: provisioningWorkloadName, Kind: "Deployment", Replicas: 2}
+	return otilmv1alpha1.FencedWorkload{Name: provisioningWorkloadName, Kind: kindDeployment, Replicas: 2}
 }
 
 func fencedGateway() otilmv1alpha1.FencedWorkload {
-	return otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: "Deployment", Replicas: 3}
+	return otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 3}
 }
 
 func fencedScheduler() otilmv1alpha1.FencedWorkload {
-	return otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: "Deployment", Replicas: 1}
+	return otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 1}
 }
 
 // rolledOutScheduler is the scheduler as stage 2 leaves it: released, on the target template and
@@ -736,27 +736,11 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			)
 			r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
-			// Three passes on a reconciler that carries nothing from the one before: the
-			// operator restarting, over and over, at the same stage boundary.
-			var render migrationRender
-			for i := 0; i < 3; i++ {
-				var err error
-				render, _, _, err = cutoverPass(t, r)
-				require.NoError(t, err)
-			}
+			render := repeatedCutoverPasses(t, r, 3)
 
 			stored := storedPlatform(t, r)
 			if tc.wantHandedOver {
-				assert.Nil(t, stored.Status.Upgrade, "the hand-over led on to a cleanup with nothing to reclaim")
-				assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName),
-					"the door was reopened once, at the count the fence recorded")
-				handOvers := 0
-				for _, e := range drainEvents(rec) {
-					if strings.Contains(e, eventMigrationPhase) {
-						handOvers++
-					}
-				}
-				assert.Equal(t, 1, handOvers, "a repeated pass announces no second hand-over")
+				assertHandedOverExactlyOnce(t, r, rec, stored)
 			} else {
 				assert.Equal(t, tc.wantPhase, stored.Status.Upgrade.Phase)
 				assert.Equal(t, tc.wantFenced, stored.Status.Upgrade.Fenced)
@@ -767,6 +751,38 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			assert.Equal(t, int32(2), replicasOf(t, r, provisioningWorkloadName))
 		})
 	}
+}
+
+// repeatedCutoverPasses runs the gate n times on a reconciler that carries nothing from the pass
+// before — the operator restarting, over and over, at the same stage boundary — and returns the
+// last render.
+func repeatedCutoverPasses(t *testing.T, r *Reconciler, n int) migrationRender {
+	t.Helper()
+	var render migrationRender
+	for i := 0; i < n; i++ {
+		var err error
+		render, _, _, err = cutoverPass(t, r)
+		require.NoError(t, err)
+	}
+	return render
+}
+
+// assertHandedOverExactlyOnce is what the repeated passes must leave behind once the cutover is
+// already past: a finished migration, a door reopened at the recorded count, and ONE hand-over
+// announcement however many times the pass ran.
+func assertHandedOverExactlyOnce(t *testing.T, r *Reconciler, rec *record.FakeRecorder, stored *otilmv1alpha1.Platform) {
+	t.Helper()
+	assert.Nil(t, stored.Status.Upgrade, "the hand-over led on to a cleanup with nothing to reclaim")
+	assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName),
+		"the door was reopened once, at the count the fence recorded")
+
+	handOvers := 0
+	for _, e := range drainEvents(rec) {
+		if strings.Contains(e, eventMigrationPhase) {
+			handOvers++
+		}
+	}
+	assert.Equal(t, 1, handOvers, "a repeated pass announces no second hand-over")
 }
 
 // --- the failure paths -------------------------------------------------------

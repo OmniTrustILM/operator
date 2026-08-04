@@ -98,9 +98,9 @@ func markRolledOut(ns, name string) {
 // counts restore has to write back.
 func cutoverFence() []otilmv1alpha1.FencedWorkload {
 	return []otilmv1alpha1.FencedWorkload{
-		{Name: gatewayWorkloadName, Kind: "Deployment", Replicas: 1},
-		{Name: schedulerWorkloadName, Kind: "Deployment", Replicas: 1},
-		{Name: provisioningWorkloadName, Kind: "Deployment", Replicas: 1},
+		{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 1},
+		{Name: provisioningWorkloadName, Kind: kindDeployment, Replicas: 1},
 	}
 }
 
@@ -143,8 +143,8 @@ var _ = Describe("Messaging migration cutover", func() {
 				g.Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseCuttingOver))
 				g.Expect(u.Fenced).To(ConsistOf(cutoverFence()))
 			}, "2s", platformInterval).Should(Succeed())
-			Expect(workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)).To(BeZero())
-			Expect(workloadSpecReplicas(ns, "Deployment", provisioningWorkloadName)).To(BeZero())
+			Expect(workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)).To(BeZero())
+			Expect(workloadSpecReplicas(ns, kindDeployment, provisioningWorkloadName)).To(BeZero())
 
 			By("reporting the stage it is waiting on, without leaking a coordinate")
 			cond := migrationConditionOf(ns)
@@ -207,12 +207,12 @@ var _ = Describe("Messaging migration cutover", func() {
 			Eventually(func() []otilmv1alpha1.FencedWorkload {
 				return getPlatform(ns).Status.Upgrade.Fenced
 			}, platformTimeout, platformInterval).Should(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: "Deployment", Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
 			), "only the door is still shut")
-			Expect(workloadSpecReplicas(ns, "Deployment", provisioningWorkloadName)).To(Equal(int32(1)))
-			Expect(workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)).To(Equal(int32(1)),
+			Expect(workloadSpecReplicas(ns, kindDeployment, provisioningWorkloadName)).To(Equal(int32(1)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(Equal(int32(1)),
 				"the scheduler is back up on the TARGET template, publishing only to the target topology")
-			Expect(workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)).To(BeZero(),
+			Expect(workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)).To(BeZero(),
 				"the door stays shut until the platform is actually serving from the target")
 
 			By("holding the hand-over until Core is Ready ON THE TARGET ROLLOUT")
@@ -240,10 +240,10 @@ var _ = Describe("Messaging migration cutover", func() {
 			}, platformTimeout, platformInterval).Should(Succeed())
 
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)
+				return workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)), "the door is reopened at its recorded count")
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)),
 				"the scheduler stays up on the target template, as it has been since stage 2")
 
@@ -253,7 +253,7 @@ var _ = Describe("Messaging migration cutover", func() {
 			}
 			Expect(getPlatform(ns).Status.Upgrade).To(BeNil())
 			Expect(getPlatform(ns).Status.ObservedVersion).To(Equal(platformVersion219))
-			Expect(workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)).To(Equal(int32(1)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)).To(Equal(int32(1)))
 		})
 	})
 })

@@ -163,9 +163,9 @@ func sourceQueueListing(extra ...rabbitmq.QueueState) []rabbitmq.QueueState {
 		emptyQueue("core.scheduler"),
 		emptyQueue("core.actions"),
 		emptyQueue("core.validation"),
-		emptyQueue("core.events"),
+		emptyQueue(testQueueCoreEvents),
 		emptyQueue("time-quality.results"),
-		{Name: "time-quality.config", MessagesReady: 1},
+		{Name: testQueueTQConfig, MessagesReady: 1},
 		{Name: "time-quality.config-request", MessagesReady: 1},
 	}
 	return append(listing, extra...)
@@ -207,7 +207,7 @@ func drainPass(t *testing.T, r *Reconciler) (migrationRender, bool, ctrl.Result,
 // producer already fenced.
 func drainingPlatform(polls int32) *otilmv1alpha1.Platform {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining,
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	p.Status.Upgrade.CleanDrainPolls = polls
 	return p
 }
@@ -327,12 +327,12 @@ func TestDrainResetsTheCountOnADirtyQueue(t *testing.T) {
 		name  string
 		queue rabbitmq.QueueState
 	}{
-		{name: "messages still ready", queue: rabbitmq.QueueState{Name: "core.events", MessagesReady: 4}},
+		{name: "messages still ready", queue: rabbitmq.QueueState{Name: testQueueCoreEvents, MessagesReady: 4}},
 		{
 			name: "messages delivered but unacknowledged",
 			// A consumer that dies hands these straight back to ready, so they are still in the
 			// virtual host the migration is about to reclaim.
-			queue: rabbitmq.QueueState{Name: "core.events", MessagesUnacked: 1},
+			queue: rabbitmq.QueueState{Name: testQueueCoreEvents, MessagesUnacked: 1},
 		},
 	}
 	for _, tc := range cases {
@@ -358,7 +358,7 @@ func TestDrainResetsTheCountOnADirtyQueue(t *testing.T) {
 func TestDrainIgnoresLatestOnlyRetentionQueues(t *testing.T) {
 	p := drainingPlatform(migrationCleanDrainPolls - 1)
 	listing := sourceQueueListing()
-	listing[8] = rabbitmq.QueueState{Name: "time-quality.config", MessagesReady: 1}
+	listing[8] = rabbitmq.QueueState{Name: testQueueTQConfig, MessagesReady: 1}
 	listing[9] = rabbitmq.QueueState{Name: "time-quality.config-request", MessagesReady: 1}
 	r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{queues: listing}, interceptor.Funcs{})
 
@@ -376,8 +376,8 @@ func TestDrainDiscoversDynamicQueuesByBindingNotByName(t *testing.T) {
 	t.Run("a bound queue still holding messages blocks the drain", func(t *testing.T) {
 		p := drainingPlatform(migrationCleanDrainPolls - 1)
 		admin := &fakeBrokerAdmin{
-			queues: sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f", MessagesReady: 2}),
-			bound:  map[string][]string{sourceProxyExchange: {"instance-7a3f"}},
+			queues: sourceQueueListing(rabbitmq.QueueState{Name: testQueueInstanceHex, MessagesReady: 2}),
+			bound:  map[string][]string{sourceProxyExchange: {testQueueInstanceHex}},
 		}
 		r, _, _ := drainReconciler(t, p, admin, interceptor.Funcs{})
 
@@ -412,8 +412,8 @@ func TestDrainDiscoversDynamicQueuesByBindingNotByName(t *testing.T) {
 func TestDrainAdvancesWithLiveConsumersOnDynamicQueues(t *testing.T) {
 	p := drainingPlatform(0)
 	admin := &fakeBrokerAdmin{
-		queues:      sourceQueueListing(rabbitmq.QueueState{Name: "instance-7a3f"}),
-		bound:       map[string][]string{sourceProxyExchange: {"instance-7a3f"}},
+		queues:      sourceQueueListing(rabbitmq.QueueState{Name: testQueueInstanceHex}),
+		bound:       map[string][]string{sourceProxyExchange: {testQueueInstanceHex}},
 		connections: 3,
 	}
 	r, _, _ := drainReconciler(t, p, admin, interceptor.Funcs{})
@@ -450,7 +450,7 @@ func TestDrainTimeoutRestoresTheFence(t *testing.T) {
 	assert.Equal(t, platformVersion218, render.version)
 	assert.False(t, render.requeue, "nothing will change until the user chooses an exit")
 
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the fence is lifted at the deadline")
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "the fence is lifted at the deadline")
 	assert.Empty(t, admin.callLog(), "an expired phase does not poll: it has already stopped waiting")
 
 	stored := storedPlatform(t, r)
@@ -481,7 +481,7 @@ func TestDrainTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 		assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
 		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r),
 			"the authorisation proceeds past a virtual host that never drained")
-		assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+		assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}},
 			fenced(storedPlatform(t, r)), "an already-held fence is left exactly as it was")
 
 		events := strings.Join(drainEvents(rec), " ")
@@ -500,11 +500,11 @@ func TestDrainTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 		assert.True(t, handled)
 		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r))
 		assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
-			{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-			{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+			{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+			{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 		}, fenced(storedPlatform(t, r)), "the producers the block released are stopped again before the cutover")
-		assert.Zero(t, replicasOf(t, r, "api-gateway"))
-		assert.Zero(t, replicasOf(t, r, "scheduler"))
+		assert.Zero(t, replicasOf(t, r, gatewayWorkloadName))
+		assert.Zero(t, replicasOf(t, r, schedulerWorkloadName))
 	})
 }
 
@@ -523,7 +523,7 @@ func TestDrainTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
 	assert.False(t, handled)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r),
 		"a stale authorisation may not move the migration on")
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the fence is lifted, as it is with no authorisation at all")
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "the fence is lifted, as it is with no authorisation at all")
 
 	cond := migrationCondition(storedPlatform(t, r))
 	require.NotNil(t, cond)
@@ -547,7 +547,7 @@ func TestForceBeforeTheDeadlineStillWaitsForACleanDrain(t *testing.T) {
 	assert.Equal(t, platformVersion218, render.version, "the platform still serves its source version")
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r))
 	assert.Zero(t, storedPolls(t, r), "the queue that still holds messages is not counted as clean")
-	assert.Zero(t, replicasOf(t, r, "scheduler"), "the producers stay fenced")
+	assert.Zero(t, replicasOf(t, r, schedulerWorkloadName), "the producers stay fenced")
 	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
 }
 
@@ -559,7 +559,12 @@ func TestMigrationForceCutoverAuthorized(t *testing.T) {
 		mutate func(*otilmv1alpha1.Platform)
 		want   bool
 	}{
-		{name: "unset", mutate: func(*otilmv1alpha1.Platform) {}},
+		{
+			name: "unset",
+			mutate: func(*otilmv1alpha1.Platform) {
+				// Deliberately empty: leaving the field unset is the case under test.
+			},
+		},
 		{
 			name:   "naming this migration's target",
 			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219 },
@@ -734,12 +739,16 @@ func TestSourceBrokerAdminFailsClosed(t *testing.T) {
 			objects: []client.Object{administratorSecret()},
 		},
 		{
-			name:   "the administrator credentials Secret does not exist",
-			mutate: func(*otilmv1alpha1.Platform) {},
+			name: "the administrator credentials Secret does not exist",
+			mutate: func(*otilmv1alpha1.Platform) {
+				// Deliberately empty: this row varies the objects beside the spec, not the spec.
+			},
 		},
 		{
-			name:   "the Secret carries no password",
-			mutate: func(*otilmv1alpha1.Platform) {},
+			name: "the Secret carries no password",
+			mutate: func(*otilmv1alpha1.Platform) {
+				// Deliberately empty: this row varies the objects beside the spec, not the spec.
+			},
 			objects: []client.Object{&corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: adminSecretName, Namespace: migrationTestNS},
 				Data:       map[string][]byte{"username": []byte(adminUsername)},
@@ -794,17 +803,17 @@ func TestMigrationDrainableQueues(t *testing.T) {
 
 	assert.ElementsMatch(t, []string{
 		"core", "core.audit-logs", "core.notifications", "core.scheduler",
-		"core.actions", "core.validation", "core.events", "time-quality.results",
+		"core.actions", "core.validation", testQueueCoreEvents, "time-quality.results",
 	}, migrationDrainableQueues(source, nil))
 
 	t.Run("dynamic queues are added, and never duplicated", func(t *testing.T) {
-		got := migrationDrainableQueues(source, []string{"instance-1", "instance-1", "core.events"})
-		assert.Contains(t, got, "instance-1")
+		got := migrationDrainableQueues(source, []string{testQueueInstanceOne, testQueueInstanceOne, testQueueCoreEvents})
+		assert.Contains(t, got, testQueueInstanceOne)
 		assert.Len(t, got, 9, "the repeat and the queue the bundle already lists add nothing")
 	})
 
 	t.Run("a bound retention queue stays exempt", func(t *testing.T) {
-		assert.NotContains(t, migrationDrainableQueues(source, []string{"time-quality.config"}), "time-quality.config",
+		assert.NotContains(t, migrationDrainableQueues(source, []string{testQueueTQConfig}), testQueueTQConfig,
 			"the exemption is a property of the queue, not of how it was discovered")
 	})
 }
@@ -833,10 +842,10 @@ func TestMigrationProxyExchangeIsFoundByType(t *testing.T) {
 	}
 	for version, want := range cases {
 		t.Run(version, func(t *testing.T) {
-			admin := &fakeBrokerAdmin{bound: map[string][]string{want: {"instance-1"}}}
+			admin := &fakeBrokerAdmin{bound: map[string][]string{want: {testQueueInstanceOne}}}
 			bound, err := boundProxyQueues(context.Background(), admin, bundleFor(t, version), sourceVirtualHost)
 			require.NoError(t, err)
-			assert.Equal(t, []string{"instance-1"}, bound)
+			assert.Equal(t, []string{testQueueInstanceOne}, bound)
 		})
 	}
 
@@ -886,7 +895,7 @@ func TestDrainStopsWhenItsProgressCannotBeRecorded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := drainingPlatform(tc.polls)
 			r, _, _ := drainReconciler(t, p, &fakeBrokerAdmin{queues: tc.listing},
-				failingStatusUpdate(errors.New("status write rejected")))
+				failingStatusUpdate(errors.New(errStatusWriteRejected)))
 
 			_, handled, _, err := r.gateMessagingMigration(context.Background(), p, bundleFor(t, platformVersion219), platformVersion219)
 			require.Error(t, err, "a write the cluster refused must surface")
@@ -900,7 +909,7 @@ func TestDrainStopsWhenItsProgressCannotBeRecorded(t *testing.T) {
 func TestForcedCutoverStopsOnAFailedStep(t *testing.T) {
 	cases := map[string]interceptor.Funcs{
 		"the producers cannot be stopped again": failingPatch(errors.New("patch rejected")),
-		"the hand-over cannot be recorded":      failingStatusUpdate(errors.New("status write rejected")),
+		"the hand-over cannot be recorded":      failingStatusUpdate(errors.New(errStatusWriteRejected)),
 	}
 	for name, funcs := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -946,7 +955,7 @@ func TestWriteCleanDrainPollsRecordsTheSampleAndItsFloor(t *testing.T) {
 	assert.False(t, migrationDrainPollDue(storedPlatform(t, r), time.Now()), "the next pass must wait")
 
 	refusing, _, _ := drainReconciler(t, drainingPlatform(0), &fakeBrokerAdmin{},
-		failingStatusUpdate(errors.New("status write rejected")))
+		failingStatusUpdate(errors.New(errStatusWriteRejected)))
 	q := storedPlatform(t, refusing)
 	err := refusing.writeCleanDrainPolls(context.Background(), q, 1)
 	require.Error(t, err)

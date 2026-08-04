@@ -266,51 +266,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Finalizer + deletion handling FIRST — and BEFORE any spec defaulting: the
-	// finalizer-add path persists the whole object (r.Update), so any in-memory
-	// defaulting done earlier would leak into the stored spec (this exact bug shipped:
-	// the defaulted registry/repository were persisted on every first reconcile).
-	if done, err := r.handleFinalizer(ctx, &platform); done || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Default the effective shared image REGISTRY on this fetched copy (never
-	// persisted — the finalizer Update above already ran on the pristine object).
-	// Repository defaulting is lazy inside ResolveImage (bundle-aware).
-	platformbuilder.DefaultImageRegistry(&platform)
-
-	// Singleton-per-namespace guard: only the oldest Platform in a namespace is
-	// the active one. A newer Platform goes Degraded immediately. An admission
-	// webhook will enforce this at create-time in a later milestone.
-	if handled, res, err := r.checkSingletonGuard(ctx, &platform); handled || err != nil {
-		return res, err
-	}
-
-	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
-	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
-	// downgrade and an unsupported version (each a terminal steady state), pins the resolved
-	// version onto the in-memory Platform, and returns the version bundle. A handled=true
-	// result means a guard short-circuited the reconcile.
-	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, &platform)
+	// The guards that decide WHETHER and WHAT this pass renders — deletion, the singleton,
+	// the version, and any in-flight messaging migration. They hand back the render the rest
+	// of the pass must use; handled=true means one of them short-circuited the reconcile.
+	mig, handled, res, err := r.prepareReconcile(ctx, &platform)
 	if handled || err != nil {
 		return res, err
 	}
-
-	// MESSAGING-MIGRATION GATE. It sits HERE — immediately after version resolution and
-	// BEFORE any gate that applies something belonging to the requested version — because a
-	// version bump that RENAMES the messaging virtual host must be sequenced (fence the
-	// producers, drain the source vhost, cut over, reclaim) rather than applied: rendering the
-	// target topology beside a source vhost that still holds messages is exactly the outcome
-	// the engine exists to prevent. It returns the version and bundle the REST of this
-	// reconcile must use — the requested ones when no migration is in the way, the SOURCE ones
-	// while a migration holds the platform back (it re-pins the in-memory spec.version to
-	// match, so the builders resolve the same bundle). A handled=true result means the gate
-	// short-circuited the reconcile.
-	mig, handled, res, err := r.gateMessagingMigration(ctx, &platform, bundle, resolvedVersion)
-	if handled || err != nil {
-		return res, err
-	}
-	bundle = mig.bundle
+	bundle := mig.bundle
 
 	// Desired set: the keys of every object applied this reconcile, used by the
 	// post-apply prune to garbage-collect de-rendered children. Populated as objects
@@ -391,6 +354,58 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// status, and pick the soonest applicable requeue. A prune/readiness/status failure routes
 	// by transience; the adjunct requeue flags collected across this pass decide the cadence.
 	return r.finalizeReconcile(ctx, &platform, desired, mig, requeue, oidcRequeue, mgd)
+}
+
+// prepareReconcile runs the guards that stand between a fetched Platform and the render: the
+// finalizer/deletion handling, image-registry defaulting, the per-namespace singleton guard,
+// version resolution and the messaging-migration gate.
+//
+// They are one step because they answer one question — whether this pass renders at all, and if
+// so from WHICH version's bundle — and because their ORDER is load-bearing, each one described
+// at its place below. It returns the migration gate's render for the rest of the pass;
+// handled=true means a guard short-circuited the reconcile and res/err are its answer.
+func (r *Reconciler) prepareReconcile(ctx context.Context, platform *otilmv1alpha1.Platform) (migrationRender, bool, ctrl.Result, error) {
+	// Finalizer + deletion handling FIRST — and BEFORE any spec defaulting: the
+	// finalizer-add path persists the whole object (r.Update), so any in-memory
+	// defaulting done earlier would leak into the stored spec (this exact bug shipped:
+	// the defaulted registry/repository were persisted on every first reconcile).
+	if done, err := r.handleFinalizer(ctx, platform); done || err != nil {
+		return migrationRender{}, true, ctrl.Result{}, err
+	}
+
+	// Default the effective shared image REGISTRY on this fetched copy (never
+	// persisted — the finalizer Update above already ran on the pristine object).
+	// Repository defaulting is lazy inside ResolveImage (bundle-aware).
+	platformbuilder.DefaultImageRegistry(platform)
+
+	// Singleton-per-namespace guard: only the oldest Platform in a namespace is
+	// the active one. A newer Platform goes Degraded immediately. An admission
+	// webhook will enforce this at create-time in a later milestone.
+	if handled, res, err := r.checkSingletonGuard(ctx, platform); handled || err != nil {
+		return migrationRender{}, true, res, err
+	}
+
+	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
+	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
+	// downgrade and an unsupported version (each a terminal steady state), pins the resolved
+	// version onto the in-memory Platform, and returns the version bundle. A handled=true
+	// result means a guard short-circuited the reconcile.
+	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, platform)
+	if handled || err != nil {
+		return migrationRender{}, true, res, err
+	}
+
+	// MESSAGING-MIGRATION GATE. It sits HERE — immediately after version resolution and
+	// BEFORE any gate that applies something belonging to the requested version — because a
+	// version bump that RENAMES the messaging virtual host must be sequenced (fence the
+	// producers, drain the source vhost, cut over, reclaim) rather than applied: rendering the
+	// target topology beside a source vhost that still holds messages is exactly the outcome
+	// the engine exists to prevent. It returns the version and bundle the REST of this
+	// reconcile must use — the requested ones when no migration is in the way, the SOURCE ones
+	// while a migration holds the platform back (it re-pins the in-memory spec.version to
+	// match, so the builders resolve the same bundle). A handled=true result means the gate
+	// short-circuited the reconcile.
+	return r.gateMessagingMigration(ctx, platform, bundle, resolvedVersion)
 }
 
 // finalizeReconcile completes a successful reconcile pass: it prunes de-rendered children,

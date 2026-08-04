@@ -35,12 +35,12 @@ func TestResolveMessagingConnectionExternalUnchanged(t *testing.T) {
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
 			Messaging: otilmv1alpha1.MessagingSpec{
-				Mode: "external", Host: "rabbitmq.example.com", Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
+				Mode: "external", Host: testExternalMQHost, Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
 			},
 		},
 	}
 	conn := ResolveMessagingConnection(p)
-	assert.Equal(t, "rabbitmq.example.com", conn.Host, "external host comes straight from the spec")
+	assert.Equal(t, testExternalMQHost, conn.Host, "external host comes straight from the spec")
 	assert.Equal(t, int32(5673), conn.Port)
 	assert.Equal(t, "ilm", conn.VirtualHost)
 	assert.Equal(t, testILMMQ, conn.CredentialsSecretName)
@@ -184,7 +184,7 @@ func TestResolveMessagingConnectionExternalHasNoAdministratorOrEndpoint(t *testi
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
 			Messaging: otilmv1alpha1.MessagingSpec{
-				Mode: "external", Host: "rabbitmq.example.com", Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
+				Mode: "external", Host: testExternalMQHost, Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
 			},
 		},
 	}

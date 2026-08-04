@@ -336,7 +336,7 @@ func TestTopologyCarriesVhost(t *testing.T) {
 	for _, v := range []string{testVersion2170, testVersion2180} {
 		b, ok := BundleFor(v)
 		assert.True(t, ok)
-		assert.Equal(t, "czertainly", b.Messaging.DefaultVirtualHost, "bundle %s", v)
+		assert.Equal(t, "czertainly", b.Messaging.DefaultVirtualHost, testBundleContext, v)
 	}
 }
 
@@ -351,8 +351,8 @@ func TestTopologyHasUserRole(t *testing.T) {
 
 	for _, v := range []string{testVersion2180, testVersion2190} {
 		b, _ := BundleFor(v)
-		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), "bundle %s", v)
-		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), "bundle %s", v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), testBundleContext, v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), testBundleContext, v)
 	}
 }
 
@@ -364,7 +364,7 @@ func TestTopologyHasUserRole(t *testing.T) {
 func TestLatestOnlyRetentionQueues(t *testing.T) {
 	retention := func(version string) []string {
 		b, ok := BundleFor(version)
-		assert.True(t, ok, "bundle %s", version)
+		assert.True(t, ok, testBundleContext, version)
 		var names []string
 		for _, q := range b.Messaging.Queues {
 			if q.IsLatestOnlyRetention() {

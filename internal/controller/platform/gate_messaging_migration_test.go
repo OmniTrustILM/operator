@@ -89,11 +89,11 @@ func migratingGatePlatform(phase otilmv1alpha1.MigrationPhase, fenced ...otilmv1
 func producerWorkloads(gatewayReplicas, schedulerReplicas int32) []client.Object {
 	return []client.Object{
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(gatewayReplicas)},
 		},
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(schedulerReplicas)},
 		},
 	}
@@ -229,8 +229,8 @@ func TestBeginMigrationPersistsBeforeAnySideEffect(t *testing.T) {
 	assert.Empty(t, stored.Status.Upgrade.Fenced, "nothing is fenced yet at the moment the record lands")
 
 	// The producers are untouched: the record is written BEFORE, not alongside.
-	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"))
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName))
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName))
 
 	cond := migrationCondition(stored)
 	require.NotNil(t, cond)
@@ -249,7 +249,7 @@ func TestBeginMigrationPersistsBeforeAnySideEffect(t *testing.T) {
 // would read.
 func TestBeginMigrationDropsRecordWhenTheWriteFails(t *testing.T) {
 	p := migrationGatePlatform()
-	r, _ := migrationReconciler(t, p, failingStatusUpdate(errors.New("status write rejected")))
+	r, _ := migrationReconciler(t, p, failingStatusUpdate(errors.New(errStatusWriteRejected)))
 
 	err := r.beginMigration(context.Background(), p, platformVersion219)
 	require.Error(t, err)
@@ -262,7 +262,7 @@ func TestBeginMigrationDropsRecordWhenTheWriteFails(t *testing.T) {
 func TestTransitionMigrationPhaseRollsBackWhenTheWriteFails(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing)
 	started := p.Status.Upgrade.PhaseStartedAt
-	r, rec := migrationReconciler(t, p, failingStatusUpdate(errors.New("status write rejected")))
+	r, rec := migrationReconciler(t, p, failingStatusUpdate(errors.New(errStatusWriteRejected)))
 
 	err := r.transitionMigrationPhase(context.Background(), p, otilmv1alpha1.MigrationPhaseDraining)
 	require.Error(t, err)
@@ -334,12 +334,12 @@ func TestGateMessagingMigrationStartFencesAndHoldsTheSourceVersion(t *testing.T)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, stored.Status.Upgrade.Phase,
 		"with the producers observed stopped, fencing hands over to the drain")
 	assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
-		{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	}, stored.Status.Upgrade.Fenced, "the counts to restore are recorded from the live workloads")
 
-	assert.Zero(t, replicasOf(t, r, "api-gateway"))
-	assert.Zero(t, replicasOf(t, r, "scheduler"))
+	assert.Zero(t, replicasOf(t, r, gatewayWorkloadName))
+	assert.Zero(t, replicasOf(t, r, schedulerWorkloadName))
 
 	reasons := strings.Join(drainEvents(rec), " ")
 	assert.Contains(t, reasons, eventMigrationStarted)
@@ -382,12 +382,12 @@ func TestGateMessagingMigrationHoldsFencingWhileProducersRun(t *testing.T) {
 	p := migrationGatePlatform()
 	_, to := migrationBundles(t)
 	running := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(3))},
 		Status:     appsv1.DeploymentStatus{Replicas: 3},
 	}
 	gateway := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: migrationTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: migrationTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
 	}
 	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, running, gateway)
@@ -400,18 +400,18 @@ func TestGateMessagingMigrationHoldsFencingWhileProducersRun(t *testing.T) {
 	stored := storedPlatform(t, r)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseFencing, stored.Status.Upgrade.Phase,
 		"the phase holds until every fenced producer's last pod is gone")
-	assert.Zero(t, replicasOf(t, r, "scheduler"), "the fence still applies while the phase waits")
+	assert.Zero(t, replicasOf(t, r, schedulerWorkloadName), "the fence still applies while the phase waits")
 }
 
 // TestGateMessagingMigrationResumesDraining: a restarted operator reads the recorded phase and
 // re-enters it, still on the source version and without re-recording the fence.
 func TestGateMessagingMigrationResumesDraining(t *testing.T) {
-	fenced := []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}}
+	fenced := []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}}
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
 	from, to := migrationBundles(t)
 	// The workload is already at zero, as the earlier pass left it.
 	sched := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 	}
 	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, sched)
@@ -497,8 +497,8 @@ func TestGateMessagingMigrationRefusesAnUnrelatedVersion(t *testing.T) {
 // leaving the platform exactly where it started.
 func TestGateMessagingMigrationAbortRestoresAndClears(t *testing.T) {
 	fenced := []otilmv1alpha1.FencedWorkload{
-		{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	}
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
 	p.Spec.Version = platformVersion218 // the user reverted
@@ -511,8 +511,8 @@ func TestGateMessagingMigrationAbortRestoresAndClears(t *testing.T) {
 	assert.Equal(t, platformVersion218, render.version)
 	assert.False(t, render.requeue, "nothing is waiting any more")
 
-	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"))
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName))
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName))
 
 	stored := storedPlatform(t, r)
 	assert.Nil(t, stored.Status.Upgrade, "the record is discarded only after every producer is back")
@@ -538,7 +538,7 @@ func TestGateMessagingMigrationAbortRestoresAndClears(t *testing.T) {
 // that may be what went wrong. So the exits restore the fence, keep the platform on its source
 // version, and touch nothing else.
 func TestReversibleMigrationExitsDeleteNothing(t *testing.T) {
-	fenced := []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}}
+	fenced := []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}}
 
 	tests := []struct {
 		name      string
@@ -583,7 +583,7 @@ func TestReversibleMigrationExitsDeleteNothing(t *testing.T) {
 			require.False(t, handled, "the platform goes on reconciling its source version")
 
 			assert.Empty(t, deleted, "a reversible exit reclaims nothing — it restores the fence and stops")
-			assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the producers come back at the recorded count")
+			assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "the producers come back at the recorded count")
 			assert.Equal(t, platformVersion218, storedPlatform(t, r).Status.ObservedVersion,
 				"the platform keeps running the version it started from")
 		})
@@ -594,7 +594,7 @@ func TestReversibleMigrationExitsDeleteNothing(t *testing.T) {
 // the producers must come back up, so a failed clear must leave it in place for the retry.
 func TestAbortMigrationKeepsTheRecordWhenTheWriteFails(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing)
-	r, _ := migrationReconciler(t, p, failingStatusUpdate(errors.New("status write rejected")))
+	r, _ := migrationReconciler(t, p, failingStatusUpdate(errors.New(errStatusWriteRejected)))
 
 	require.Error(t, r.abortMigration(context.Background(), p))
 	require.NotNil(t, p.Status.Upgrade, "an unpersisted clear must not lose the record in memory")
@@ -607,7 +607,7 @@ func TestAbortMigrationKeepsTheRecordWhenTheWriteFails(t *testing.T) {
 // WAITING, not the migration. The producers come back so the platform runs its source version
 // at full strength, and the record survives so the trigger cannot silently start it all again.
 func TestBlockMigrationLiftsTheFenceAndKeepsTheRecord(t *testing.T) {
-	fenced := []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}}
+	fenced := []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}}
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
 	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
 	_, to := migrationBundles(t)
@@ -619,7 +619,7 @@ func TestBlockMigrationLiftsTheFenceAndKeepsTheRecord(t *testing.T) {
 	assert.Equal(t, platformVersion218, render.version)
 	assert.False(t, render.requeue, "nothing will change until the user chooses an exit")
 
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the fence is lifted")
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "the fence is lifted")
 
 	stored := storedPlatform(t, r)
 	require.NotNil(t, stored.Status.Upgrade, "the record survives so the migration cannot restart itself")
@@ -652,7 +652,7 @@ func TestBlockMigrationLiftsTheFenceAndKeepsTheRecord(t *testing.T) {
 func TestFencingTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 	t.Run("the fence is still held", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+			otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 		p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
 		p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
 		_, to := migrationBundles(t)
@@ -665,7 +665,7 @@ func TestFencingTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 		assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
 		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r),
 			"the authorisation proceeds past producers that never stopped")
-		assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+		assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}},
 			fenced(storedPlatform(t, r)), "an already-held fence is left exactly as it was")
 
 		events := strings.Join(drainEvents(rec), " ")
@@ -685,11 +685,11 @@ func TestFencingTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 		assert.True(t, handled)
 		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r))
 		assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
-			{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-			{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+			{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+			{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 		}, fenced(storedPlatform(t, r)), "the producers the block released are stopped again before the cutover")
-		assert.Zero(t, replicasOf(t, r, "api-gateway"))
-		assert.Zero(t, replicasOf(t, r, "scheduler"))
+		assert.Zero(t, replicasOf(t, r, gatewayWorkloadName))
+		assert.Zero(t, replicasOf(t, r, schedulerWorkloadName))
 	})
 }
 
@@ -698,7 +698,7 @@ func TestFencingTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 // — the expired fence blocks exactly as it would with no value at all.
 func TestFencingTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
 	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion217
 	_, to := migrationBundles(t)
@@ -713,7 +713,7 @@ func TestFencingTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseFencing, stored.Status.Upgrade.Phase,
 		"a stale authorisation may not move the migration on")
 	assert.Empty(t, fenced(stored), "the block lifts the fence, as it does with no authorisation at all")
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName))
 	cond := migrationCondition(stored)
 	require.NotNil(t, cond)
 	assert.Equal(t, reasonMigrationDrainTimeout, cond.Reason)
@@ -726,12 +726,12 @@ func TestFencingTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
 func runningProducerWorkloads() []client.Object {
 	return []client.Object{
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 			Status:     appsv1.DeploymentStatus{Replicas: 1},
 		},
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 			Status:     appsv1.DeploymentStatus{Replicas: 1},
 		},
@@ -749,8 +749,10 @@ func TestMigrationPhaseDeadlineExceeded(t *testing.T) {
 		noStart bool
 	}{
 		{
-			name:   "a fresh phase is well inside its budget",
-			mutate: func(*otilmv1alpha1.Platform) {},
+			name: "a fresh phase is well inside its budget",
+			mutate: func(*otilmv1alpha1.Platform) {
+				// Deliberately empty: the fixture as it stands is a phase that has only just started.
+			},
 		},
 		{
 			name:   "fencing past the budget",
@@ -792,8 +794,10 @@ func TestMigrationPhaseDeadlineExceeded(t *testing.T) {
 			mutate: func(p *otilmv1alpha1.Platform) { p.Status.Upgrade.PhaseStartedAt = metav1.Time{} },
 		},
 		{
-			name:    "no migration, no deadline",
-			mutate:  func(*otilmv1alpha1.Platform) {},
+			name: "no migration, no deadline",
+			mutate: func(*otilmv1alpha1.Platform) {
+				// Deliberately empty: the row's whole point is a platform with no migration recorded.
+			},
 			noStart: true,
 		},
 	}
@@ -828,7 +832,7 @@ func TestMigrationDrainTimeoutFallsBackToTheCRDDefault(t *testing.T) {
 // other kind up outside the fence, at the apiserver's default of one replica, publishing to
 // the very virtual host the migration is draining. The engine must SEE that.
 func TestMigrationWorkloadKindFlip(t *testing.T) {
-	fenced := otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2}
+	fenced := otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2}
 
 	t.Run("no migration", func(t *testing.T) {
 		p := migrationGatePlatform()
@@ -847,14 +851,14 @@ func TestMigrationWorkloadKindFlip(t *testing.T) {
 		p.Spec.Gateway.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
 		name, recorded, requested, flipped := migrationWorkloadKindFlip(p)
 		assert.True(t, flipped)
-		assert.Equal(t, "api-gateway", name)
+		assert.Equal(t, gatewayWorkloadName, name)
 		assert.Equal(t, string(otilmv1alpha1.WorkloadKindDeployment), recorded)
 		assert.Equal(t, string(otilmv1alpha1.WorkloadKindStatefulSet), requested)
 	})
 
 	t.Run("an entry that is no longer a fence target is left alone", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining,
-			otilmv1alpha1.FencedWorkload{Name: "provisioning-rabbitmq", Kind: "StatefulSet", Replicas: 1})
+			otilmv1alpha1.FencedWorkload{Name: provisioningWorkloadName, Kind: kindStatefulSet, Replicas: 1})
 		_, _, _, flipped := migrationWorkloadKindFlip(p)
 		assert.False(t, flipped, "a component the spec no longer deploys cannot be flipped")
 	})
@@ -864,7 +868,7 @@ func TestMigrationWorkloadKindFlip(t *testing.T) {
 // stops the pass, so the other-kind workload is never rendered in the first place.
 func TestGateMessagingMigrationRefusesAWorkloadKindFlip(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining,
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	p.Spec.Scheduler.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
 	_, to := migrationBundles(t)
 	r, rec := migrationReconciler(t, p, interceptor.Funcs{})
@@ -879,11 +883,11 @@ func TestGateMessagingMigrationRefusesAWorkloadKindFlip(t *testing.T) {
 	cond := migrationCondition(stored)
 	require.NotNil(t, cond)
 	assert.Equal(t, reasonMigrationWorkloadKindChanged, cond.Reason)
-	assert.Contains(t, cond.Message, "scheduler")
+	assert.Contains(t, cond.Message, schedulerWorkloadName)
 	assert.Contains(t, cond.Message, string(otilmv1alpha1.WorkloadKindStatefulSet))
 	assertNoBrokerCoordinates(t, cond.Message)
 	assert.Equal(t, fenced(stored), []otilmv1alpha1.FencedWorkload{
-		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	}, "the refusal changes nothing about the fence")
 	assert.Contains(t, strings.Join(drainEvents(rec), " "), reasonMigrationWorkloadKindChanged)
 }
@@ -901,12 +905,12 @@ func fenced(p *otilmv1alpha1.Platform) []otilmv1alpha1.FencedWorkload {
 // TestFencedProducersStopped reads the OBSERVED replica count, not the zero the fence wrote:
 // the two differ for exactly as long as a producer's last pod is still publishing.
 func TestFencedProducersStopped(t *testing.T) {
-	entry := otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}
+	entry := otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}
 
 	t.Run("pods still running", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing, entry)
 		sched := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 			Status:     appsv1.DeploymentStatus{Replicas: 1},
 		}
@@ -919,7 +923,7 @@ func TestFencedProducersStopped(t *testing.T) {
 	t.Run("the last pod is gone", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing, entry)
 		sched := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 		}
 		r, _ := migrationReconciler(t, p, interceptor.Funcs{}, sched)
@@ -942,7 +946,7 @@ func TestFencedProducersStopped(t *testing.T) {
 
 	t.Run("a target the fence recorded as absent, and that is still absent", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Absent: true})
+			otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Absent: true})
 		r, _ := migrationReconciler(t, p, interceptor.Funcs{})
 		stopped, err := r.fencedProducersStopped(context.Background(), p)
 		require.NoError(t, err)
@@ -951,9 +955,9 @@ func TestFencedProducersStopped(t *testing.T) {
 
 	t.Run("a target recorded as absent that has since been created", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Absent: true})
+			otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Absent: true})
 		sched := &appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: migrationTestNS},
 			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
 			Status:     appsv1.DeploymentStatus{Replicas: 1},
 		}
@@ -965,9 +969,9 @@ func TestFencedProducersStopped(t *testing.T) {
 
 	t.Run("a StatefulSet is read the same way", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-			otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "StatefulSet", Replicas: 2})
+			otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindStatefulSet, Replicas: 2})
 		gw := &appsv1.StatefulSet{
-			ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: migrationTestNS},
+			ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: migrationTestNS},
 			Status:     appsv1.StatefulSetStatus{Replicas: 2},
 		}
 		r, _ := migrationReconciler(t, p, interceptor.Funcs{}, gw)
@@ -978,7 +982,7 @@ func TestFencedProducersStopped(t *testing.T) {
 
 	t.Run("an unrecognised recorded kind is an explicit error", func(t *testing.T) {
 		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
-			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "CronJob", Replicas: 1})
+			otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: "CronJob", Replicas: 1})
 		r, _ := migrationReconciler(t, p, interceptor.Funcs{})
 		_, err := r.fencedProducersStopped(context.Background(), p)
 		assert.Error(t, err)
@@ -1051,7 +1055,7 @@ func TestGateMessagingMigrationRefusesAnUnknownRunningVersion(t *testing.T) {
 	assert.Equal(t, reasonMigrationSourceVersionUnknown, cond.Reason)
 	assert.Contains(t, cond.Message, unknownPlatformVersion)
 	assertNoBrokerCoordinates(t, cond.Message)
-	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"), "and nothing is fenced")
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName), "and nothing is fenced")
 	assert.Contains(t, strings.Join(drainEvents(rec), " "), reasonMigrationSourceVersionUnknown)
 }
 
@@ -1061,7 +1065,7 @@ func TestGateMessagingMigrationRefusesAnUnknownRunningVersion(t *testing.T) {
 // fall through to the most destructive interpretation of it.
 func TestGateMessagingMigrationRefusesAnUnknownRecordedPhase(t *testing.T) {
 	p := migratingGatePlatform(otilmv1alpha1.MigrationPhase("Teleporting"),
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	_, to := migrationBundles(t)
 	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
 
@@ -1075,9 +1079,9 @@ func TestGateMessagingMigrationRefusesAnUnknownRecordedPhase(t *testing.T) {
 	cond := migrationCondition(stored)
 	require.NotNil(t, cond)
 	assert.Equal(t, reasonMigrationPhaseUnknown, cond.Reason)
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}},
 		fenced(stored), "the fence is left exactly where it was")
-	assert.Equal(t, int32(0), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(0), replicasOf(t, r, schedulerWorkloadName))
 	assertNoBrokerCoordinates(t, cond.Message)
 }
 
@@ -1087,7 +1091,7 @@ func TestGateMessagingMigrationRefusesAnUnknownRecordedPhase(t *testing.T) {
 // complete a step it must STOP the pass, not carry on to the next step with a state the
 // cluster has not accepted.
 func TestGateMessagingMigrationStopsOnAFailedStep(t *testing.T) {
-	entry := otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}
+	entry := otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}
 	overdue := metav1.NewTime(time.Now().Add(-time.Hour))
 
 	cases := []struct {
@@ -1098,7 +1102,7 @@ func TestGateMessagingMigrationStopsOnAFailedStep(t *testing.T) {
 		{
 			name:     "the migration cannot be recorded, so nothing is fenced",
 			platform: migrationGatePlatform,
-			funcs:    failingStatusUpdate(errors.New("status write rejected")),
+			funcs:    failingStatusUpdate(errors.New(errStatusWriteRejected)),
 		},
 		{
 			name: "a producer cannot be held down, so the drain is never started",
@@ -1127,7 +1131,7 @@ func TestGateMessagingMigrationStopsOnAFailedStep(t *testing.T) {
 				// Already fenced, so nothing re-records: the only write left is the transition.
 				return migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing, entry)
 			},
-			funcs: failingStatusUpdate(errors.New("status write rejected")),
+			funcs: failingStatusUpdate(errors.New(errStatusWriteRejected)),
 		},
 		{
 			name: "the revert cannot be completed, so the record it needs is kept",
@@ -1136,7 +1140,7 @@ func TestGateMessagingMigrationStopsOnAFailedStep(t *testing.T) {
 				p.Spec.Version = platformVersion218
 				return p
 			},
-			funcs: failingStatusUpdate(errors.New("status write rejected")),
+			funcs: failingStatusUpdate(errors.New(errStatusWriteRejected)),
 		},
 		{
 			name: "the fence cannot be lifted at the deadline",
@@ -1154,7 +1158,7 @@ func TestGateMessagingMigrationStopsOnAFailedStep(t *testing.T) {
 				p.Status.Upgrade.PhaseStartedAt = overdue
 				return p
 			},
-			funcs: failingStatusUpdate(errors.New("status write rejected")),
+			funcs: failingStatusUpdate(errors.New(errStatusWriteRejected)),
 		},
 	}
 

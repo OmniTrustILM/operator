@@ -48,7 +48,7 @@ var _ = Describe("Messaging migration cleanup", func() {
 		It("finishes the migration, restores whatever is still fenced and does not start again", func() {
 			const ns = "ilm-migration-cleanup"
 			beginMigrationFixture(ns, otilmv1alpha1.MigrationPhaseCleaningUp, managedMessagingPlatform,
-				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: "Deployment", Replicas: 1})
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 1})
 
 			By("discarding the record and pinning the version the platform reached, in one write")
 			Eventually(func(g Gomega) {
@@ -62,7 +62,7 @@ var _ = Describe("Messaging migration cleanup", func() {
 			// interrupted or forced cutover — and the migration may not end with a workload parked
 			// at zero replicas and no record left to bring it back.
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)))
 
 			By("reporting a finished migration without leaking a coordinate")
@@ -90,7 +90,7 @@ var _ = Describe("Messaging migration cleanup", func() {
 				g.Expect(p.Status.Upgrade).To(BeNil())
 				g.Expect(p.Status.ObservedVersion).To(Equal(platformVersion219))
 			}, "2s", platformInterval).Should(Succeed())
-			Expect(workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)).To(Equal(int32(1)))
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(Equal(int32(1)))
 		})
 	})
 })

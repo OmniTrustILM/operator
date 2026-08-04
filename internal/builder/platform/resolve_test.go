@@ -683,7 +683,7 @@ func TestCoreInitServiceDependenciesMatchTheRenderedScript(t *testing.T) {
 			Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: "provisioning-bootstrap"},
 		}
 		init, ok := containerByName(ResolveCore(p).InitContainers, "provision-instance-queue")
-		require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+		require.True(t, ok, testProvInstanceQueueMsg)
 		url, ok := initEnvValue(init, resolveBundle(p).Wiring.ProvisioningURLEnv)
 		require.True(t, ok, "the provisioning API URL must be passed as an env value")
 		assert.Contains(t, url, provisioningName,
@@ -907,7 +907,7 @@ func exchangeOverride(v string) func(*otilmv1alpha1.Platform) {
 func provisionQueueScript(t *testing.T, p *otilmv1alpha1.Platform) string {
 	t.Helper()
 	init, ok := containerByName(ResolveCore(p).InitContainers, testProvInstanceQueue)
-	require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+	require.True(t, ok, testProvInstanceQueueMsg)
 	require.Len(t, init.Command, 3)
 	return init.Command[2]
 }
@@ -1013,7 +1013,7 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 			c := ResolveCore(p)
 
 			init, ok := containerByName(c.InitContainers, testProvInstanceQueue)
-			require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+			require.True(t, ok, testProvInstanceQueueMsg)
 			require.Len(t, init.Command, 3)
 			script := init.Command[2]
 

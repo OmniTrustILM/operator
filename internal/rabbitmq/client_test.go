@@ -526,7 +526,7 @@ func TestTruncatedResponseFailsClosed(t *testing.T) {
 	var bErr *Error
 	require.ErrorAs(t, err, &bErr)
 	assert.True(t, bErr.Retryable)
-	for _, sensitive := range []string{strings.TrimPrefix(srv.URL, "http://"), testUser, testPassword} {
+	for _, sensitive := range []string{brokerHostOf(srv), testUser, testPassword} {
 		assert.NotContains(t, bErr.Error(), sensitive)
 	}
 }
@@ -575,24 +575,40 @@ func TestEveryCallFailsClosedOnCanceledContext(t *testing.T) {
 	}
 }
 
+// brokerHostOf is the bare host:port an httptest server listens on — the coordinate the client
+// was configured with, and therefore the one no error may mention.
+func brokerHostOf(srv *httptest.Server) string {
+	return strings.TrimPrefix(srv.URL, testHTTPScheme)
+}
+
+// assertNoBrokerLeak is the assertion every failure path in TestBrokerErrorsNoLeak shares: the
+// call failed, and neither the error's text nor the broker Error's own message carries any of
+// the connection or credential material the client was built with.
+func assertNoBrokerLeak(t *testing.T, err error, host string) {
+	t.Helper()
+	require.Error(t, err)
+	assertCarriesNothingSensitive(t, err.Error(), host, "the error must not carry connection or credential material")
+
+	var bErr *Error
+	if errors.As(err, &bErr) {
+		assertCarriesNothingSensitive(t, bErr.Message, host,
+			"the error message must not carry connection or credential material")
+	}
+}
+
+// assertCarriesNothingSensitive checks ONE piece of text against everything the client was
+// configured with plus the body the broker answered.
+func assertCarriesNothingSensitive(t *testing.T, text, host, message string) {
+	t.Helper()
+	for _, sensitive := range []string{host, sensitiveVhost, testUser, testPassword, leakyBody, testExchange} {
+		assert.NotContains(t, text, sensitive, message)
+	}
+}
+
 // TestBrokerErrorsNoLeak is the security invariant: no error returned by any method, on any
 // failure path, may contain the broker host, the vhost, the username, the password, or any
 // byte of the broker's response body.
 func TestBrokerErrorsNoLeak(t *testing.T) {
-	assertNoLeak := func(t *testing.T, err error, host string) {
-		t.Helper()
-		require.Error(t, err)
-		for _, sensitive := range []string{host, sensitiveVhost, testUser, testPassword, leakyBody, testExchange} {
-			assert.NotContains(t, err.Error(), sensitive, "the error must not carry connection or credential material")
-		}
-		var bErr *Error
-		if errors.As(err, &bErr) {
-			for _, sensitive := range []string{host, sensitiveVhost, testUser, testPassword, leakyBody, testExchange} {
-				assert.NotContains(t, bErr.Message, sensitive, "the error message must not carry connection or credential material")
-			}
-		}
-	}
-
 	for _, failure := range brokerFailures() {
 		for _, c := range callsForVhost(sensitiveVhost) {
 			t.Run(failure.name+"/"+c.name, func(t *testing.T) {
@@ -603,14 +619,14 @@ func TestBrokerErrorsNoLeak(t *testing.T) {
 				if failure.tune != nil {
 					failure.tune(client)
 				}
-				assertNoLeak(t, c.call(context.Background(), client), strings.TrimPrefix(srv.URL, "http://"))
+				assertNoBrokerLeak(t, c.call(context.Background(), client), brokerHostOf(srv))
 			})
 		}
 	}
 
 	t.Run("transport error", func(t *testing.T) {
 		for _, c := range callsForVhost(sensitiveVhost) {
-			assertNoLeak(t, c.call(context.Background(),
+			assertNoBrokerLeak(t, c.call(context.Background(),
 				NewClient("http://127.0.0.1:1", testUser, testPassword)), "127.0.0.1:1")
 		}
 	})
@@ -618,8 +634,8 @@ func TestBrokerErrorsNoLeak(t *testing.T) {
 	t.Run("incomplete listing", func(t *testing.T) {
 		srv := serveJSON(t, http.StatusOK, `[{"state":"down"}]`)
 		for _, c := range callsForVhost(sensitiveVhost) {
-			assertNoLeak(t, c.call(context.Background(),
-				NewClient(srv.URL, testUser, testPassword)), strings.TrimPrefix(srv.URL, "http://"))
+			assertNoBrokerLeak(t, c.call(context.Background(),
+				NewClient(srv.URL, testUser, testPassword)), brokerHostOf(srv))
 		}
 	})
 }
@@ -661,13 +677,13 @@ func TestErrorMessageFormatting(t *testing.T) {
 }
 
 func TestClientDefaults(t *testing.T) {
-	client := NewClient("http://broker.example:15672", testUser, testPassword)
+	client := NewClient(testBrokerURL, testUser, testPassword)
 	require.NotNil(t, client.httpClient)
 	assert.Equal(t, defaultRequestTimeout, client.httpClient.Timeout, "an overall timeout must bound every call")
 	assert.Equal(t, defaultMaxResponseBytes, client.maxResponseBytes)
 
 	injected := &http.Client{Timeout: time.Second}
-	assert.Same(t, injected, NewClientWithHTTPClient("http://broker.example:15672", testUser, testPassword, injected).httpClient)
+	assert.Same(t, injected, NewClientWithHTTPClient(testBrokerURL, testUser, testPassword, injected).httpClient)
 
 	// A zero-valued Client still uses bounded defaults rather than http.DefaultClient.
 	zero := &Client{}
@@ -698,6 +714,6 @@ func TestInvalidBaseURLFailsClosed(t *testing.T) {
 // TestClientImplementsBrokerAdmin pins the production client to the interface the migration
 // consumes.
 func TestClientImplementsBrokerAdmin(t *testing.T) {
-	var admin BrokerAdmin = NewClient("http://broker.example:15672", testUser, testPassword)
+	var admin BrokerAdmin = NewClient(testBrokerURL, testUser, testPassword)
 	assert.NotNil(t, admin)
 }

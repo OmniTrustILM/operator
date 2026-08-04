@@ -407,7 +407,7 @@ func TestCleanupDoesNotDeleteOnAReadFailure(t *testing.T) {
 func TestCleanupStopsWhenTheClassCannotBePersisted(t *testing.T) {
 	p := cleanupPlatform()
 	topology := sourceTopology(p)
-	r, _ := cleanupReconciler(t, p, idleBroker(), failingStatusUpdate(errors.New("status write rejected")), topology...)
+	r, _ := cleanupReconciler(t, p, idleBroker(), failingStatusUpdate(errors.New(errStatusWriteRejected)), topology...)
 
 	_, handled, _, err := cleanupPass(t, r)
 	require.Error(t, err)
@@ -497,7 +497,7 @@ func TestForcedCleanupDiscardsAndClosesConnections(t *testing.T) {
 
 	cond := migrationCondition(storedPlatform(t, r))
 	require.NotNil(t, cond)
-	assert.Contains(t, cond.Message, "spec.messaging.managed.forceCutoverForVersion")
+	assert.Contains(t, cond.Message, forceCutoverField)
 	assertNoBrokerCoordinates(t, cond.Message)
 }
 
@@ -562,7 +562,7 @@ func TestCleanupBlockedTerminal(t *testing.T) {
 	// operator does not migrate it: it goes on republishing to whichever broker it is pointed at.
 	assert.Contains(t, cond.Message, "re-enrol the remote proxies")
 	assert.Contains(t, cond.Message, "time-quality monitor")
-	assert.Contains(t, cond.Message, "spec.messaging.managed.forceCutoverForVersion")
+	assert.Contains(t, cond.Message, forceCutoverField)
 	assert.Contains(t, cond.Message, "fully functional")
 	assertNoBrokerCoordinates(t, cond.Message)
 
@@ -593,7 +593,7 @@ func TestCleanupStopsWhenTheWaitCannotBePersisted(t *testing.T) {
 			topology := sourceTopology(p)
 			admin := idleBroker()
 			admin.connections = 1
-			r, rec := cleanupReconciler(t, p, admin, failingStatusUpdate(errors.New("status write rejected")), topology...)
+			r, rec := cleanupReconciler(t, p, admin, failingStatusUpdate(errors.New(errStatusWriteRejected)), topology...)
 
 			_, handled, _, err := cleanupPass(t, r)
 			require.Error(t, err)
@@ -612,7 +612,7 @@ func TestMigrationCleanupMessageNamesAnUndescribedClass(t *testing.T) {
 
 	assert.Contains(t, migrationCleanupMessage(u, "SomethingNew", false), "reclaiming the previous messaging topology")
 	forced := migrationCleanupMessage(u, "SomethingNew", true)
-	assert.Contains(t, forced, "spec.messaging.managed.forceCutoverForVersion")
+	assert.Contains(t, forced, forceCutoverField)
 	assertNoBrokerCoordinates(t, forced)
 }
 
@@ -820,9 +820,9 @@ func TestFinishMigrationDiscardsTheRecordAndPinsTheVersionInOneUpdate(t *testing
 // TestFinishMigrationRollsBackWhenTheWriteFails: a conclusion the cluster did not accept must
 // not survive in the copy the rest of the pass reads either.
 func TestFinishMigrationRollsBackWhenTheWriteFails(t *testing.T) {
-	p := cleanupPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1})
+	p := cleanupPlatform(otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 1})
 	p.Status.ObservedVersion = platformVersion218
-	r, _ := cleanupReconciler(t, p, idleBroker(), failingStatusUpdate(errors.New("status write rejected")))
+	r, _ := cleanupReconciler(t, p, idleBroker(), failingStatusUpdate(errors.New(errStatusWriteRejected)))
 
 	_, handled, _, err := cleanupPass(t, r)
 	require.Error(t, err)
@@ -845,5 +845,5 @@ func TestAbortMigrationLeavesTheReportedVersionAlone(t *testing.T) {
 	assert.Nil(t, stored.Status.Upgrade)
 	assert.Equal(t, platformVersion218, stored.Status.ObservedVersion,
 		"an abort reports the version the platform is still running")
-	assert.Equal(t, int32(1), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(1), replicasOf(t, r, schedulerWorkloadName))
 }

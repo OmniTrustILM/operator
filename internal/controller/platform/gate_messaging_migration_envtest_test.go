@@ -172,9 +172,9 @@ func beginMigrationFixture(ns string, phase otilmv1alpha1.MigrationPhase, mutate
 	By("waiting for the platform to settle on its source version")
 	awaitObservedVersion(ns, platformVersion218)
 	var gw appsv1.Deployment
-	awaitWorkload(ns, "api-gateway", &gw)
+	awaitWorkload(ns, gatewayWorkloadName, &gw)
 	var sched appsv1.Deployment
-	awaitWorkload(ns, "scheduler", &sched)
+	awaitWorkload(ns, schedulerWorkloadName, &sched)
 
 	By("requesting the target version and recording the migration")
 	requestPlatformVersion(ns, platformVersion219)
@@ -196,17 +196,17 @@ var _ = Describe("Messaging migration state", func() {
 				g.Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseDraining),
 					"with no producer pods left running, fencing hands over")
 				g.Expect(u.Fenced).To(ConsistOf(
-					otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
-					otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+					otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
+					otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 				), "each producer's kind and prior count are recorded before anything is patched")
 			}, platformTimeout, platformInterval).Should(Succeed())
 
 			By("holding the producers at zero")
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(BeZero())
 			Consistently(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "api-gateway")
+				return workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)
 			}, "2s", platformInterval).Should(BeZero())
 
 			By("reporting the phase on the migration condition")
@@ -245,10 +245,10 @@ var _ = Describe("Messaging migration state", func() {
 			Expect(u).NotTo(BeNil())
 			Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseDraining), "a resume re-enters the recorded phase")
 			Expect(u.Fenced).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 			), "re-entry must not re-record the fence over the counts it has to restore")
-			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(BeZero())
+			Expect(workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)).To(BeZero())
 			Expect(workloadImages(ns, "core")).To(ContainSubstring(":" + platformVersion218))
 		})
 	})
@@ -259,13 +259,13 @@ var _ = Describe("Messaging migration state", func() {
 			// The persisted state of an operator that crashed after recording the fence: the
 			// counts on status are the only surviving evidence of what the platform was running.
 			beginMigrationFixture(ns, otilmv1alpha1.MigrationPhaseDraining, nil,
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 4},
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 7},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 4},
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 7},
 			)
 
 			By("re-asserting the fence from the recorded state")
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(BeZero())
 
 			for i := 0; i < 3; i++ {
@@ -276,8 +276,8 @@ var _ = Describe("Messaging migration state", func() {
 			Expect(u).NotTo(BeNil())
 			Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseDraining))
 			Expect(u.Fenced).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 4},
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 7},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 4},
+				otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 7},
 			), "the recorded counts are what restore writes back; a resume must never overwrite them with the fenced zeroes")
 			Expect(workloadImages(ns, "core")).To(ContainSubstring(":" + platformVersion218))
 		})
@@ -287,7 +287,7 @@ var _ = Describe("Messaging migration state", func() {
 		It("is refused, so no workload of the other kind ever comes up outside the fence", func() {
 			const ns = "ilm-migration-kindflip"
 			beginMigrationFixture(ns, otilmv1alpha1.MigrationPhaseDraining, nil,
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
 			)
 
 			By("flipping the fenced gateway to a StatefulSet")
@@ -314,10 +314,10 @@ var _ = Describe("Messaging migration state", func() {
 			// the very virtual host the migration is draining.
 			Consistently(func() error {
 				var sts appsv1.StatefulSet
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "api-gateway", Namespace: ns}, &sts)
+				return k8sClient.Get(ctx, types.NamespacedName{Name: gatewayWorkloadName, Namespace: ns}, &sts)
 			}, "3s", platformInterval).ShouldNot(Succeed())
 			Expect(getPlatform(ns).Status.Upgrade.Fenced).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
 			), "the refusal leaves the fence exactly as it was")
 		})
 	})
@@ -331,7 +331,7 @@ var _ = Describe("Messaging migration state", func() {
 
 			By("waiting for the fence to take hold")
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(BeZero())
 
 			By("reverting spec.version to the version the platform is running")
@@ -342,10 +342,10 @@ var _ = Describe("Messaging migration state", func() {
 				return getPlatform(ns).Status.Upgrade
 			}, platformTimeout, platformInterval).Should(BeNil())
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, kindDeployment, schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(2)))
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "api-gateway")
+				return workloadSpecReplicas(ns, kindDeployment, gatewayWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)))
 
 			Expect(migrationConditionOf(ns).Reason).To(Equal(reasonMigrationAborted))
@@ -366,7 +366,7 @@ var _ = Describe("Messaging migration state", func() {
 			// No broker is registered for this namespace, so the poll can only fail closed — which
 			// is the branch that persists a clean-poll count of zero and goes on reconciling.
 			beginMigrationFixture(ns, otilmv1alpha1.MigrationPhaseDraining, managedMessagingPlatform,
-				otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1},
+				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1},
 			)
 
 			from, ok := bom.BundleFor(platformVersion218)

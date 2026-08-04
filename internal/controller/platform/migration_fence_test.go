@@ -90,15 +90,15 @@ func TestFenceWorkloadsWithoutMigration(t *testing.T) {
 func TestFenceWorkloadsRecordsEveryIntendedTarget(t *testing.T) {
 	p := fencedMigrationPlatform()
 	sched := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(4))},
 	}
 	r := fenceReconcilerFor(t, p, sched)
 
 	require.NoError(t, r.fenceWorkloads(context.Background(), p))
 	assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
-		{Name: "api-gateway", Kind: "Deployment", Absent: true},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 4},
+		{Name: gatewayWorkloadName, Kind: kindDeployment, Absent: true},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 4},
 	}, p.Status.Upgrade.Fenced, "the absent api-gateway is recorded too, so it cannot escape the fence")
 }
 
@@ -109,7 +109,7 @@ func TestFenceWorkloadsRecordsEveryIntendedTarget(t *testing.T) {
 func TestFenceHoldsDownAWorkloadCreatedMidMigration(t *testing.T) {
 	p := fencedMigrationPlatform()
 	sched := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 	}
 	r := fenceReconcilerFor(t, p, sched)
@@ -122,7 +122,7 @@ func TestFenceHoldsDownAWorkloadCreatedMidMigration(t *testing.T) {
 	// The render brings the gateway up: replicas omitted (it is on the fenced list), so the
 	// apiserver's default of one applies, and its pod is running.
 	gateway := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(1))},
 		Status:     appsv1.DeploymentStatus{Replicas: 1},
 	}
@@ -133,7 +133,7 @@ func TestFenceHoldsDownAWorkloadCreatedMidMigration(t *testing.T) {
 	assert.False(t, stopped, "a recreated producer holds the fence until it is observed stopped")
 
 	require.NoError(t, r.fenceWorkloads(context.Background(), p))
-	assert.Zero(t, replicasOfIn(t, r, fenceTestNS, "api-gateway"),
+	assert.Zero(t, replicasOfIn(t, r, fenceTestNS, gatewayWorkloadName),
 		"the per-reconcile re-assert patches the newly created workload to zero")
 }
 
@@ -152,18 +152,18 @@ func replicasOfIn(t *testing.T, r *Reconciler, namespace, name string) int32 {
 // replica count to write back — the render's own configured count is the truth the moment the
 // entry is dropped, and inventing a zero here would fight it.
 func TestRestoreWorkloadOfAnAbsentTargetWritesNoCount(t *testing.T) {
-	entry := otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Absent: true}
-	p := fencedMigrationPlatform(entry, otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	entry := otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Absent: true}
+	p := fencedMigrationPlatform(entry, otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	gateway := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: gatewayWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(2))},
 	}
 	r := fenceReconcilerFor(t, p, gateway)
 
 	require.NoError(t, r.restoreWorkload(context.Background(), p, entry))
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}},
 		p.Status.Upgrade.Fenced, "the entry is dropped, which is the whole of the restore")
-	assert.Equal(t, int32(2), replicasOfIn(t, r, fenceTestNS, "api-gateway"),
+	assert.Equal(t, int32(2), replicasOfIn(t, r, fenceTestNS, gatewayWorkloadName),
 		"whatever the render put there stands: the fence writes no count of its own")
 }
 
@@ -172,9 +172,9 @@ func TestRestoreWorkloadOfAnAbsentTargetWritesNoCount(t *testing.T) {
 // by then the workloads are at zero — a second recording pass would overwrite them with
 // zeroes and restore would bring nothing back up.
 func TestFenceWorkloadsPreservesRecordedCounts(t *testing.T) {
-	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 4})
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 4})
 	sched := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 	}
 	r := fenceReconcilerFor(t, p, sched)
@@ -187,7 +187,7 @@ func TestFenceWorkloadsPreservesRecordedCounts(t *testing.T) {
 // TestEnforceMigrationFenceToleratesDeletedWorkload: a workload deleted underneath the fence
 // has no producer left to hold down, so the reconcile must not fail on it.
 func TestEnforceMigrationFenceToleratesDeletedWorkload(t *testing.T) {
-	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 2})
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 2})
 	r := fenceReconcilerFor(t, p)
 	assert.NoError(t, r.enforceMigrationFence(context.Background(), p))
 }
@@ -196,7 +196,7 @@ func TestEnforceMigrationFenceToleratesDeletedWorkload(t *testing.T) {
 // unrecognised value is refused outright — silently treating it as a Deployment could leave
 // the real producer running while the migration believed it was stopped.
 func TestEnforceMigrationFenceRejectsUnknownKind(t *testing.T) {
-	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "CronJob", Replicas: 2})
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: "CronJob", Replicas: 2})
 	err := fenceReconcilerFor(t, p).enforceMigrationFence(context.Background(), p)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CronJob")
@@ -216,15 +216,15 @@ func TestEnforceMigrationFenceInactive(t *testing.T) {
 // no-op, so a caller re-entering after a crash between the patch and the status write can
 // simply call it again.
 func TestRestoreWorkloadIsIdempotent(t *testing.T) {
-	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 1})
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 1})
 	sched := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: fenceTestNS},
+		ObjectMeta: metav1.ObjectMeta{Name: schedulerWorkloadName, Namespace: fenceTestNS},
 		Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
 	}
 	r := fenceReconcilerFor(t, p, sched)
 
 	// scheduler is NOT in the list any more: a repeat of a completed restore.
-	restored := otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}
+	restored := otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}
 	require.NoError(t, r.restoreWorkload(context.Background(), p, restored))
 	assert.Len(t, p.Status.Upgrade.Fenced, 1, "the remaining entry is untouched")
 
@@ -240,20 +240,20 @@ func TestRestoreWorkloadIsIdempotent(t *testing.T) {
 // entry and its recorded count untouched.
 func TestRestoreWorkloadRemovesExactlyOneEntry(t *testing.T) {
 	p := fencedMigrationPlatform(
-		otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: "Deployment", Replicas: 1},
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: kindDeployment, Replicas: 1},
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	)
 	r := fenceReconcilerFor(t, p, fencedWorkloadObjects()...)
 
 	require.NoError(t, r.restoreWorkload(context.Background(), p, p.Status.Upgrade.Fenced[1]))
 	assert.Equal(t, []otilmv1alpha1.FencedWorkload{
-		{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	}, p.Status.Upgrade.Fenced)
 	assert.Equal(t, int32(1), replicasOf(t, r, "provisioning"))
-	assert.Zero(t, replicasOf(t, r, "api-gateway"), "the others stay down")
-	assert.Zero(t, replicasOf(t, r, "scheduler"))
+	assert.Zero(t, replicasOf(t, r, gatewayWorkloadName), "the others stay down")
+	assert.Zero(t, replicasOf(t, r, schedulerWorkloadName))
 }
 
 // TestRestoreWorkloadReEntersAfterAFailedWrite is the crash contract of a single restore. The
@@ -261,12 +261,12 @@ func TestRestoreWorkloadRemovesExactlyOneEntry(t *testing.T) {
 // the render omitting replicas and the fence re-asserting behind it. Re-entering repeats the
 // patch (idempotent) and finishes the job.
 func TestRestoreWorkloadReEntersAfterAFailedWrite(t *testing.T) {
-	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3})
 	crash := true
 	r, _ := migrationReconciler(t, p, interceptor.Funcs{
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if crash {
-				return errors.New("status write rejected")
+				return errors.New(errStatusWriteRejected)
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)
 		},
@@ -274,13 +274,13 @@ func TestRestoreWorkloadReEntersAfterAFailedWrite(t *testing.T) {
 
 	entry := p.Status.Upgrade.Fenced[0]
 	require.Error(t, r.restoreWorkload(context.Background(), p, entry))
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the workload is back up")
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "the workload is back up")
 	assert.Len(t, storedFenced(t, r), 1, "but the fence still lists it, so it is restored again if this pass is lost")
 
 	crash = false
 	require.NoError(t, r.restoreWorkload(context.Background(), storedPlatform(t, r), entry))
 	assert.Empty(t, storedFenced(t, r))
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName))
 }
 
 // TestLiftMigrationFenceResumesAfterAPartialRestore is the re-entrancy claim the whole
@@ -290,9 +290,9 @@ func TestRestoreWorkloadReEntersAfterAFailedWrite(t *testing.T) {
 // that it should come back up.
 func TestLiftMigrationFenceResumesAfterAPartialRestore(t *testing.T) {
 	p := fencedMigrationPlatform(
-		otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
-		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: "Deployment", Replicas: 1},
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: kindDeployment, Replicas: 2},
+		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: kindDeployment, Replicas: 1},
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	)
 	writes := 0
 	crash := true
@@ -300,7 +300,7 @@ func TestLiftMigrationFenceResumesAfterAPartialRestore(t *testing.T) {
 		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			writes++
 			if crash && writes == 2 {
-				return errors.New("status write rejected")
+				return errors.New(errStatusWriteRejected)
 			}
 			return c.SubResource(sub).Update(ctx, obj, opts...)
 		},
@@ -308,20 +308,20 @@ func TestLiftMigrationFenceResumesAfterAPartialRestore(t *testing.T) {
 
 	require.Error(t, r.liftMigrationFence(context.Background(), p), "the pass stops at the write it could not make")
 	assert.Equal(t, []otilmv1alpha1.FencedWorkload{
-		{Name: "provisioning", Kind: "Deployment", Replicas: 1},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		{Name: "provisioning", Kind: kindDeployment, Replicas: 1},
+		{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3},
 	}, storedFenced(t, r), "only the restore that was persisted is accounted for")
-	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"))
-	assert.Zero(t, replicasOf(t, r, "scheduler"), "the restores past the failure never ran")
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName))
+	assert.Zero(t, replicasOf(t, r, schedulerWorkloadName), "the restores past the failure never ran")
 
 	// The restart: a fresh read of what survived, and the same call again.
 	crash = false
 	resumed := storedPlatform(t, r)
 	require.NoError(t, r.liftMigrationFence(context.Background(), resumed))
 	assert.Empty(t, storedFenced(t, r), "the fenced list is empty only once every workload is back")
-	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"), "an already-restored workload keeps its count")
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName), "an already-restored workload keeps its count")
 	assert.Equal(t, int32(1), replicasOf(t, r, "provisioning"))
-	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName))
 }
 
 // TestLiftMigrationFenceIsANoOpWhenNothingIsFenced: the conclusion runs it unconditionally, so
@@ -336,7 +336,7 @@ func TestLiftMigrationFenceIsANoOpWhenNothingIsFenced(t *testing.T) {
 
 // fencedWorkloadObjects are the three producers the restore tests hold at zero replicas.
 func fencedWorkloadObjects() []client.Object {
-	names := []string{"api-gateway", "provisioning", "scheduler"}
+	names := []string{gatewayWorkloadName, "provisioning", schedulerWorkloadName}
 	objs := make([]client.Object, 0, len(names))
 	for _, name := range names {
 		objs = append(objs, &appsv1.Deployment{
@@ -361,7 +361,7 @@ func TestRestoreWorkloadWithoutMigration(t *testing.T) {
 	p := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Name: "ilm", Namespace: fenceTestNS}}
 	r := fenceReconcilerFor(t, p)
 	assert.NoError(t, r.restoreWorkload(context.Background(), p,
-		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3}))
+		otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}))
 }
 
 // TestWorkloadReplicaCountDefaults: an unset .spec.replicas means the apiserver's default of
@@ -377,11 +377,11 @@ func TestWorkloadReplicaCountDefaults(t *testing.T) {
 // TestWorkloadObjectKinds pins the kinds the fence can address, and that anything else is an
 // explicit error rather than a silent default.
 func TestWorkloadObjectKinds(t *testing.T) {
-	dep, err := workloadObject("Deployment")
+	dep, err := workloadObject(kindDeployment)
 	require.NoError(t, err)
 	assert.IsType(t, &appsv1.Deployment{}, dep)
 
-	sts, err := workloadObject("StatefulSet")
+	sts, err := workloadObject(kindStatefulSet)
 	require.NoError(t, err)
 	assert.IsType(t, &appsv1.StatefulSet{}, sts)
 
