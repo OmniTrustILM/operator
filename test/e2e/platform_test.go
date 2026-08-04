@@ -3650,14 +3650,27 @@ spec:
 				// seconds — but the operator emits one MessagingMigrationPhase event per transition,
 				// and those persist. The trail is the assertion; the sampled reasons above are only
 				// the progress diagnostic.
+				//
+				// TWO THINGS MAKE THE TRAIL SPECIFIC ENOUGH TO ASSERT ON. The query is scoped to THIS
+				// Platform, so no other object in the namespace can satisfy it; and each phase is
+				// matched with the phase it came FROM, so the assertion is a CHAIN rather than a set
+				// of independent sightings. The earlier, aborted attempt in this same namespace ran
+				// Fencing → Draining and stopped, so its events remain in the trail — only the
+				// transitions it never reached prove this migration went the whole way.
 				Eventually(func(g Gomega) {
 					trail, err := utils.Run(exec.Command("kubectl", "get", "events", "-n", ns,
-						"--field-selector", "reason=MessagingMigrationPhase",
+						"--field-selector", "reason=MessagingMigrationPhase,involvedObject.name="+migratePlatformName,
 						"-o", `jsonpath={range .items[*]}{.message}{"\n"}{end}`))
 					g.Expect(err).NotTo(HaveOccurred(), "the phase-transition events should be readable")
-					for _, phase := range []string{"Draining", "CuttingOver", "CleaningUp"} {
-						g.Expect(trail).To(ContainSubstring("entered phase "+phase),
-							"the operator must record entering phase %s in the event trail", phase)
+					for _, transition := range []struct{ entered, from string }{
+						{entered: "Draining", from: "Fencing"},
+						{entered: "CuttingOver", from: "Draining"},
+						{entered: "CleaningUp", from: "CuttingOver"},
+					} {
+						g.Expect(trail).To(ContainSubstring(
+							fmt.Sprintf("entered phase %s (from %s)", transition.entered, transition.from)),
+							"the operator must record entering phase %s from %s in the event trail",
+							transition.entered, transition.from)
 					}
 				}, 2*time.Minute, 5*time.Second).Should(Succeed())
 

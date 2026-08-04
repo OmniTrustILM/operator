@@ -332,7 +332,9 @@ func TestCutoverStageOrder(t *testing.T) {
 
 	for _, s := range []cutoverStage{cutoverStageTopology, cutoverStageProvisioning, cutoverStageCore, cutoverStageGateway} {
 		assert.NotEmpty(t, s.String())
-		assertNoBrokerCoordinates(t, migrationCutoverMessage(cutoverPlatform().Status.Upgrade, s))
+		assertNoBrokerCoordinates(t, migrationCutoverMessage(cutoverPlatform().Status.Upgrade, cutoverMeasurement{stage: s}))
+		assertNoBrokerCoordinates(t, migrationCutoverMessage(cutoverPlatform().Status.Upgrade,
+			cutoverMeasurement{stage: s, blockedOn: schedulerWorkloadName}))
 	}
 }
 
@@ -454,24 +456,44 @@ func TestCutoverHoldsAFencedWorkloadUntilTheTargetRenderReachesIt(t *testing.T) 
 	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway()}, storedPlatform(t, r).Status.Upgrade.Fenced)
 }
 
-// TestCutoverRefusesADependencyScaledToZero is the OTHER way a stage can be satisfied without
-// anything having happened.
+// TestCutoverSurfacesADependencyScaledToZeroWithoutStoppingTheReconcile is the OTHER way a stage
+// can be satisfied without anything having happened.
 //
 // A component configured for zero replicas is admissible on an ordinary platform, and the rollout
 // predicate deliberately calls it rolled out — correct for the fence's checks, where zero is the
 // state the fence itself imposed. In the cutover it is a wedge: a Service with no endpoints never
 // answers, so Core's init containers (wait-for-auth polls the scheduler, provision-instance-queue
 // polls the provisioning API) can never pass, and the phase has no deadline to end the wait. Core
-// at zero is the same vacuum one step later. So it is surfaced, with the one action that unblocks
-// it, rather than waited on.
-func TestCutoverRefusesADependencyScaledToZero(t *testing.T) {
+// at zero is the same vacuum one step later.
+//
+// SO IT IS REPORTED, AND THE PASS GOES ON. The remedy is the operator raising the component's
+// replica count in the CR, and the only thing that carries that edit down to the child workload is
+// the base Server-Side Apply that runs AFTER this gate. A pass that short-circuited here would
+// skip the very apply the remedy travels through: the reconcile would read the same zero forever,
+// however the CR was corrected. So the measurement names the workload, the condition carries the
+// action, and handled stays false.
+func TestCutoverSurfacesADependencyScaledToZeroWithoutStoppingTheReconcile(t *testing.T) {
 	tests := []struct {
-		name     string
+		name string
+		// workload is the component the platform configures for no pods at all.
 		workload string
+		// wantStage is the stage that cannot complete while it is at zero, and wantHold whether
+		// Core may be rendered at that stage.
+		wantStage cutoverStage
+		wantHold  bool
 	}{
-		{name: "the provisioning service Core's proxy path retries against", workload: provisioningWorkloadName},
-		{name: "the scheduler Core's wait-for-auth polls", workload: schedulerWorkloadName},
-		{name: "core itself, whose readiness stage 4 turns on", workload: coreDeploymentName},
+		{
+			name: "the provisioning service Core's proxy path retries against", workload: provisioningWorkloadName,
+			wantStage: cutoverStageProvisioning, wantHold: true,
+		},
+		{
+			name: "the scheduler Core's wait-for-auth polls", workload: schedulerWorkloadName,
+			wantStage: cutoverStageProvisioning, wantHold: true,
+		},
+		{
+			name: "core itself, whose readiness stage 4 turns on", workload: coreDeploymentName,
+			wantStage: cutoverStageCore,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -494,25 +516,70 @@ func TestCutoverRefusesADependencyScaledToZero(t *testing.T) {
 			)
 			r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
-			_, handled, _, err := cutoverPass(t, r)
-			assert.True(t, handled, "the pass stops rather than waiting forever for a pod nothing will ask for")
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.workload, "the operator is told which workload to scale")
-			assertNoBrokerCoordinates(t, err.Error())
+			render, handled, _, err := cutoverPass(t, r)
+			require.NoError(t, err, "a component the operator can scale is not a failure of this operator")
+			assert.False(t, handled,
+				"the reconcile must continue: its own apply is the only way the corrected replica count reaches the workload")
+			assert.True(t, render.requeue)
+			assert.Equal(t, tc.wantHold, render.holdCore)
 
 			stored := storedPlatform(t, r)
 			assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
 				"the migration stays where it is until the operator scales the component up")
 			assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway()}, stored.Status.Upgrade.Fenced,
-				"the door is not reopened onto a platform that can never finish cutting over")
+				"the door is not reopened onto a platform that cannot finish cutting over")
 			assert.Equal(t, int32(0), replicasOf(t, r, gatewayWorkloadName))
 
-			degraded := meta.FindStatusCondition(stored.Status.Conditions, conditionDegraded)
-			require.NotNil(t, degraded, "a wedge with no deadline behind it has to be visible on the platform")
-			assert.Equal(t, reasonMigrationCutoverError, degraded.Reason)
-			assertNoBrokerCoordinates(t, degraded.Message)
+			cond := migrationCondition(stored)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionTrue, cond.Status,
+				"a platform waiting on a replica count of its own is waiting, not broken")
+			assert.Contains(t, cond.Message, tc.wantStage.String())
+			assert.Contains(t, cond.Message, tc.workload, "the operator is told which workload to scale")
+			assert.Contains(t, cond.Message, "1 replica", "and the one action that unblocks the migration")
+			assertNoBrokerCoordinates(t, cond.Message)
+			assert.Nil(t, meta.FindStatusCondition(stored.Status.Conditions, conditionDegraded),
+				"a component nobody asked for pods from is the platform's own configuration, not a degraded operator")
+
+			// The remedy: spec.<component>.replicas goes back up, and the base apply — the one
+			// this pass did NOT skip — lands it on the child workload. The migration resumes with
+			// no further intervention. Every OTHER component in this fixture is already serving
+			// the target, so the single blocked one coming up carries the cutover all the way to
+			// the hand-over.
+			scaleWorkload(t, r, tc.workload, 1)
+
+			_, handled, _, err = cutoverPass(t, r)
+			require.NoError(t, err)
+			assert.False(t, handled)
+
+			stored = storedPlatform(t, r)
+			assert.Equal(t, otilmv1alpha1.MigrationPhaseCleaningUp, stored.Status.Upgrade.Phase,
+				"the migration carries on by itself once the workload the condition named is serving")
+			assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName), "the door is reopened at its recorded count")
+			assert.NotContains(t, migrationCondition(stored).Message, "0 replicas",
+				"the remedy stops being advertised once it has been applied")
 		})
 	}
+}
+
+// scaleWorkload raises a live workload's desired replica count and reports it fully rolled out at
+// that count — what the operator editing spec.<component>.replicas, the reconcile's own apply and
+// the workload controller between them leave behind.
+func scaleWorkload(t *testing.T, r *Reconciler, name string, replicas int32) {
+	t.Helper()
+	ctx := context.Background()
+	var dep appsv1.Deployment
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Name: name, Namespace: migrationTestNS}, &dep))
+	dep.Spec.Replicas = ptr(replicas)
+	require.NoError(t, r.Update(ctx, &dep))
+
+	// The workload controller catching up is a SECOND write, on the status subresource and after
+	// the spec one bumped the generation: a rollout is complete only once the controller has
+	// observed the very template the operator applied.
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Name: name, Namespace: migrationTestNS}, &dep))
+	dep.Status.ObservedGeneration = dep.Generation
+	dep.Status.Replicas, dep.Status.UpdatedReplicas, dep.Status.AvailableReplicas = replicas, replicas, replicas
+	require.NoError(t, r.Status().Update(ctx, &dep))
 }
 
 // --- the staged sequence -----------------------------------------------------
@@ -679,6 +746,58 @@ func TestCutoverReopensTheGatewayAndHandsOver(t *testing.T) {
 	}
 	require.NotEmpty(t, handOver, "the hand-over is announced")
 	assertNoBrokerCoordinates(t, handOver)
+}
+
+// TestCutoverDoesNotHandOverWhileTheGatewayIsStillFenced is stage 4's own version of the release
+// contract: a release that DEFERS is not a release, and the hand-over may not step over it.
+//
+// The gateway's release is template-guarded exactly as the pre-Core ones are — a door reopened
+// while it still carries the SOURCE pod template would publish into the virtual host the drain has
+// emptied. But stage 4 is the last stage: unlike stage 2, nothing downstream re-measures fence
+// membership, and the cleanup's own final restore is not template-guarded. So a deferred release
+// that the phase handed over anyway would leave the platform shut with the cleanup running, and
+// reopen it later with no check at all. The stage therefore hands over only once the gateway is
+// actually clear of the fence.
+func TestCutoverDoesNotHandOverWhileTheGatewayIsStillFenced(t *testing.T) {
+	p := cutoverPlatform(fencedGateway())
+	seed := declaredTargetTopology(p)
+	seed = append(seed,
+		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		rolledOutScheduler(p),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
+		// The door still carries the SOURCE template: this phase runs ahead of the reconcile's own
+		// apply, so the first pass to reach stage 4 can find it not yet retargeted.
+		cutoverWorkload(gatewayWorkloadName, gatewayImageOf(p), platformVersion218, 0, true),
+	)
+	r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
+
+	render, handled, _, err := cutoverPass(t, r)
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.True(t, render.requeue, "the release is deferred to the next pass, not abandoned")
+
+	stored := storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
+		"the cleanup may not inherit a platform whose door is still shut")
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway()}, stored.Status.Upgrade.Fenced)
+	assert.Equal(t, int32(0), replicasOf(t, r, gatewayWorkloadName))
+	for _, e := range drainEvents(rec) {
+		assert.NotContains(t, e, string(otilmv1alpha1.MigrationPhaseCleaningUp),
+			"a hand-over that has not happened must not be announced")
+	}
+
+	// What the rest of the reconcile does after this phase hands back: the base apply puts the
+	// target template on the gateway too. The same stage now releases it and hands over.
+	retargetWorkload(t, r, gatewayWorkloadName, gatewayImageOf(p), platformVersion219)
+
+	_, handled, _, err = cutoverPass(t, r)
+	require.NoError(t, err)
+	assert.False(t, handled)
+
+	stored = storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseCleaningUp, stored.Status.Upgrade.Phase)
+	assert.Empty(t, stored.Status.Upgrade.Fenced)
+	assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName), "the door is reopened at its recorded count")
 }
 
 // TestCutoverResumesAtEveryStageBoundary is the crash contract. Each stage is re-entered from
@@ -880,21 +999,31 @@ func TestWorkloadRolledOutHandlesBothKinds(t *testing.T) {
 	r, _ := cutoverReconciler(t, cutoverPlatform(), interceptor.Funcs{}, sts)
 	ctx := context.Background()
 
-	rolled, err := r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion219)
+	progress, err := r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion219)
 	require.NoError(t, err)
-	assert.True(t, rolled, "a StatefulSet-typed component rolls out like a Deployment-typed one")
+	assert.Equal(t, workloadProgress{rolled: true}, progress,
+		"a StatefulSet-typed component rolls out like a Deployment-typed one")
 
-	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, "kong:3.8.0", platformVersion219)
+	progress, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, "kong:3.8.0", platformVersion219)
 	require.NoError(t, err)
-	assert.False(t, rolled, "the target image is corroborating evidence, and it has to match too")
+	assert.Equal(t, workloadProgress{}, progress, "the target image is corroborating evidence, and it has to match too")
 
-	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion218)
+	progress, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion218)
 	require.NoError(t, err)
-	assert.False(t, rolled, "a template stamped with another version is not the target rollout")
+	assert.Equal(t, workloadProgress{}, progress, "a template stamped with another version is not the target rollout")
 
-	rolled, err = r.workloadRolledOut(ctx, migrationTestNS, "nothing-of-this-name", image, platformVersion219)
+	progress, err = r.workloadRolledOut(ctx, migrationTestNS, "nothing-of-this-name", image, platformVersion219)
 	require.NoError(t, err)
-	assert.False(t, rolled, "a workload that has not been applied yet is not an error")
+	assert.Equal(t, workloadProgress{}, progress, "a workload that has not been applied yet is not an error")
+
+	// A StatefulSet-typed component the platform configures for no pods is named rather than
+	// answered, exactly as a Deployment-typed one is.
+	sts.Spec.Replicas = ptr(int32(0))
+	require.NoError(t, r.Update(ctx, sts))
+	progress, err = r.workloadRolledOut(ctx, migrationTestNS, gatewayWorkloadName, image, platformVersion219)
+	require.NoError(t, err)
+	assert.Equal(t, workloadProgress{blockedOn: gatewayWorkloadName}, progress,
+		"a component with no pods is a wait the operator can end, not a rollout")
 }
 
 // TestTopologyObjectDeclaredFailsClosed pins the one-directional answer stage 1 depends on: only an
