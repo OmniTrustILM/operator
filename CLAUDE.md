@@ -195,7 +195,7 @@ Each platform version is a bundle in `pkg/bom/bom.go` carrying a `Released` flag
 
 - It resolves **only** via an explicit `spec.version`; `SupportedVersions()` excludes it, so it never appears in advertised or defaulted output.
 - `DefaultVersion` must name a **released** bundle (`TestDefaultVersionIsReleased` enforces this) — an empty `spec.version` can never land on a preview.
-- A **live** platform cannot be upgraded onto a preview: the controller's guard goes `Degraded` with reason `PreviewVersionUpgradeBlocked`, keeps the running version, and does not re-render. A *fresh* platform pinned to a preview is fine.
+- A **live** platform reaches a preview only by the same explicit `spec.version` opt-in, and the move is governed like any other version move — including the messaging migration when the managed topology changes between the two bundles. There is no separate preview-upgrade guard.
 
 Release day is a data-only flip: set `Released: true` on the bundle and move `DefaultVersion` to it. Treat a preview bundle as opt-in, maintainer-facing surface — samples that use one must say so.
 
