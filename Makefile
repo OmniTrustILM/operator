@@ -193,11 +193,12 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PR
 
 # E2E_MANAGED_LABEL selects which managed Context(s) run. Defaults to the umbrella 'managed' (all
 # managed blocks, sequential, one cluster — local convenience). CI passes a PER-BLOCK label
-# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix-upgrade / matrix-preview)
-# so each block runs in its OWN parallel job on its OWN fresh Kind cluster — no shared-cluster
-# install/uninstall collisions. The version matrix is TWO blocks: 'matrix-upgrade' (2.17.0 deploy
-# -> 2.18.0 upgrade -> downgrade refused -> preview upgrade refused -> Delete reclaim) and
-# 'matrix-preview' (the fresh managed 2.19.0 install). Both also carry the umbrella label 'matrix'.
+# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix-upgrade / matrix-preview
+# / matrix-migration) so each block runs in its OWN parallel job on its OWN fresh Kind cluster — no
+# shared-cluster install/uninstall collisions. The version matrix is THREE blocks: 'matrix-upgrade'
+# (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 on a pinned vhost -> Delete
+# reclaim), 'matrix-preview' (the fresh managed 2.19.0 install) and 'matrix-migration' (the
+# 2.18.0 -> 2.19.0 messaging migration end to end). All three also carry the umbrella label 'matrix'.
 E2E_MANAGED_LABEL ?= managed
 
 .PHONY: test-e2e-managed
@@ -218,35 +219,37 @@ test-e2e-managed: setup-test-e2e manifests generate fmt vet ## Run the GATED man
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-matrix
-test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run BOTH version-matrix blocks (matrix-upgrade + matrix-preview) in one cluster.
-	# FOCUSED VERSION-MATRIX run: the umbrella 'matrix' Ginkgo label selects BOTH version-matrix
-	# Contexts (each installs its own upstream operators) — WITHOUT the four per-infra managed
+test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ALL version-matrix blocks (upgrade + preview + migration) in one cluster.
+	# FOCUSED VERSION-MATRIX run: the umbrella 'matrix' Ginkgo label selects every version-matrix
+	# Context (each installs its own upstream operators) — WITHOUT the four per-infra managed
 	# blocks. Sequentially, in this one cluster, that is:
-	#   'matrix-upgrade': bring up ONE managed 2.17.0 stack, upgrade it in place to 2.18.0, prove
-	#                     the downgrade refusal and the refusal to upgrade onto the unreleased
-	#                     2.19.0 preview bundle, then prove deletionPolicy=Delete reclaims every
-	#                     managed CR (which also frees this shared node);
-	#   'matrix-preview': bring up a FRESH 2.19.0 platform and assert the 2.19.0 contract.
-	# CI runs the two blocks as SEPARATE parallel jobs on separate clusters (see
-	# E2E_MANAGED_LABEL); locally they share this cluster, so the run is still the sum of both.
-	# The pair measures ~21m locally on a warm-ish image cache; -timeout 90m keeps ~4x headroom
-	# for CI, where a fresh cluster re-pulls every image for BOTH full bring-ups (2.17.0 and
-	# 2.19.0) plus the in-place 2.18.0 re-roll.
-	# --ginkgo.timeout=85m: Ginkgo's own suite timeout defaults to 1h; the two blocks' operator
-	# installs + the two full bring-ups + the upgrade re-roll can exceed that on a cold cache, so
-	# raise it (kept UNDER the 90m go-test ceiling so Ginkgo reports before go-test panics).
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=85m -timeout 90m
+	#   'matrix-upgrade':   bring up ONE managed 2.17.0 stack, upgrade it in place to 2.18.0, prove
+	#                       the downgrade refusal, then take 2.19.0 as an ORDINARY additive upgrade
+	#                       (that CR pins its vhost, so no migration triggers), and finally prove
+	#                       deletionPolicy=Delete reclaims every managed CR (freeing this node);
+	#   'matrix-preview':   bring up a FRESH 2.19.0 platform and assert the 2.19.0 contract;
+	#   'matrix-migration': bring up an UNPINNED managed 2.18.0 platform and drive the real
+	#                       2.18.0 -> 2.19.0 messaging migration (fence, drain, deadline exit,
+	#                       staged cutover, source reclaim) end to end.
+	# CI runs the three blocks as SEPARATE parallel jobs on separate clusters (see
+	# E2E_MANAGED_LABEL); locally they share this cluster, so the run is the sum of all three —
+	# the migration block alone adds a full bring-up plus two fence/drain cycles.
+	# -timeout 120m / --ginkgo.timeout=115m: Ginkgo's own suite timeout defaults to 1h, which three
+	# full bring-ups on a cold image cache exceed; the Ginkgo ceiling is kept UNDER the go-test one
+	# so a hung spec is reported by Ginkgo instead of panicking as an opaque "test timed out".
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.label-filter='matrix' --ginkgo.timeout=115m -timeout 120m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: test-e2e-all
 test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (fast + managed) in one cluster (~2h, full local run).
 	# Full local run: no label filter, so every spec (fast + managed) runs SEQUENTIALLY in one
 	# cluster — the fast tier, the three per-infra managed blocks, the FULL platform block AND the
-	# version matrix (which alone measures ~21m locally for its two full bring-ups). -timeout 150m
-	# is the sum-of-blocks ceiling that replaces the old 75m, which predated the matrix block and
-	# could no longer cover the run. --ginkgo.timeout=145m raises Ginkgo's own 1h default to just
-	# under it, so Ginkgo reports the failing spec instead of go-test panicking mid-run.
-	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=145m -timeout 150m
+	# version matrix (whose THREE blocks are three full bring-ups, the migration one adding two
+	# fence/drain cycles on top). -timeout 195m is the sum-of-blocks ceiling; it replaces the 150m
+	# that predated the migration block and could no longer cover the run. --ginkgo.timeout=190m
+	# raises Ginkgo's own 1h default to just under it, so Ginkgo reports the failing spec instead
+	# of go-test panicking mid-run.
+	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=190m -timeout 195m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

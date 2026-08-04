@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -2708,23 +2710,23 @@ func noImagePullErrorForApp(g Gomega, ns, dep string) bool {
 }
 
 // -------------------------------------------------------------------------
-// VERSION-MATRIX e2e (split into two independently schedulable blocks)
+// VERSION-MATRIX e2e (split into independently schedulable blocks)
 //
 // The version story used to live in ONE Ordered Context that brought a managed platform up
 // twice — 2.17.0 → 2.18.0 → refusals, then a HARD teardown/drain barrier, then a fresh
 // 2.19.0 — which made it the longest pole of the managed tier (two serial bring-ups on one
-// node). It is now TWO Ordered Contexts, "matrix-upgrade" and "matrix-preview", each of which
-// CI runs in its own job on its own fresh Kind cluster, in parallel. Because neither block
-// shares a node with the other, the barrier that existed only to free that node is gone; the
-// deletionPolicy=Delete reclaim it also asserted is kept, as the upgrade block's final spec.
-// Both blocks keep the umbrella "matrix" label, so a local `make test-e2e-matrix` still runs
-// the whole story (sequentially, in one cluster).
+// node). It is now THREE Ordered Contexts — "matrix-upgrade", "matrix-preview" and
+// "matrix-migration" — each of which CI runs in its own job on its own fresh Kind cluster, in
+// parallel. Because no block shares a node with another, the barrier that existed only to free
+// that node is gone; the deletionPolicy=Delete reclaim it also asserted is kept, as the upgrade
+// block's final spec. All three keep the umbrella "matrix" label, so a local
+// `make test-e2e-matrix` still runs the whole story (sequentially, in one cluster).
 // -------------------------------------------------------------------------
 
-// Version-matrix block identifiers. The upgrade block and the fresh-2.19.0 block each own a
-// DISTINCT Platform name — and therefore distinct managed-infra and topology CR names — so
-// neither can adopt or collide with the other's objects (the Topology Operator treats a Vhost's
-// spec.name as immutable) even when both run in the same cluster locally.
+// Version-matrix block identifiers. Each block owns a DISTINCT Platform name — and therefore
+// distinct managed-infra and topology CR names — so none can adopt or collide with another's
+// objects (the Topology Operator treats a Vhost's spec.name as immutable) even when they all
+// run in the same cluster locally.
 const (
 	matrixPlatformName  = "ilm-matrix"
 	matrixMQClusterName = matrixPlatformName + "-messaging"
@@ -2734,7 +2736,11 @@ const (
 	previewMQClusterName = previewPlatformName + "-messaging"
 	previewEdgeHost      = "ilm-preview.e2e.local"
 
-	// matrixRealm is the Keycloak realm both version-matrix blocks provision.
+	migratePlatformName  = "ilm-migrate"
+	migrateMQClusterName = migratePlatformName + "-messaging"
+	migrateEdgeHost      = "ilm-migrate.e2e.local"
+
+	// matrixRealm is the Keycloak realm every version-matrix block provisions.
 	matrixRealm = "ilm"
 )
 
@@ -2857,17 +2863,22 @@ func matrixManagedCRRefs(platformName string) []string {
 // MANAGED Platform pinned to 2.17.0 (the pre-rebrand CZERTAINLY release) reaches Available with
 // the 2.17.0 contract (core:2.17.0, RABBITMQ_* broker env, single-user managed topology), then
 // UPGRADES in place to 2.18.0 (core:2.18.0, BROKER_* env, the five-user topology), then a
-// DOWNGRADE is refused, then an upgrade onto the UNRELEASED 2.19.0 preview bundle is refused (the
-// running 2.18.0 is preserved) and the restore re-converges, and finally the platform's
-// deletionPolicy=Delete teardown is proven to RECLAIM every managed CR it rendered.
+// DOWNGRADE is refused (and the stale Degraded it leaves is cleared by the next successful pass),
+// then 2.19.0 lands as an ORDINARY additive upgrade because this CR PINS
+// spec.messaging.virtualHost — a pinned vhost resolves the same under every bundle, so the
+// messaging migration never triggers — and finally the platform's deletionPolicy=Delete teardown
+// is proven to RECLAIM every managed CR it rendered.
+//
+// The migrating counterpart is platformVersionMatrixMigrationSpecs, whose CR pins NO vhost and so
+// takes the fence → drain → cutover → reclaim path instead.
 //
 // Labelled "matrix-upgrade" so CI runs it in its OWN job on its OWN fresh cluster, in parallel
-// with the fresh-2.19.0 block (platformVersionMatrixPreviewSpecs); the umbrella "matrix" label is
-// kept so `make test-e2e-matrix` still runs both locally. Like the FULL block it runs in the
+// with the other version-matrix blocks; the umbrella "matrix" label is kept so
+// `make test-e2e-matrix` still runs them all locally. Like the FULL block it runs in the
 // Keycloak Operator's namespace (managed Keycloak is namespace-scoped) and installs its own
 // upstream operators in BeforeAll.
 func platformVersionMatrixUpgradeSpecs() {
-	Context("Platform VERSION MATRIX — upgrades (managed 2.17.0 → 2.18.0 → downgrade refused → 2.19.0 preview refused → Delete reclaims)",
+	Context("Platform VERSION MATRIX — upgrades (managed 2.17.0 → 2.18.0 → downgrade refused → 2.19.0 on a pinned vhost → Delete reclaims)",
 		Ordered, Label("managed", "matrix", "matrix-upgrade"), func() {
 			ns := utils.KeycloakOperatorNamespace
 			const coreUserSecret = "ilm-matrix-messaging-core-user-credentials"
@@ -3002,61 +3013,64 @@ spec:
 				}, 5*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
-			It("refuses an upgrade onto the 2.19.0 preview bundle (PreviewVersionUpgradeBlocked; the running 2.18.0 is preserved)", func() {
-				By("setting spec.version to the unreleased 2.19.0 preview bundle")
+			It("upgrades 2.18.0 → 2.19.0 with NO messaging migration because the vhost is user-pinned", func() {
+				// THE USER-PINNED VHOST INVARIANT, on a real cluster. The migration engine triggers on a
+				// change of the EFFECTIVE messaging vhost between the running and the requested bundle. A
+				// platform that pins spec.messaging.virtualHost resolves the SAME vhost under every
+				// bundle, so 2.18.0 → 2.19.0 renames the exchanges WITHIN one vhost and stays the
+				// ordinary additive apply: no fence, no drain, no cutover. This CR pins "czertainly", so
+				// it is exactly that case — the block that DOES migrate is the unpinned one
+				// (platformVersionMatrixMigrationSpecs).
+				By("setting spec.version to 2.19.0 on the vhost-pinned platform")
 				_, err := utils.Run(exec.Command("kubectl", "patch", "platform", matrixPlatformName, "-n", ns,
 					"--type=merge", "-p", `{"spec":{"version":"2.19.0"}}`))
 				Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version to 2.19.0")
 
-				By("verifying the platform goes Degraded/PreviewVersionUpgradeBlocked and observedVersion stays 2.18.0")
+				By("waiting for observedVersion 2.19.0 + Available=True + the core:2.19.0 image rolled out")
+				// The successful pass also CLEARS the stale Degraded=True the refused downgrade left
+				// behind (reason Reconciled), so the platform stops advertising a refusal it has
+				// recovered from.
 				Eventually(func(g Gomega) {
-					reason, _ := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
-						"-o", `jsonpath={.status.conditions[?(@.type=="Degraded")].reason}`))
-					g.Expect(strings.TrimSpace(reason)).To(Equal("PreviewVersionUpgradeBlocked"),
-						"a live platform must not be upgraded onto an unreleased (preview) bundle")
 					ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
 						"-o", "jsonpath={.status.observedVersion}"))
-					g.Expect(strings.TrimSpace(ver)).To(Equal("2.18.0"), "the running version is NOT advanced onto the preview")
-				}, 5*time.Minute, 10*time.Second).Should(Succeed())
-
-				By("verifying the running 2.18.0 workload + managed topology are left untouched (nothing 2.19.0 was rendered)")
-				// The guard is a terminal steady state BEFORE the render/apply, so the live objects must
-				// keep the 2.18.0 contract: Core stays on core:2.18.0 and the managed topology keeps the
-				// 2.18.0 vhost with none of the 2.19.0-only objects (the renamed "ilm" exchange, the new
-				// provider.status-poll queue) appearing alongside it. This CR PINS spec.messaging.virtualHost
-				// to the legacy "czertainly", so the 2.19.0 objects it would have rendered carry the
-				// UNSCOPED names asserted absent here (a non-legacy vhost would scope them).
-				Consistently(func(g Gomega) {
-					img, _ := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
-						"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].image}`))
-					g.Expect(img).To(ContainSubstring("/core:2.18.0"), "Core must keep running the 2.18.0 image")
-					g.Expect(topologyObjectSpecName(g, ns, "vhost", matrixMQClusterName+"-vhost")).To(Equal("czertainly"),
-						"the managed vhost must stay the 2.18.0 one")
-					g.Expect(topologyObjectAbsent(g, ns, "exchange", matrixMQClusterName+"-exchange-ilm")).To(BeTrue(),
-						"the 2.19.0 \"ilm\" exchange must NOT be rendered")
-					g.Expect(topologyObjectAbsent(g, ns, "queue", matrixMQClusterName+"-queue-provider-status-poll")).To(BeTrue(),
-						"the 2.19.0 provider.status-poll queue must NOT be rendered")
-				}, 30*time.Second, 5*time.Second).Should(Succeed())
-
-				By("restoring spec.version to 2.18.0")
-				_, err = utils.Run(exec.Command("kubectl", "patch", "platform", matrixPlatformName, "-n", ns,
-					"--type=merge", "-p", `{"spec":{"version":"2.18.0"}}`))
-				Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version back to 2.18.0")
-
-				By("verifying the platform returns to Available with the blocked Degraded condition cleared")
-				// The successful pass clears the stale Degraded=True (reason Reconciled), so the platform
-				// stops advertising the refusal once the spec is corrected.
-				Eventually(func(g Gomega) {
+					g.Expect(strings.TrimSpace(ver)).To(Equal("2.19.0"), "observedVersion advances to 2.19.0")
 					avail, _ := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
 						"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`))
-					g.Expect(strings.TrimSpace(avail)).To(Equal(conditionStatusTrue), "the platform must be Available again")
+					g.Expect(strings.TrimSpace(avail)).To(Equal(conditionStatusTrue), "the platform must re-converge after the upgrade")
 					degraded, _ := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
 						"-o", `jsonpath={.status.conditions[?(@.type=="Degraded")].status}`))
 					g.Expect(strings.TrimSpace(degraded)).To(Equal("False"), "the stale Degraded must be cleared once the spec is corrected")
-					ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
-						"-o", "jsonpath={.status.observedVersion}"))
-					g.Expect(strings.TrimSpace(ver)).To(Equal("2.18.0"), "the restored version is the one that kept running")
-				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+					img, _ := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
+						"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].image}`))
+					g.Expect(img).To(ContainSubstring("/core:2.19.0"), "Core must roll to the 2.19.0 image")
+				}, 20*time.Minute, 15*time.Second).Should(Succeed())
+
+				By("verifying NO messaging migration was ever recorded (no status.upgrade, no MessagingMigration condition)")
+				Consistently(func(g Gomega) {
+					upgrade, err := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
+						"-o", "jsonpath={.status.upgrade}"))
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(strings.TrimSpace(upgrade)).To(BeEmpty(),
+						"a pinned vhost never renames, so the engine must not record a migration")
+					g.Expect(getPlatformConditionStatusInNS(g, ns, matrixPlatformName, "MessagingMigration")).To(BeEmpty(),
+						"a platform that never migrates must not advertise a MessagingMigration condition")
+				}, 30*time.Second, 5*time.Second).Should(Succeed())
+
+				By("verifying the topology renamed ADDITIVELY on the pinned vhost (same Vhost CR, ilm exchange alongside czertainly)")
+				// The pinned vhost keeps the UNSCOPED object names, so the 2.19.0 exchanges land beside
+				// the 2.18.0 ones on the very same Vhost CR: the exchange rename is additive here, and
+				// the source objects stay (rabbitmq.com kinds are prune-excluded — only a migration's
+				// cleanup ever deletes them).
+				Eventually(func(g Gomega) {
+					g.Expect(topologyObjectSpecName(g, ns, "vhost", matrixMQClusterName+"-vhost")).To(Equal("czertainly"),
+						"the pinned vhost is unchanged by the version bump")
+					g.Expect(topologyObjectReadyInNS(g, ns, "exchange", matrixMQClusterName+"-exchange-ilm")).To(BeTrue(),
+						"the 2.19.0 \"ilm\" exchange is applied onto the pinned vhost")
+					g.Expect(topologyObjectReadyInNS(g, ns, "queue", matrixMQClusterName+"-queue-provider-status-poll")).To(BeTrue(),
+						"the 2.19.0-new provider.status-poll queue is applied onto the pinned vhost")
+					g.Expect(topologyObjectAbsent(g, ns, "exchange", matrixMQClusterName+"-exchange-czertainly")).To(BeFalse(),
+						"the 2.18.0 exchange is left in place (no migration means no reclaim)")
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
 			})
 
 			It("reclaims every managed CR when the deletionPolicy=Delete Platform is deleted", func() {
@@ -3243,4 +3257,719 @@ spec:
 				}, 5*time.Minute, 10*time.Second).Should(Succeed())
 			})
 		})
+}
+
+// -------------------------------------------------------------------------
+// MESSAGING-MIGRATION e2e (the 2.18.0 → 2.19.0 vhost move, end to end)
+//
+// 2.19.0 moves the platform's messaging off the "czertainly" virtual host onto "/" and renames
+// both exchanges, so the source and target topologies are DISJOINT objects that have to coexist
+// while traffic moves between them. The operator carries that out by itself — fence the
+// producers, drain the source virtual host, cut over in dependency order, reclaim what was left
+// behind — and this block proves the whole sequence on a real broker, with zero manual steps
+// between the version bump and the finished migration.
+//
+// THE PRODUCER PROBLEM (the reason this block publishes the way it does). The drain only ever
+// completes if nothing is still filling the source virtual host, which is exactly what the fence
+// guarantees for the platform's OWN producers. A test that published from a workload the fence
+// does NOT control would therefore guarantee a drain timeout and turn the whole proof into a
+// false negative. Everything published here is a ONE-SHOT management-API call that has already
+// returned before the version is bumped — never a live publisher.
+// -------------------------------------------------------------------------
+
+// Source-topology coordinates of the migrating platform. The CR pins NO spec.messaging.virtualHost,
+// so the source vhost is the 2.18.0 bundle's own default (the legacy "czertainly", whose topology
+// objects are rendered UNSCOPED) and the target is the 2.19.0 bundle's "/" (scoped "-default").
+// That difference IS the migration trigger.
+const (
+	// migrateSourceVhost is the 2.18.0 bundle's default messaging vhost.
+	migrateSourceVhost = "czertainly"
+	// migrateSourceProxyExchange is the 2.18.0 proxy (topic) exchange. The drain discovers the
+	// dynamic per-proxy queues from ITS bindings, which is how the backlog below becomes visible
+	// to the drain without belonging to any bundle.
+	migrateSourceProxyExchange = "czertainly-proxy"
+	// migrateBacklogQueue is a per-proxy queue this block declares and binds to the source proxy
+	// exchange, standing in for a remote proxy's runtime queue. NOTHING consumes it, so a message
+	// left in it holds the drain open deterministically — no dependence on how fast a real
+	// component happens to consume.
+	migrateBacklogQueue = "proxy.e2e-backlog"
+	// migrateRetainedQueue is the source bundle's latest-only retention queue (x-max-length 1,
+	// drop-head). It is DESIGNED to sit non-empty and is therefore exempt from both the drain and
+	// the cleanup's final snapshot — a message parked here must NOT hold the migration up.
+	migrateRetainedQueue = "time-quality.config"
+)
+
+// The fenced producers, by workload name: the door external traffic enters through, the timed-job
+// publisher, and the bundled provisioning service (rendered because this platform runs
+// provisioning.mode=deploy). Core is deliberately absent — it is the CONSUMER that empties the
+// queues the fence stops filling.
+const (
+	migrateGatewayWorkload      = "api-gateway"
+	migrateSchedulerWorkload    = "scheduler"
+	migrateProvisioningWorkload = "provisioning-rabbitmq"
+)
+
+// migrateFencedWorkloads is the set the fence must hold at zero and later restore, in one place so
+// the fence, the HPA and the restore assertions cannot drift apart.
+func migrateFencedWorkloads() []string {
+	return []string{migrateGatewayWorkload, migrateSchedulerWorkload, migrateProvisioningWorkload}
+}
+
+// platformVersionMatrixMigrationSpecs registers the MESSAGING-MIGRATION block of the
+// version-matrix e2e: a managed 2.18.0 platform on the bundle-default (unpinned) vhost is brought
+// up, messages are published into its source virtual host, spec.version is bumped to 2.19.0, and
+// the engine's whole observable sequence is asserted — producers fenced to zero, the drain held
+// open while the source virtual host still holds messages, the reversible exit taken when the
+// drain outlives its deadline, and finally a complete run: fence → drain → staged cutover →
+// source topology reclaimed → workloads restored → Available on the target virtual host.
+//
+// Labelled "matrix-migration" so CI runs it in its OWN job on its OWN fresh cluster, in parallel
+// with the other version-matrix blocks; the umbrella "matrix" label is kept so
+// `make test-e2e-matrix` still runs them all locally. Like the FULL block it runs in the Keycloak
+// Operator's namespace (managed Keycloak is namespace-scoped) and installs its own upstream
+// operators in BeforeAll.
+func platformVersionMatrixMigrationSpecs() {
+	Context("Platform VERSION MATRIX — messaging migration (managed 2.18.0 → 2.19.0: fence → drain → cutover → reclaim)",
+		Ordered, Label("managed", "matrix", "matrix-migration"), func() {
+			ns := utils.KeycloakOperatorNamespace
+			// provisioning.mode=deploy needs a bootstrap Secret (API key + JWT signing key), by
+			// reference — the same shape the FULL block uses. It makes provisioning-rabbitmq a real
+			// rendered workload, which is both the third fence target and the service whose issued
+			// tokens must name the TARGET exchange once the cutover is done.
+			const provBootstrapSecret = migratePlatformName + "-provisioning-bootstrap"
+			var ops matrixUpstreamOperators
+			// fencedReplicas records what each producer was running immediately BEFORE the first
+			// fence, so the restore can be asserted against the real counts rather than against a
+			// count the test assumed.
+			fencedReplicas := map[string]string{}
+
+			BeforeAll(func() {
+				ops = setupMatrixBlock(ns)
+
+				By("creating the provisioning bootstrap Secret (JWT signing key + API key, by reference)")
+				Expect(utils.ApplyResource("secret", "generic", provBootstrapSecret,
+					"-n", ns,
+					"--from-literal=securityApiKey=e2e-provisioning-api-key",
+					"--from-literal=tokenSigningKey=e2e-provisioning-token-signing-key-0123456789",
+				)).To(Succeed(), "Failed to create the provisioning bootstrap Secret")
+			})
+
+			AfterAll(func() {
+				teardownMatrixBlock(ns, migratePlatformName, ops)
+				_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", provBootstrapSecret,
+					"-n", ns, "--ignore-not-found"))
+			})
+
+			AfterEach(func() {
+				dumpMatrixDiagnosticsOnFailure(ns, migratePlatformName)
+				dumpMigrationTopologyOnFailure(ns)
+			})
+
+			It("deploys a managed 2.18.0 Platform on the bundle-default vhost (unpinned, so a version move migrates)", func() {
+				By("creating the managed 2.18.0 Platform with NO spec.messaging.virtualHost")
+				// The shape mirrors the other version-matrix CRs (managed database + messaging +
+				// Keycloak, edge with an internal issuer, small footprint) with three deliberate
+				// additions:
+				//   - NO spec.messaging.virtualHost, so the vhost is the BUNDLE's default and a
+				//     version move renames it — the migration trigger;
+				//   - provisioning.mode=deploy, so the bundled provisioning service is rendered (the
+				//     third fenced producer, and the proxy path's token issuer);
+				//   - autoscaling on the GATEWAY, so the fence is exercised against a workload whose
+				//     .spec.replicas the operator has ceded to an HPA.
+				// drainTimeout is set well above every wait this block performs, so the deadline can
+				// only fire when this block lowers it on purpose.
+				platformYAML := fmt.Sprintf(`
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  version: "2.18.0"
+  gateway:
+    autoscaling:
+      minReplicas: 1
+      maxReplicas: 2
+      targetCPUUtilization: 80
+  provisioning:
+    mode: deploy
+    deploy:
+      bootstrapSecretRef: %s
+  database:
+    mode: managed
+    managed:
+      instances: 1
+      version: "16"
+      storage:
+        size: 1Gi
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 1
+      version: "4.0"
+      drainTimeout: "30m"
+      storage:
+        size: 1Gi
+  keycloak:
+    mode: managed
+    realm: %s
+    managed:
+      instances: 1
+      version: "%s"
+  edge:
+    enabled: true
+    host: %s
+    tls:
+      source: internal
+`, migratePlatformName, ns, provBootstrapSecret, matrixRealm, utils.KeycloakOperatorVersion, migrateEdgeHost)
+				tmpFile := writeTempYAML(platformYAML)
+				defer func() { _ = os.Remove(tmpFile) }()
+				_, err := utils.Run(exec.Command("kubectl", "apply", "-f", tmpFile))
+				Expect(err).NotTo(HaveOccurred(), "Failed to apply the migrating 2.18.0 managed Platform")
+
+				By("waiting for Available=True with observedVersion 2.18.0 (the full 2.18.0 stack converges)")
+				Eventually(func(g Gomega) {
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.observedVersion}")).To(Equal("2.18.0"),
+						"observedVersion pins the requested 2.18.0")
+					g.Expect(getPlatformConditionStatusInNS(g, ns, migratePlatformName, "Available")).To(Equal(conditionStatusTrue),
+						"the 2.18.0 platform must reach Available before anything is migrated")
+				}, 20*time.Minute, 15*time.Second).Should(Succeed())
+
+				By("verifying the SOURCE topology is the unscoped 2.18.0 one (vhost czertainly, czertainly exchanges)")
+				Eventually(func(g Gomega) {
+					g.Expect(topologyObjectSpecName(g, ns, "vhost", migrateMQClusterName+"-vhost")).To(Equal(migrateSourceVhost),
+						"an unpinned 2.18.0 platform provisions the bundle-default vhost")
+					for _, ex := range []string{"exchange-czertainly", "exchange-czertainly-proxy"} {
+						g.Expect(topologyObjectReadyInNS(g, ns, "exchange", migrateMQClusterName+"-"+ex)).To(BeTrue(),
+							"the 2.18.0 %q Exchange CR should be accepted and reach Ready", ex)
+					}
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying every fenceable producer is running and the gateway's scaling is HPA-owned")
+				Eventually(func(g Gomega) {
+					for _, w := range migrateFencedWorkloads() {
+						g.Expect(deploymentAvailable(g, ns, w)).To(BeTrue(),
+							"producer %q must be running before the migration fences it", w)
+					}
+					g.Expect(deploymentReplicasUnmanagedByOperator(g, ns, migrateGatewayWorkload)).To(BeTrue(),
+						"the autoscaled gateway's .spec.replicas must be ceded by the operator (the HPA owns it)")
+				}, 10*time.Minute, 15*time.Second).Should(Succeed())
+			})
+
+			It("publishes a backlog into the source virtual host with one-shot calls that complete", func() {
+				By("declaring a per-proxy queue bound to the source proxy exchange (a dynamic queue the drain discovers)")
+				// The drain lists the queues bound to the source topic exchange rather than guessing a
+				// name pattern, so a queue declared and bound here is drained exactly like a real
+				// enrolled proxy's queue would be — and, since nothing consumes it, it holds the drain
+				// open for as long as this block needs it to.
+				brokerManagementRequest(Default, ns, migrateMQClusterName, "PUT",
+					"/api/queues/"+migrateSourceVhost+"/"+migrateBacklogQueue,
+					`{"durable":true,"auto_delete":false,"arguments":{}}`)
+				brokerManagementRequest(Default, ns, migrateMQClusterName, "POST",
+					"/api/bindings/"+migrateSourceVhost+"/e/"+migrateSourceProxyExchange+"/q/"+migrateBacklogQueue,
+					`{"routing_key":"e2e.backlog","arguments":{}}`)
+
+				By("publishing into the per-proxy queue and into the latest-only retention queue")
+				// Both publishes are single HTTP calls that have RETURNED before the version is bumped:
+				// the messages are already at rest, and no producer outside the fence exists.
+				brokerPublish(Default, ns, migrateMQClusterName, migrateSourceVhost, migrateBacklogQueue, 3)
+				brokerPublish(Default, ns, migrateMQClusterName, migrateSourceVhost, migrateRetainedQueue, 1)
+
+				By("confirming the broker really holds the backlog (the drain has something to wait for)")
+				Eventually(func(g Gomega) {
+					g.Expect(brokerQueueDepth(g, ns, migrateMQClusterName, migrateSourceVhost, migrateBacklogQueue)).
+						To(BeNumerically(">", 0), "the per-proxy queue must hold the published backlog")
+					g.Expect(brokerQueueDepth(g, ns, migrateMQClusterName, migrateSourceVhost, migrateRetainedQueue)).
+						To(BeNumerically(">", 0), "the latest-only retention queue must hold its retained message")
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			})
+
+			It("fences the producers when spec.version moves to 2.19.0 and HOLDS the drain while the backlog is outstanding", func() {
+				By("recording what each producer was running before the fence")
+				for _, w := range migrateFencedWorkloads() {
+					fencedReplicas[w] = deploymentSpecReplicas(Default, ns, w)
+					Expect(fencedReplicas[w]).NotTo(Equal("0"), "producer %q must be up before the fence", w)
+				}
+
+				By("setting spec.version to 2.19.0 (the only step a user performs)")
+				_, err := utils.Run(exec.Command("kubectl", "patch", "platform", migratePlatformName, "-n", ns,
+					"--type=merge", "-p", `{"spec":{"version":"2.19.0"}}`))
+				Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version to 2.19.0")
+
+				By("waiting for every fenced producer to reach ZERO OBSERVED replicas (their last pod is gone)")
+				// .status.replicas — not the zero the fence wrote — is the signal that matters: a
+				// producer keeps publishing until its last pod terminates, and the engine advances to
+				// the drain only on the observed count.
+				Eventually(func(g Gomega) {
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "status")).To(Equal(conditionStatusTrue),
+						"a migration must be recorded and progressing")
+					for _, w := range migrateFencedWorkloads() {
+						g.Expect(deploymentSpecReplicas(g, ns, w)).To(Equal("0"),
+							"the fence must hold producer %q at zero replicas", w)
+						g.Expect(deploymentObservedReplicas(g, ns, w)).To(Equal("0"),
+							"producer %q must have no pods left before the drain starts counting", w)
+					}
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "reason")).To(Equal("Draining"),
+						"once the producers are down the engine advances to Draining")
+				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the fence — not the ordinary render — owns .spec.replicas on each producer")
+				for _, w := range migrateFencedWorkloads() {
+					Expect(deploymentReplicasManagedBy(Default, ns, w, "ilm-operator-migration-fence")).To(BeTrue(),
+						"the migration fence must be the attributable owner of %q's replica count", w)
+				}
+
+				By("verifying the drain does NOT advance while the source virtual host still holds the backlog")
+				// The whole point of the phase: with messages outstanding the engine must keep waiting,
+				// keep the clean-poll count at zero, and render NOTHING belonging to the target — the
+				// target Vhost CR in particular must not exist yet.
+				Consistently(func(g Gomega) {
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "reason")).To(Equal("Draining"),
+						"an outstanding queue must hold the migration in Draining")
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.upgrade.cleanDrainPolls}")).
+						To(BeEmpty(), "no poll may be counted clean while a drainable queue holds messages")
+					g.Expect(topologyObjectAbsent(g, ns, "vhost", migrateMQClusterName+"-default-vhost")).To(BeTrue(),
+						"nothing belonging to 2.19.0 may be applied before the source virtual host drains")
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.observedVersion}")).To(Equal("2.18.0"),
+						"the platform keeps reporting the version it is actually running")
+				}, 90*time.Second, 10*time.Second).Should(Succeed())
+			})
+
+			It("keeps the AUTOSCALED gateway at zero through the fence (the HPA stands down on a zero-replica target)", func() {
+				// THE DESIGN ASSUMPTION envtest cannot check: it runs no HPA controller, so nothing
+				// there can prove that an HPA whose target the fence has scaled to zero leaves it
+				// alone. The Kubernetes HPA controller short-circuits on a zero-replica target BEFORE
+				// it fetches any metric — reporting ScalingActive=False/ScalingDisabled — which is
+				// exactly why the fence is safe on an autoscaled workload. Both halves are asserted:
+				// the controller's own verdict, and the replica count actually staying at zero.
+				By("waiting for the gateway's HPA to report ScalingActive=False with reason ScalingDisabled")
+				Eventually(func(g Gomega) {
+					g.Expect(hpaConditionField(g, ns, migrateGatewayWorkload, "ScalingActive", "status")).To(Equal("False"),
+						"an HPA cannot be actively scaling a target the fence holds at zero")
+					g.Expect(hpaConditionField(g, ns, migrateGatewayWorkload, "ScalingActive", "reason")).To(Equal("ScalingDisabled"),
+						"the HPA must stand down BECAUSE the target is at zero (not because a metric is missing)")
+				}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the gateway stays at zero across several HPA sync periods")
+				Consistently(func(g Gomega) {
+					g.Expect(deploymentSpecReplicas(g, ns, migrateGatewayWorkload)).To(Equal("0"),
+						"the HPA must not re-inflate a workload the migration fence holds down")
+					g.Expect(deploymentObservedReplicas(g, ns, migrateGatewayWorkload)).To(Equal("0"),
+						"no gateway pod may come back while the migration drains")
+				}, 90*time.Second, 10*time.Second).Should(Succeed())
+			})
+
+			It("returns the platform intact to 2.18.0 when the drain outlives its deadline, and aborts cleanly", func() {
+				// THE FAILURE PATH, which matters as much as the happy one: a drain that cannot finish
+				// must leave a WORKING platform behind, not a half-migrated one. The deadline is
+				// measured from the phase's own start, so lowering drainTimeout below the time the
+				// drain has already spent waiting trips it on the very next pass.
+				By("lowering spec.messaging.managed.drainTimeout below the time the drain has already waited")
+				_, err := utils.Run(exec.Command("kubectl", "patch", "platform", migratePlatformName, "-n", ns,
+					"--type=merge", "-p", `{"spec":{"messaging":{"managed":{"drainTimeout":"1m"}}}}`))
+				Expect(err).NotTo(HaveOccurred(), "Failed to lower drainTimeout")
+
+				By("waiting for the migration to report DrainTimeout with the fence lifted and 2.18.0 still running")
+				Eventually(func(g Gomega) {
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "status")).To(Equal("False"),
+						"an expired drain stops the migration")
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "reason")).To(Equal("DrainTimeout"),
+						"the stop must name the deadline it missed")
+					for _, w := range migrateFencedWorkloads() {
+						g.Expect(deploymentSpecReplicas(g, ns, w)).To(Equal(fencedReplicas[w]),
+							"producer %q must be restored to the count it carried before the fence", w)
+					}
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.observedVersion}")).To(Equal("2.18.0"),
+						"a blocked migration leaves the platform on the version it was running")
+					g.Expect(topologyObjectAbsent(g, ns, "vhost", migrateMQClusterName+"-default-vhost")).To(BeTrue(),
+						"nothing belonging to 2.19.0 may have been applied")
+				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the platform is a fully functioning 2.18.0 deployment again (not Degraded)")
+				Eventually(func(g Gomega) {
+					g.Expect(getPlatformConditionStatusInNS(g, ns, migratePlatformName, "Available")).To(Equal(conditionStatusTrue),
+						"a blocked migration must leave the source-version platform Available")
+					for _, w := range migrateFencedWorkloads() {
+						g.Expect(deploymentAvailable(g, ns, w)).To(BeTrue(),
+							"restored producer %q must come back up", w)
+					}
+				}, 10*time.Minute, 15*time.Second).Should(Succeed())
+
+				By("reverting spec.version to 2.18.0 so the recorded migration is aborted")
+				// The record deliberately survives a blocked drain (clearing it would restart the same
+				// migration on the next pass), so the user's exits are explicit: authorise a forced
+				// cutover, or revert the version. This asserts the revert.
+				_, err = utils.Run(exec.Command("kubectl", "patch", "platform", migratePlatformName, "-n", ns,
+					"--type=merge", "-p", `{"spec":{"version":"2.18.0"}}`))
+				Expect(err).NotTo(HaveOccurred(), "Failed to revert spec.version to 2.18.0")
+				Eventually(func(g Gomega) {
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "reason")).To(Equal("MigrationAborted"),
+						"reverting the version while the migration is still reversible aborts it")
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.upgrade}")).To(BeEmpty(),
+						"an aborted migration leaves no recorded state behind")
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.observedVersion}")).To(Equal("2.18.0"),
+						"the platform keeps running the version it started from")
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
+			})
+
+			It("completes the migration once the source virtual host drains, with zero manual steps", func() {
+				By("clearing the per-proxy backlog (the platform's own consumers are what clear it in production)")
+				// Deleting the unconsumed queue is this block standing in for the backlog being worked
+				// off — the ONLY thing that was holding the drain open. Nothing else about the
+				// migration is touched: the version bump below is the single action a user performs.
+				brokerManagementRequest(Default, ns, migrateMQClusterName, "DELETE",
+					"/api/queues/"+migrateSourceVhost+"/"+migrateBacklogQueue, "")
+
+				By("confirming the latest-only retention queue is STILL non-empty (the drain must pass anyway)")
+				// This is what makes the completion below a proof of the retention EXEMPTION rather
+				// than a proof that everything happened to be empty: the source virtual host demonstrably
+				// still holds a message when the migration is allowed to proceed.
+				Eventually(func(g Gomega) {
+					g.Expect(brokerQueueDepth(g, ns, migrateMQClusterName, migrateSourceVhost, migrateRetainedQueue)).
+						To(BeNumerically(">", 0), "the retention queue keeps its message across the whole migration")
+				}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+				By("restoring the drain deadline and setting spec.version to 2.19.0")
+				// 10m per phase is an order of magnitude above what the fence, the drain and the
+				// class-by-class reclaim actually take, while still being short enough that a phase
+				// which CANNOT finish reports its blocked reason inside this spec's own budget rather
+				// than merely timing the assertion out.
+				_, err := utils.Run(exec.Command("kubectl", "patch", "platform", migratePlatformName, "-n", ns,
+					"--type=merge", "-p", `{"spec":{"version":"2.19.0","messaging":{"managed":{"drainTimeout":"10m"}}}}`))
+				Expect(err).NotTo(HaveOccurred(), "Failed to patch spec.version to 2.19.0")
+
+				By("following the migration through its phases to completion")
+				phases := awaitMigrationPhases(ns, migratePlatformName, 30*time.Minute, 5*time.Second)
+				for _, phase := range []string{"Draining", "CuttingOver", "CleaningUp"} {
+					Expect(phases).To(ContainElement(phase),
+						"the migration must pass through %s; observed: %v", phase, phases)
+				}
+
+				By("verifying the TARGET topology is declared and Ready (vhost /, ilm + ilm-proxy, provider.status-poll)")
+				Eventually(func(g Gomega) {
+					g.Expect(topologyObjectReadyInNS(g, ns, "vhost", migrateMQClusterName+"-default-vhost")).To(BeTrue(),
+						"the target Vhost CR should be accepted and reach Ready")
+					g.Expect(topologyObjectSpecName(g, ns, "vhost", migrateMQClusterName+"-default-vhost")).To(Equal("/"),
+						"2.19.0 moves the platform onto the default \"/\" vhost")
+					for _, ex := range []struct{ cr, brokerName string }{
+						{migrateMQClusterName + "-default-exchange-ilm", "ilm"},
+						{migrateMQClusterName + "-default-exchange-ilm-proxy", "ilm-proxy"},
+					} {
+						g.Expect(topologyObjectReadyInNS(g, ns, "exchange", ex.cr)).To(BeTrue(),
+							"target Exchange CR %q should be accepted and reach Ready", ex.cr)
+						g.Expect(topologyObjectSpecName(g, ns, "exchange", ex.cr)).To(Equal(ex.brokerName),
+							"target Exchange CR %q must declare the broker-facing name %q", ex.cr, ex.brokerName)
+					}
+					g.Expect(topologyObjectReadyInNS(g, ns, "queue",
+						migrateMQClusterName+"-default-queue-provider-status-poll")).To(BeTrue(),
+						"the 2.19.0-new provider.status-poll Queue CR should be accepted and reach Ready")
+				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the SOURCE topology is GONE (the one place the operator deletes rabbitmq.com objects)")
+				// One representative of every reclaimed class, in the order the cleanup deletes them:
+				// bindings → queues → exchanges → permissions → virtual host. The unscoped names are
+				// the legacy-vhost ones the 2.18.0 render produced.
+				Eventually(func(g Gomega) {
+					for _, obj := range []struct{ kind, name string }{
+						{"binding", migrateMQClusterName + "-binding-czertainly-core-audit-logs"},
+						{"queue", migrateMQClusterName + "-queue-core-audit-logs"},
+						{"exchange", migrateMQClusterName + "-exchange-czertainly"},
+						{"exchange", migrateMQClusterName + "-exchange-czertainly-proxy"},
+						{"permission", migrateMQClusterName + "-core-permission"},
+						{"vhost", migrateMQClusterName + "-vhost"},
+					} {
+						g.Expect(topologyObjectAbsent(g, ns, obj.kind, obj.name)).To(BeTrue(),
+							"the migration must reclaim the source %s %q", obj.kind, obj.name)
+					}
+				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the migration is finished: no record, observedVersion 2.19.0, Available, producers restored")
+				Eventually(func(g Gomega) {
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.upgrade}")).To(BeEmpty(),
+						"a finished migration discards its recorded state")
+					g.Expect(migrationConditionField(g, ns, migratePlatformName, "reason")).To(Equal("MigrationCompleted"),
+						"the migration must report completion")
+					g.Expect(platformStatusField(g, ns, migratePlatformName, "{.status.observedVersion}")).To(Equal("2.19.0"),
+						"the platform reports the version it now runs")
+					g.Expect(getPlatformConditionStatusInNS(g, ns, migratePlatformName, "Available")).To(Equal(conditionStatusTrue),
+						"the migrated platform must be Available on the target virtual host")
+					for _, w := range migrateFencedWorkloads() {
+						g.Expect(deploymentSpecReplicas(g, ns, w)).To(Equal(fencedReplicas[w]),
+							"producer %q must be restored to the count it carried before the fence", w)
+						g.Expect(deploymentAvailable(g, ns, w)).To(BeTrue(),
+							"restored producer %q must be running again", w)
+					}
+				}, 15*time.Minute, 15*time.Second).Should(Succeed())
+
+				By("verifying Core actually rolled onto the 2.19.0 bundle")
+				Eventually(func(g Gomega) {
+					img, err := utils.Run(exec.Command("kubectl", "get", "deployment", "core", "-n", ns,
+						"-o", `jsonpath={.spec.template.spec.containers[?(@.name=="core")].image}`))
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(strings.TrimSpace(img)).To(HaveSuffix("/core:2.19.0"), "Core must run the 2.19.0 image")
+					g.Expect(deploymentAvailable(g, ns, "core")).To(BeTrue(),
+						"Core must be Ready on the target bundle, not merely rendered with it")
+				}, 10*time.Minute, 15*time.Second).Should(Succeed())
+			})
+
+			It("issues provisioning tokens against the TARGET exchange after the cutover (the proxy path's contract)", func() {
+				// The proxy path's contract is that every config token the provisioning service mints
+				// carries the exchange it is configured with, so a proxy enrolled after the cutover
+				// talks to the TARGET topology. The observable is the running service's own
+				// configuration: the bundle-derived proxy exchange and the target virtual host, on the
+				// pod that is actually serving — not merely on a rendered template.
+				By("waiting for the restored provisioning service to be fully rolled onto the target wiring")
+				Eventually(func(g Gomega) {
+					g.Expect(deploymentEnvValue(g, ns, migrateProvisioningWorkload, "PROXY_EXCHANGE")).To(Equal("ilm-proxy"),
+						"tokens must be issued against the 2.19.0 proxy exchange")
+					g.Expect(deploymentEnvValue(g, ns, migrateProvisioningWorkload, "RABBITMQ_VIRTUAL_HOST")).To(Equal("/"),
+						"the provisioning service must address the target virtual host")
+					g.Expect(deploymentFullyUpdated(g, ns, migrateProvisioningWorkload)).To(BeTrue(),
+						"every provisioning pod must be the updated one before its env is read back")
+				}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+				By("verifying the RUNNING provisioning pod carries the target exchange and none of the source one")
+				Eventually(func(g Gomega) {
+					running := podEnvValues(g, ns, migrateProvisioningWorkload, "PROXY_EXCHANGE")
+					g.Expect(running).To(Equal("ilm-proxy"),
+						"the serving provisioning pod must embed the target exchange in the tokens it issues")
+					g.Expect(running).NotTo(ContainSubstring(migrateSourceProxyExchange),
+						"no pod may still be issuing tokens against the reclaimed source exchange")
+				}, 5*time.Minute, 10*time.Second).Should(Succeed())
+			})
+		})
+}
+
+// -------------------------------------------------------------------------
+// Messaging-migration helper functions
+// -------------------------------------------------------------------------
+
+// brokerHTTPCodeMarker prefixes the line brokerManagementRequest appends to every management-API
+// response so the status code can be checked without relying on a curl new enough for
+// --fail-with-body.
+const brokerHTTPCodeMarker = "HTTP:"
+
+// brokerManagementRequest performs ONE RabbitMQ management-API call against the platform's managed
+// broker and returns the response body, failing the surrounding assertion on anything but a 2xx.
+//
+// It runs from INSIDE the Core pod (curl is present there), which is also what keeps every call a
+// one-shot that has returned before the caller moves on — this block must never leave a live
+// publisher behind the migration's fence. The URL is the SAME endpoint shape the operator's own
+// drain addresses (http://<cluster>.<namespace>.svc:15672, see ManagedMessagingManagementEndpoint),
+// so a broker whose management API this cannot reach is one the engine could not poll either.
+//
+// SECURITY/NO-LEAK: the broker administrator credentials are passed to the pod ONLY as their
+// base64 forms and decoded INSIDE it, exactly as keycloakRealmUserLookup does, so the plaintext
+// never enters the test process, its argv, or the Ginkgo log.
+func brokerManagementRequest(g Gomega, ns, mqCluster, method, path, body string) string {
+	adminSecret := mqCluster + "-administrator-user-credentials"
+	userB64 := getSecretDataKey(g, ns, adminSecret, "username")
+	passB64 := getSecretDataKey(g, ns, adminSecret, "password")
+	g.Expect(userB64).NotTo(BeEmpty(), "the broker administrator Secret should carry a username")
+	g.Expect(passB64).NotTo(BeEmpty(), "the broker administrator Secret should carry a password")
+
+	data := ""
+	if body != "" {
+		data = fmt.Sprintf(` --data '%s'`, body)
+	}
+	// The body and path are test-owned literals; the credentials are the only runtime values and
+	// they are referenced through shell variables, never interpolated.
+	script := fmt.Sprintf(`set -e
+MQU=$(printf %%s '%s' | base64 -d)
+MQP=$(printf %%s '%s' | base64 -d)
+curl -sS -u "$MQU:$MQP" -X %s -H 'content-type: application/json'%s -w '\n%s%%{http_code}' --url 'http://%s.%s.svc:15672%s'
+`, userB64, passB64, method, data, brokerHTTPCodeMarker, mqCluster, ns, path)
+
+	out, err := utils.Run(exec.Command("kubectl", "exec", "deploy/core", "-c", "core", "-n", ns,
+		"--", "sh", "-c", script))
+	g.Expect(err).NotTo(HaveOccurred(), "the %s %s management-API call should run from the Core pod", method, path)
+
+	code, payload := splitBrokerResponse(out)
+	g.Expect(code).To(HavePrefix("2"),
+		"the %s %s management-API call should succeed, got HTTP %q: %s", method, path, code, payload)
+	return payload
+}
+
+// splitBrokerResponse separates a management-API response body from the status-code line
+// brokerManagementRequest appends to it.
+func splitBrokerResponse(out string) (code, payload string) {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], brokerHTTPCodeMarker) {
+			return strings.TrimPrefix(lines[i], brokerHTTPCodeMarker), strings.Join(lines[:i], "\n")
+		}
+	}
+	return "", out
+}
+
+// brokerPublish publishes count messages straight into one queue on the given virtual host, via the
+// broker's default exchange (which routes on the queue name). Each publish is asserted to have been
+// ROUTED, so a mistyped queue name fails here rather than silently leaving the drain nothing to
+// wait for.
+func brokerPublish(g Gomega, ns, mqCluster, vhost, queue string, count int) {
+	body := fmt.Sprintf(
+		`{"properties":{"delivery_mode":2},"routing_key":%q,"payload":"e2e-migration","payload_encoding":"string"}`, queue)
+	for i := 0; i < count; i++ {
+		out := brokerManagementRequest(g, ns, mqCluster, "POST",
+			"/api/exchanges/"+vhost+"/amq.default/publish", body)
+		g.Expect(out).To(ContainSubstring(`"routed":true`),
+			"the publish to queue %q must be routed (an unrouted message would leave the queue empty)", queue)
+	}
+}
+
+// brokerQueueDepth returns how many messages the broker holds for one queue on a virtual host
+// (ready + unacknowledged, which is the same total the drain counts).
+func brokerQueueDepth(g Gomega, ns, mqCluster, vhost, queue string) int {
+	body := brokerManagementRequest(g, ns, mqCluster, "GET", "/api/queues/"+vhost+"/"+queue, "")
+	match := brokerQueueDepthPattern.FindStringSubmatch(body)
+	g.Expect(match).To(HaveLen(2), "the queue %q representation should report a message count: %s", queue, body)
+	depth, err := strconv.Atoi(match[1])
+	g.Expect(err).NotTo(HaveOccurred(), "the queue %q message count should be numeric: %s", queue, body)
+	return depth
+}
+
+// brokerQueueDepthPattern extracts the "messages" total from a management-API queue
+// representation. The closing quote is part of the pattern so the sibling "messages_ready" /
+// "messages_unacknowledged" fields cannot match instead.
+var brokerQueueDepthPattern = regexp.MustCompile(`"messages"\s*:\s*(\d+)`)
+
+// platformStatusField returns one jsonpath field off the Platform's status in ns, failing the
+// surrounding assertion if the Platform cannot be read (an unreadable CR is never evidence that a
+// field is empty).
+//
+// --allow-missing-template-keys is passed EXPLICITLY, because callers here read fields that are
+// legitimately absent — status.upgrade exists only while a migration runs — and read an empty
+// result as "absent". That is kubectl's default, but the assertions depend on it, so it is stated
+// rather than assumed: without it a missing key would be an ERROR, and the caller would fail on
+// the read instead of observing the absence it is asserting.
+func platformStatusField(g Gomega, ns, name, jsonpath string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "platform", name, "-n", ns,
+		"--allow-missing-template-keys=true", "-o", "jsonpath="+jsonpath))
+	g.Expect(err).NotTo(HaveOccurred(), "Platform %q should be readable for %s", name, jsonpath)
+	return strings.TrimSpace(out)
+}
+
+// migrationConditionField returns one field ("status", "reason", "message") of the Platform's
+// MessagingMigration condition — the engine's whole public progress report. An absent condition
+// reads as empty, which is what a platform with no migration in flight must show.
+func migrationConditionField(g Gomega, ns, name, field string) string {
+	return platformStatusField(g, ns, name,
+		fmt.Sprintf(`{.status.conditions[?(@.type=="MessagingMigration")].%s}`, field))
+}
+
+// awaitMigrationPhases polls the MessagingMigration condition until the migration reports
+// completion, returning every DISTINCT reason it observed in the order it saw them — i.e. the
+// phase sequence the engine actually walked, which the caller then asserts on.
+func awaitMigrationPhases(ns, name string, timeout, interval time.Duration) []string {
+	var observed []string
+	Eventually(func(g Gomega) {
+		reason := migrationConditionField(g, ns, name, "reason")
+		if reason != "" && (len(observed) == 0 || observed[len(observed)-1] != reason) {
+			observed = append(observed, reason)
+			_, _ = fmt.Fprintf(GinkgoWriter, "messaging migration reported %q\n", reason)
+		}
+		g.Expect(reason).To(Equal("MigrationCompleted"),
+			"the migration must run to completion unattended; phases observed so far: %v", observed)
+	}, timeout, interval).Should(Succeed())
+	return observed
+}
+
+// deploymentSpecReplicas returns the named Deployment's .spec.replicas as the apiserver reports it
+// (always populated on a live object, since the field is defaulted).
+func deploymentSpecReplicas(g Gomega, ns, name string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", name, "-n", ns,
+		"-o", "jsonpath={.spec.replicas}"))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should be readable for .spec.replicas", name)
+	return strings.TrimSpace(out)
+}
+
+// deploymentObservedReplicas returns the named Deployment's .status.replicas — the pods the
+// workload controller currently has, which is the signal the fence waits on. The field is omitted
+// once it reaches zero, so an absent value IS zero; --allow-missing-template-keys is explicit for
+// the same reason platformStatusField gives.
+func deploymentObservedReplicas(g Gomega, ns, name string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", name, "-n", ns,
+		"--allow-missing-template-keys=true", "-o", "jsonpath={.status.replicas}"))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should be readable for .status.replicas", name)
+	if observed := strings.TrimSpace(out); observed != "" {
+		return observed
+	}
+	return "0"
+}
+
+// deploymentFullyUpdated reports whether every replica of the named Deployment belongs to the
+// CURRENT pod template (updated == desired == available, with nothing left over), so a caller can
+// read the running configuration back without racing a pod the previous template still owns.
+func deploymentFullyUpdated(g Gomega, ns, name string) bool {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", name, "-n", ns,
+		"--allow-missing-template-keys=true",
+		"-o", "jsonpath={.status.updatedReplicas}/{.status.availableReplicas}/{.status.replicas}/{.spec.replicas}"))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should be readable for its rollout counts", name)
+	counts := strings.Split(strings.TrimSpace(out), "/")
+	g.Expect(counts).To(HaveLen(4), "the rollout counts of Deployment %q should be readable", name)
+	for _, c := range counts[1:] {
+		if c != counts[0] || c == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// deploymentReplicasManagedBy reports whether the named field manager owns .spec.replicas on the
+// named Deployment. It is the mirror of deploymentReplicasUnmanagedByOperator: the migration fence
+// writes replicas under its OWN manager, which is what makes the zero attributable to the fence
+// rather than to the ordinary render or to an autoscaler.
+func deploymentReplicasManagedBy(g Gomega, ns, name, manager string) bool {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", name, "-n", ns,
+		"-o", fmt.Sprintf(`jsonpath={.metadata.managedFields[?(@.manager==%q)].fieldsV1}`, manager)))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q managedFields should be readable", name)
+	return strings.Contains(out, `"f:replicas"`)
+}
+
+// deploymentEnvValue returns the value of one plain (non-secret) environment variable on the named
+// Deployment's first container — the template the running pods are created from.
+func deploymentEnvValue(g Gomega, ns, name, env string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", name, "-n", ns,
+		"-o", fmt.Sprintf(`jsonpath={.spec.template.spec.containers[0].env[?(@.name==%q)].value}`, env)))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should be readable for env %q", name, env)
+	return strings.TrimSpace(out)
+}
+
+// podEnvValues returns the values one environment variable carries across ALL of a component's
+// live pods, space-joined. Reading the pods rather than the Deployment is what makes an assertion
+// about the RUNNING configuration: a pod left over from a previous template contributes its own
+// (stale) value, so the caller's assertion fails until only updated pods remain.
+func podEnvValues(g Gomega, ns, component, env string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", ns,
+		"-l", "app.kubernetes.io/name="+component,
+		"-o", fmt.Sprintf(`jsonpath={.items[*].spec.containers[0].env[?(@.name==%q)].value}`, env)))
+	g.Expect(err).NotTo(HaveOccurred(), "pods of %q should be readable for env %q", component, env)
+	return strings.TrimSpace(out)
+}
+
+// hpaConditionField returns one field of a named condition on a component's HorizontalPodAutoscaler.
+// The autoscaling/v2 API is addressed explicitly: only v2 carries status.conditions, and the
+// ScalingActive condition is where the HPA controller records that it has stood down because its
+// target sits at zero replicas.
+func hpaConditionField(g Gomega, ns, name, condType, field string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "horizontalpodautoscalers.v2.autoscaling", name, "-n", ns,
+		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type==%q)].%s}`, condType, field)))
+	g.Expect(err).NotTo(HaveOccurred(), "the HPA %q should be readable for condition %q", name, condType)
+	return strings.TrimSpace(out)
+}
+
+// dumpMigrationTopologyOnFailure prints the managed messaging topology (both the source and the
+// target objects, whichever still exist) when the spec that just ran failed, so a red migration run
+// can be diagnosed from the job log alone — the phase the engine reached is on the Platform, but
+// which topology objects existed at that moment is not.
+func dumpMigrationTopologyOnFailure(ns string) {
+	if !CurrentSpecReport().Failed() {
+		return
+	}
+	if out, err := utils.Run(exec.Command("kubectl", "get",
+		"vhost.rabbitmq.com,exchange.rabbitmq.com,queue.rabbitmq.com,binding.rabbitmq.com,permission.rabbitmq.com",
+		"-n", ns, "-o", "wide")); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Managed messaging topology:\n%s", out)
+	}
 }
