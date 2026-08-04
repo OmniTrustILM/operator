@@ -186,7 +186,15 @@ func fencedGateway() otilmv1alpha1.FencedWorkload {
 }
 
 func fencedScheduler() otilmv1alpha1.FencedWorkload {
-	return otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1}
+	return otilmv1alpha1.FencedWorkload{Name: schedulerWorkloadName, Kind: "Deployment", Replicas: 1}
+}
+
+// rolledOutScheduler is the scheduler as stage 2 leaves it: released, on the target template and
+// serving. Every fixture that is past stage 2 needs it — Core's wait-for-auth init container
+// polls the scheduler's Service, so the cutover measures its rollout exactly as it measures the
+// provisioning service's.
+func rolledOutScheduler(p *otilmv1alpha1.Platform) *appsv1.Deployment {
+	return cutoverWorkload(schedulerWorkloadName, platformbuilder.ResolveScheduler(p).Image, platformVersion219, 1, true)
 }
 
 // --- the pure predicates -----------------------------------------------------
@@ -311,7 +319,57 @@ func TestCutoverWorkloadNamesAreTheFenceTargets(t *testing.T) {
 	}
 	assert.Contains(t, names, gatewayWorkloadName)
 	assert.Contains(t, names, provisioningWorkloadName)
+	assert.Contains(t, names, schedulerWorkloadName)
 	assert.NotContains(t, names, coreDeploymentName, "Core is the consumer, never a fence target")
+}
+
+// TestNoCoreInitDependencyIsStillFencedWhenCoreRolls is the CLASS invariant behind stage 2, and
+// the one an envtest cannot express: envtest runs no kubelet, so no init container ever blocks
+// there and the deadlock this guards against is invisible until a real cluster runs it.
+//
+// The claim: of the workloads the fence holds, the ones still held when stage 3 rolls Core —
+// i.e. the fence targets that cutoverPreCoreReleases does not release — must have NOTHING in
+// common with the workloads Core's init containers block on. A fenced init dependency sits at
+// zero replicas, so Core's pod waits on a Service with no endpoints, never becomes Ready, and
+// the cutover (which has no deadline behind it, being past the point of no return) waits forever.
+//
+// Both sides are DERIVED, not restated: the dependencies come from the builder that renders the
+// init containers, the held set from the fence's own targets minus the phase's own release list.
+// Poll a new Service in wait-for-auth without teaching the cutover to release it and this fails.
+func TestNoCoreInitDependencyIsStillFencedWhenCoreRolls(t *testing.T) {
+	p := cutoverPlatform()
+	// The proxy path is on, so BOTH sources of an init dependency are in play: the Services
+	// wait-for-auth polls and the provisioning service provision-instance-queue POSTs to.
+	p.Spec.Common.Proxy.Enabled = true
+	released := make(map[string]struct{}, len(cutoverPreCoreReleases))
+	for _, name := range cutoverPreCoreReleases {
+		released[name] = struct{}{}
+	}
+
+	var heldWhenCoreRolls []string
+	for _, target := range platformbuilder.MigrationFenceTargets(p) {
+		if _, isReleased := released[target.Name]; !isReleased {
+			heldWhenCoreRolls = append(heldWhenCoreRolls, target.Name)
+		}
+	}
+
+	dependencies := platformbuilder.CoreInitServiceDependencies(p)
+	require.NotEmpty(t, dependencies)
+	for _, dep := range dependencies {
+		assert.NotContains(t, heldWhenCoreRolls, dep,
+			"%q is a workload Core's init containers block on, so the cutover must release it before it rolls Core", dep)
+	}
+
+	// The assertion above is only worth anything while the two sets CAN overlap: this fixture
+	// fences workloads Core depends on, and something is still held back when Core rolls.
+	assert.NotEmpty(t, heldWhenCoreRolls, "the fence still holds the door shut when Core rolls")
+	overlapping := 0
+	for _, dep := range dependencies {
+		if _, isReleased := released[dep]; isReleased {
+			overlapping++
+		}
+	}
+	assert.NotZero(t, overlapping, "this platform fences workloads Core's init containers depend on")
 }
 
 // --- the staged sequence -----------------------------------------------------
@@ -342,22 +400,25 @@ func TestCutoverHoldsCoreUntilTheTargetTopologyIsDeclared(t *testing.T) {
 	assertNoBrokerCoordinates(t, migrationCondition(stored).Message)
 }
 
-// TestCutoverHoldsCoreWhileProvisioningIsStillFenced is THE deadlock guard.
+// TestCutoverHoldsCoreWhileADependencyIsStillFenced is THE deadlock guard.
 //
-// The topology is fully declared, so stage 1 is behind us — but the provisioning service is
-// still on the fence's list, sitting at zero replicas with the target template already applied
-// to it. That workload reports 0/0 ready, which is precisely the shape a naive readiness check
-// calls "ready". If the cutover believed it, it would roll Core, whose proxy-path init container
-// retries against the provisioning API forever, and the migration — which is past the point of
-// no return and has no deadline — would never finish.
+// The topology is fully declared, so stage 1 is behind us — but the provisioning service and the
+// scheduler are still on the fence's list, sitting at zero replicas with the target template
+// already applied to them. Such a workload reports 0/0 ready, which is precisely the shape a
+// naive readiness check calls "ready". If the cutover believed it, it would roll Core, whose init
+// containers poll the scheduler's Service and retry against the provisioning API forever, and the
+// migration — which is past the point of no return and has no deadline — would never finish.
 //
-// So: Core is withheld, and the pass's own job is to RELEASE the provisioning service.
-func TestCutoverHoldsCoreWhileProvisioningIsStillFenced(t *testing.T) {
+// So: Core is withheld, and the pass's own job is to RELEASE both of them. Neither goes back onto
+// the source topology by coming up here: the target render has been applied to their pod
+// templates since the first pass of this phase, fenced or not.
+func TestCutoverHoldsCoreWhileADependencyIsStillFenced(t *testing.T) {
 	p := cutoverPlatform(fencedGateway(), fencedScheduler(), fencedProvisioning())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		// The trap: fenced at zero, already carrying the target template.
 		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 0, true),
+		cutoverWorkload(schedulerWorkloadName, platformbuilder.ResolveScheduler(p).Image, platformVersion219, 0, true),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
@@ -367,45 +428,63 @@ func TestCutoverHoldsCoreWhileProvisioningIsStillFenced(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, handled)
 	assert.True(t, render.holdCore,
-		"a provisioning service the fence still holds can never answer Core's init container")
+		"a workload the fence still holds can never answer Core's init containers")
 
 	stored := storedPlatform(t, r)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
 		"the cutover cannot hand over while a dependency is still fenced")
 	assert.Equal(t, int32(2), replicasOf(t, r, provisioningWorkloadName),
 		"the pass releases the provisioning service at the count the fence recorded")
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()}, stored.Status.Upgrade.Fenced,
-		"only the provisioning service is released; the door stays shut and the scheduler stays stopped")
+	assert.Equal(t, int32(1), replicasOf(t, r, schedulerWorkloadName),
+		"and the scheduler too — Core's wait-for-auth init container polls its Service")
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway()}, stored.Status.Upgrade.Fenced,
+		"only what Core starts behind is released; the door stays shut")
 	assert.Equal(t, int32(0), replicasOf(t, r, gatewayWorkloadName), "the gateway is not reopened at this stage")
 	assert.Contains(t, migrationCondition(stored).Message, cutoverStageProvisioning.String())
 }
 
-// TestCutoverHoldsCoreUntilProvisioningHasRolledOut is the second half of stage 2: released from
-// the fence is not the same as answering. Until the service has finished rolling onto the target
-// template, Core stays where it is.
-func TestCutoverHoldsCoreUntilProvisioningHasRolledOut(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
-	seed := declaredTargetTopology(p)
-	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, false),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
-	)
-	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
+// TestCutoverHoldsCoreUntilItsDependenciesHaveRolledOut is the second half of stage 2: released
+// from the fence is not the same as answering. Until EACH service Core starts behind has finished
+// rolling onto the target template, Core stays where it is — and the two are measured separately,
+// so neither one's rollout can stand in for the other's.
+func TestCutoverHoldsCoreUntilItsDependenciesHaveRolledOut(t *testing.T) {
+	tests := []struct {
+		name                    string
+		provRolled, schedRolled bool
+	}{
+		{name: "the provisioning service is up but not serving yet", schedRolled: true},
+		{name: "the scheduler is up but not serving yet", provRolled: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := cutoverPlatform(fencedGateway())
+			seed := declaredTargetTopology(p)
+			seed = append(seed,
+				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, tc.provRolled),
+				cutoverWorkload(schedulerWorkloadName, platformbuilder.ResolveScheduler(p).Image, platformVersion219, 1, tc.schedRolled),
+				cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
+			)
+			r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
-	render, _, _, err := cutoverPass(t, r)
-	require.NoError(t, err)
-	assert.True(t, render.holdCore, "the service is up but not serving yet")
-	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPlatform(t, r).Status.Upgrade.Phase)
+			render, _, _, err := cutoverPass(t, r)
+			require.NoError(t, err)
+			assert.True(t, render.holdCore, "Core's pod would block in its init containers")
+			stored := storedPlatform(t, r)
+			assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase)
+			assert.Contains(t, migrationCondition(stored).Message, cutoverStageProvisioning.String())
+		})
+	}
 }
 
-// TestCutoverRollsCoreOnceProvisioningAnswers is stage 3: with the topology declared and the
-// provisioning service serving, Core is finally allowed to roll — but the cutover does NOT hand
-// over yet, because Core is still Ready on the SOURCE pod template it never left.
-func TestCutoverRollsCoreOnceProvisioningAnswers(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+// TestCutoverRollsCoreOnceItsDependenciesAnswer is stage 3: with the topology declared and every
+// service Core starts behind serving, Core is finally allowed to roll — but the cutover does NOT
+// hand over yet, because Core is still Ready on the SOURCE pod template it never left.
+func TestCutoverRollsCoreOnceItsDependenciesAnswer(t *testing.T) {
+	p := cutoverPlatform(fencedGateway())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		rolledOutScheduler(p),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
@@ -425,15 +504,15 @@ func TestCutoverRollsCoreOnceProvisioningAnswers(t *testing.T) {
 
 // TestCutoverReopensTheGatewayAndHandsOver is stage 4: Core is Ready ON THE TARGET ROLLOUT, so
 // the door is reopened at the count the fence recorded and the migration moves to the cleanup —
-// with the scheduler, and only the scheduler, still stopped.
+// with nothing left fenced at all.
 func TestCutoverReopensTheGatewayAndHandsOver(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+	p := cutoverPlatform(fencedGateway())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		rolledOutScheduler(p),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
 		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
-		cutoverWorkload("scheduler", "scheduler:1.1.1", platformVersion219, 0, true),
 	)
 	r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
@@ -444,10 +523,10 @@ func TestCutoverReopensTheGatewayAndHandsOver(t *testing.T) {
 
 	stored := storedPlatform(t, r)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseCleaningUp, stored.Status.Upgrade.Phase)
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedScheduler()}, stored.Status.Upgrade.Fenced,
-		"the cleanup inherits a platform that is open, with only the scheduler's timed jobs held back")
+	assert.Empty(t, stored.Status.Upgrade.Fenced,
+		"the cleanup inherits a platform that is open, serving from the target topology")
 	assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName), "the gateway is reopened at its recorded count")
-	assert.Equal(t, int32(0), replicasOf(t, r, "scheduler"))
+	assert.Equal(t, int32(1), replicasOf(t, r, schedulerWorkloadName), "the scheduler has been up since stage 2")
 
 	var handOver string
 	for _, e := range drainEvents(rec) {
@@ -483,20 +562,20 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			coreImage:  platformVersion218,
 			provRolled: false,
 			wantPhase:  otilmv1alpha1.MigrationPhaseCuttingOver,
-			wantFenced: []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			wantFenced: []otilmv1alpha1.FencedWorkload{fencedGateway()},
 			wantHold:   true,
 		},
 		{
 			name:       "re-entering the core stage leaves the fence alone",
-			fenced:     []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			fenced:     []otilmv1alpha1.FencedWorkload{fencedGateway()},
 			coreImage:  platformVersion218,
 			provRolled: true,
 			wantPhase:  otilmv1alpha1.MigrationPhaseCuttingOver,
-			wantFenced: []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			wantFenced: []otilmv1alpha1.FencedWorkload{fencedGateway()},
 		},
 		{
 			name:           "re-entering past the hand-over does not re-open or hand over twice",
-			fenced:         []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			fenced:         []otilmv1alpha1.FencedWorkload{fencedGateway()},
 			coreImage:      platformVersion219,
 			provRolled:     true,
 			wantHandedOver: true,
@@ -508,6 +587,7 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			seed := declaredTargetTopology(p)
 			seed = append(seed,
 				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, tc.provRolled),
+				rolledOutScheduler(p),
 				cutoverWorkload(coreDeploymentName, coreImageFor(p, tc.coreImage), tc.coreImage, 1, true),
 				cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 			)
@@ -552,12 +632,13 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 // rather than being folded into "not done yet". Past the drain the migration is forward-only and
 // has no deadline, so a read failure that sat silently in a stage would be invisible forever.
 func TestCutoverStopsWhenItCannotReadTheRolloutState(t *testing.T) {
-	for _, unreadable := range []string{provisioningWorkloadName, coreDeploymentName} {
+	for _, unreadable := range []string{provisioningWorkloadName, schedulerWorkloadName, coreDeploymentName} {
 		t.Run(unreadable, func(t *testing.T) {
-			p := cutoverPlatform(fencedGateway(), fencedScheduler())
+			p := cutoverPlatform(fencedGateway())
 			seed := declaredTargetTopology(p)
 			seed = append(seed,
 				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+				rolledOutScheduler(p),
 				cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
 			)
 			r, _ := cutoverReconciler(t, p, interceptor.Funcs{
@@ -575,7 +656,7 @@ func TestCutoverStopsWhenItCannotReadTheRolloutState(t *testing.T) {
 
 			stored := storedPlatform(t, r)
 			assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase)
-			assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway()},
 				stored.Status.Upgrade.Fenced, "an unanswered read releases nothing")
 		})
 	}
@@ -586,10 +667,11 @@ func TestCutoverStopsWhenItCannotReadTheRolloutState(t *testing.T) {
 // migration stays in CuttingOver and the next pass — which re-measures the same stage and finds
 // the gateway already restored — repeats only the write that failed.
 func TestCutoverStopsWhenTheHandOverCannotBePersisted(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+	p := cutoverPlatform(fencedGateway())
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+		rolledOutScheduler(p),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
 		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
 	)
@@ -613,7 +695,7 @@ func TestCutoverStopsWhenTheHandOverCannotBePersisted(t *testing.T) {
 	stored := storedPlatform(t, r)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
 		"the cleanup may not inherit a phase the cluster never recorded")
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedScheduler()}, stored.Status.Upgrade.Fenced,
+	assert.Empty(t, stored.Status.Upgrade.Fenced,
 		"the restore that DID land stays landed — re-entry repeats nothing")
 	assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName))
 }
@@ -736,7 +818,7 @@ func TestTopologyObjectDeclaredSurfacesAReadFailure(t *testing.T) {
 // virtual host the migration is leaving — satisfies "runs the target's image" perfectly. Releasing
 // Core on that answer rolls it onto a topology its provisioner has not moved to.
 func TestCutoverRefusesAProvisioningServiceStillOnTheSourceTemplate(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+	p := cutoverPlatform(fencedGateway())
 	sourceImage := provisioningImageFor(p, platformVersion218)
 	require.Equal(t, provisioningImageOf(p), sourceImage,
 		"the whole point of this case: the two bundles pin the same provisioning image")
@@ -745,6 +827,7 @@ func TestCutoverRefusesAProvisioningServiceStillOnTheSourceTemplate(t *testing.T
 	seed = append(seed,
 		// Target image, fully rolled out — and stamped with the SOURCE version.
 		cutoverWorkload(provisioningWorkloadName, sourceImage, platformVersion218, 2, true),
+		rolledOutScheduler(p),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 	)
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
@@ -774,6 +857,7 @@ func TestCutoverStopsWhenTheStageCannotBePersisted(t *testing.T) {
 	seed := declaredTargetTopology(p)
 	seed = append(seed,
 		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 0, true),
+		cutoverWorkload(schedulerWorkloadName, platformbuilder.ResolveScheduler(p).Image, platformVersion219, 0, true),
 		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
 	)
 	r, _ := cutoverReconciler(t, p, failingStatusUpdate(errors.New("status write refused")), seed...)
@@ -783,39 +867,65 @@ func TestCutoverStopsWhenTheStageCannotBePersisted(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, int32(0), replicasOf(t, r, provisioningWorkloadName),
 		"nothing is released while the cluster has no record of the stage that releases it")
+	assert.Equal(t, int32(0), replicasOf(t, r, schedulerWorkloadName))
 }
 
-// TestCutoverStopsWhenAProducerCannotBeRestored proves a fence the engine cannot lift surfaces
-// instead of being stepped over: a gateway that stays shut is visible, a cutover that pretended
-// it had reopened would not be.
-func TestCutoverStopsWhenAProducerCannotBeRestored(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
-	seed := declaredTargetTopology(p)
-	seed = append(seed,
-		cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
-		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion219), platformVersion219, 1, true),
-		cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
-	)
-	r, _ := cutoverReconciler(t, p, failingPatch(errors.New("patch refused")), seed...)
+// TestCutoverStopsWhenAWorkloadCannotBeRestored proves a fence the engine cannot lift surfaces
+// instead of being stepped over, at BOTH stages that lift one: a workload that stays at zero is
+// visible, a cutover that pretended it had released it would not be.
+func TestCutoverStopsWhenAWorkloadCannotBeRestored(t *testing.T) {
+	tests := []struct {
+		name      string
+		fenced    []otilmv1alpha1.FencedWorkload
+		coreImage string
+	}{
+		{
+			name:      "the services Core starts behind, at stage 2",
+			fenced:    []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler(), fencedProvisioning()},
+			coreImage: platformVersion218,
+		},
+		{
+			name:      "the gateway, at stage 4",
+			fenced:    []otilmv1alpha1.FencedWorkload{fencedGateway()},
+			coreImage: platformVersion219,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := cutoverPlatform(tc.fenced...)
+			seed := declaredTargetTopology(p)
+			seed = append(seed,
+				cutoverWorkload(provisioningWorkloadName, provisioningImageOf(p), platformVersion219, 2, true),
+				rolledOutScheduler(p),
+				cutoverWorkload(coreDeploymentName, coreImageFor(p, tc.coreImage), tc.coreImage, 1, true),
+				cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", platformVersion219, 0, true),
+			)
+			r, _ := cutoverReconciler(t, p, failingPatch(errors.New("patch refused")), seed...)
 
-	_, handled, _, err := cutoverPass(t, r)
-	assert.True(t, handled)
-	require.Error(t, err)
+			_, handled, _, err := cutoverPass(t, r)
+			assert.True(t, handled)
+			require.Error(t, err)
 
-	stored := storedPlatform(t, r)
-	assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
-		"the migration does not hand over a platform whose door it failed to open")
-	assert.Equal(t, []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()}, stored.Status.Upgrade.Fenced)
+			stored := storedPlatform(t, r)
+			assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, stored.Status.Upgrade.Phase,
+				"the migration does not move on from a fence it failed to lift")
+			assert.Equal(t, tc.fenced, stored.Status.Upgrade.Fenced)
+		})
+	}
 }
 
-// TestCutoverWithoutADeployedProvisioningServiceSkipsThatStage proves the stage is about a
-// DEPENDENCY, not a component: a platform whose provisioning API is somebody else's has nothing
-// to restore and nothing to wait for.
-func TestCutoverWithoutADeployedProvisioningServiceSkipsThatStage(t *testing.T) {
-	p := cutoverPlatform(fencedGateway(), fencedScheduler())
+// TestCutoverWithoutADeployedProvisioningServiceSkipsThatWait proves the provisioning half of
+// stage 2 is about a DEPENDENCY, not a component: a platform whose provisioning API is somebody
+// else's has nothing to restore and nothing to wait for. The scheduler half is unaffected —
+// Core's wait-for-auth init container polls it whatever the provisioning mode is.
+func TestCutoverWithoutADeployedProvisioningServiceSkipsThatWait(t *testing.T) {
+	p := cutoverPlatform(fencedGateway())
 	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{Mode: "external", APIURL: "http://provisioner.example.com"}
 	seed := declaredTargetTopology(p)
-	seed = append(seed, cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true))
+	seed = append(seed,
+		rolledOutScheduler(p),
+		cutoverWorkload(coreDeploymentName, coreImageFor(p, platformVersion218), platformVersion218, 1, true),
+	)
 	r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
 	render, _, _, err := cutoverPass(t, r)

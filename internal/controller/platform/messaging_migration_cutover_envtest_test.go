@@ -39,6 +39,8 @@ package platform
 //     do for the kubelet.
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
@@ -46,12 +48,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 )
 
 // feAdministratorWorkloadName is the front-end component's workload name. It is the cleanest
 // witness that a pass rendered the target bundle: it is not a message producer (so the fence
 // never touches it) and its image is tagged with the platform version itself.
 const feAdministratorWorkloadName = "fe-administrator"
+
+// cutoverPasses bounds the reconciles a spec drives the staged cutover through by hand. Each
+// stage needs a pass or two, so this is generous — it exists only so a cutover that never
+// advances fails the spec instead of looping forever.
+const cutoverPasses = 12
 
 // deployedProvisioning switches a fixture Platform onto the operator-managed provisioning
 // service — the component whose fenced zero replicas is what makes the cutover's ordering
@@ -91,7 +99,7 @@ func markRolledOut(ns, name string) {
 func cutoverFence() []otilmv1alpha1.FencedWorkload {
 	return []otilmv1alpha1.FencedWorkload{
 		{Name: gatewayWorkloadName, Kind: "Deployment", Replicas: 1},
-		{Name: "scheduler", Kind: "Deployment", Replicas: 1},
+		{Name: schedulerWorkloadName, Kind: "Deployment", Replicas: 1},
 		{Name: provisioningWorkloadName, Kind: "Deployment", Replicas: 1},
 	}
 }
@@ -174,43 +182,56 @@ var _ = Describe("Messaging migration cutover", func() {
 				Not(ContainSubstring(":"+platformVersion219)),
 			), "Core may not roll while the service its init container blocks on is fenced")
 
-			By("releasing the provisioning service, and only it")
+			By("releasing every workload Core's init containers block on, and nothing else")
+			// The invariant, checked on every pass rather than at the end: Core may carry the
+			// target template only once NO workload its init containers wait on is still fenced.
+			// A fenced dependency sits at zero replicas, so Core's pod would block in its init
+			// containers forever — and this phase has no deadline left to rescue it.
+			var rolled bool
+			for pass := 0; pass < cutoverPasses && !rolled; pass++ {
+				markRolledOut(ns, provisioningWorkloadName)
+				markRolledOut(ns, schedulerWorkloadName)
+				reconcileOnce(ns)
+
+				p := getPlatform(ns)
+				rolled = strings.Contains(workloadImages(ns, coreDeploymentName), ":"+platformVersion219)
+				for _, dependency := range platformbuilder.CoreInitServiceDependencies(p) {
+					if _, fenced := fencedWorkloadFor(p, dependency); fenced {
+						Expect(rolled).To(BeFalse(),
+							"Core was rolled while %q, which its init containers block on, is fenced at zero replicas", dependency)
+					}
+				}
+			}
+			Expect(rolled).To(BeTrue(), "the cutover reached the Core roll")
+
 			Eventually(func() []otilmv1alpha1.FencedWorkload {
 				return getPlatform(ns).Status.Upgrade.Fenced
 			}, platformTimeout, platformInterval).Should(ConsistOf(
 				otilmv1alpha1.FencedWorkload{Name: gatewayWorkloadName, Kind: "Deployment", Replicas: 1},
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1},
-			))
-			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", provisioningWorkloadName)
-			}, platformTimeout, platformInterval).Should(Equal(int32(1)))
+			), "only the door is still shut")
+			Expect(workloadSpecReplicas(ns, "Deployment", provisioningWorkloadName)).To(Equal(int32(1)))
+			Expect(workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)).To(Equal(int32(1)),
+				"the scheduler is back up on the TARGET template, publishing only to the target topology")
 			Expect(workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)).To(BeZero(),
 				"the door stays shut until the platform is actually serving from the target")
-
-			By("rolling Core once the provisioning service answers")
-			Eventually(func() string {
-				markRolledOut(ns, provisioningWorkloadName)
-				reconcileOnce(ns)
-				return workloadImages(ns, "core")
-			}, platformTimeout, platformInterval).Should(ContainSubstring(":"+platformVersion219),
-				"with provisioning serving, Core is finally allowed onto the target bundle")
 
 			By("holding the hand-over until Core is Ready ON THE TARGET ROLLOUT")
 			// Core has been Ready throughout — on the source pod template. Plain readiness would
 			// have handed over long ago; the rollout check is what makes it wait.
 			Consistently(func(g Gomega) {
 				markRolledOut(ns, provisioningWorkloadName)
+				markRolledOut(ns, schedulerWorkloadName)
 				reconcileOnce(ns)
 				g.Expect(getPlatform(ns).Status.Upgrade.Phase).To(Equal(otilmv1alpha1.MigrationPhaseCuttingOver))
 			}, "2s", platformInterval).Should(Succeed())
 
 			By("reopening the gateway, handing over, and finishing the migration")
-			// The hand-over reopens the gateway and leaves ONLY the scheduler fenced — an
-			// intermediate state the fake-client tests assert precisely, and one that cannot be
-			// caught reliably here: this platform's broker is EXTERNAL, so the cleanup it hands
-			// to has no topology of its own to reclaim and finishes on the very next pass.
+			// The hand-over reopens the gateway and leaves the fence empty. This platform's
+			// broker is EXTERNAL, so the cleanup it hands to has no topology of its own to
+			// reclaim and finishes on the very next pass.
 			Eventually(func(g Gomega) {
 				markRolledOut(ns, provisioningWorkloadName)
+				markRolledOut(ns, schedulerWorkloadName)
 				markRolledOut(ns, coreDeploymentName)
 				reconcileOnce(ns)
 				p := getPlatform(ns)
@@ -222,9 +243,9 @@ var _ = Describe("Messaging migration cutover", func() {
 				return workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)), "the door is reopened at its recorded count")
 			Eventually(func() int32 {
-				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+				return workloadSpecReplicas(ns, "Deployment", schedulerWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)),
-				"the scheduler's timed jobs run again once the reclaim is done")
+				"the scheduler stays up on the target template, as it has been since stage 2")
 
 			By("re-entering afterwards without undoing any of it")
 			for i := 0; i < 3; i++ {

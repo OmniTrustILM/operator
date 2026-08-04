@@ -132,6 +132,10 @@ const (
 	// The staged cutover addresses it by name because Core's provision-instance-queue init
 	// container cannot complete until it answers.
 	provisioningWorkloadName = "provisioning-rabbitmq"
+	// schedulerWorkloadName is the scheduler's workload/Service name. It is a message producer
+	// the migration fences AND one of the Services Core's wait-for-auth init container polls,
+	// which is why the staged cutover has to address it by name too.
+	schedulerWorkloadName = "scheduler"
 )
 
 // The first-admin CERTIFICATE registration is performed IN-POD by Core's postStart hook

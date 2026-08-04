@@ -147,8 +147,8 @@ type migrationRender struct {
 	// requeue asks for the migration cadence at the end of the pass.
 	requeue bool
 	// holdCore withholds Core's WORKLOAD from this pass's apply while everything else is
-	// rendered normally. The staged cutover sets it until the topology and the provisioning
-	// service the rolled Core depends on are in place — see migrationCuttingOverPhase. Core's
+	// rendered normally. The staged cutover sets it until the topology and every workload Core's
+	// init containers block on are in place — see migrationCuttingOverPhase. Core's
 	// other children (its Service, ServiceAccount and ConfigMaps) are applied throughout; only
 	// the pod template is held, so Core goes on serving the version it is already running.
 	holdCore bool

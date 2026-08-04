@@ -24,6 +24,7 @@ package platform
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -641,6 +642,62 @@ func TestResolveCoreWaitForAuthInitContainer(t *testing.T) {
 	port, ok := initEnvValue(init, mqWaitPortEnv)
 	require.True(t, ok, "the broker port must be passed as an env value")
 	assert.Equal(t, "5672", port)
+}
+
+// ncPolledServices returns the Service names an init-container script polls with `nc -z`, in the
+// order the script polls them. The pattern matches a BARE name only, so the broker loop — which
+// reads its coordinates from quoted env vars — is excluded by construction, as it must be: the
+// broker is not a workload this operator scales.
+func ncPolledServices(script string) []string {
+	matches := regexp.MustCompile(`nc -z ([a-z0-9-]+) `).FindAllStringSubmatch(script, -1)
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		names = append(names, m[1])
+	}
+	return names
+}
+
+// TestCoreInitServiceDependenciesMatchTheRenderedScript is the parity guard that makes
+// CoreInitServiceDependencies trustworthy to a caller that STOPS platform workloads: the set it
+// reports has to be exactly what Core's init containers actually block on, or a caller that
+// releases every name in it can still leave Core waiting on a service nobody restarted.
+//
+// So the expectation is read out of the RENDERED SCRIPT rather than restated by hand. Add a
+// service to wait-for-auth's poll without adding it to the lists the function answers from and
+// this fails.
+func TestCoreInitServiceDependenciesMatchTheRenderedScript(t *testing.T) {
+	t.Run("the wait-for-auth poll", func(t *testing.T) {
+		p := basePlatform()
+		init, ok := containerByName(ResolveCore(p).InitContainers, testWaitForAuth)
+		require.True(t, ok, "wait-for-auth init container must be present")
+		require.Len(t, init.Command, 3)
+		assert.Equal(t, ncPolledServices(init.Command[2]), CoreInitServiceDependencies(p),
+			"every Service Core's init container polls is a workload Core cannot start behind")
+	})
+
+	t.Run("the proxy path adds the deployed provisioning service", func(t *testing.T) {
+		p := basePlatform()
+		p.Spec.Common.Proxy.Enabled = true
+		p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
+			Mode:   "deploy",
+			Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: "provisioning-bootstrap"},
+		}
+		init, ok := containerByName(ResolveCore(p).InitContainers, "provision-instance-queue")
+		require.True(t, ok, "provision-instance-queue must render on the proxy+provisioning path")
+		url, ok := initEnvValue(init, resolveBundle(p).Wiring.ProvisioningURLEnv)
+		require.True(t, ok, "the provisioning API URL must be passed as an env value")
+		assert.Contains(t, url, provisioningName,
+			"the init container calls the operator-deployed service, so that service is a dependency")
+		assert.Contains(t, CoreInitServiceDependencies(p), provisioningName)
+	})
+
+	t.Run("an external provisioning API is nobody's workload here", func(t *testing.T) {
+		p := basePlatform()
+		p.Spec.Common.Proxy.Enabled = true
+		p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{Mode: "external", APIURL: "http://provisioner.example.com"}
+		assert.NotContains(t, CoreInitServiceDependencies(p), provisioningName,
+			"an external provisioner is not a workload this operator can stop or restart")
+	})
 }
 
 // hostileHosts is the shared hostile-value table for the broker wait loops: shell

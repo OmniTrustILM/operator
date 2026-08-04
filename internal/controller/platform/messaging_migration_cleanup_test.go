@@ -55,8 +55,10 @@ import (
 	"github.com/OmniTrustILM/operator/internal/rabbitmq"
 )
 
-// cleanupPlatform is a platform in the CLEANINGUP phase: serving 2.19.0, with the scheduler
-// still fenced — the state the staged cutover hands over.
+// cleanupPlatform is a platform in the CLEANINGUP phase: serving 2.19.0, with the scheduler still
+// fenced. A cutover that ran to completion hands over an empty fence, so this is the SAFETY-NET
+// shape — an interrupted or forced cutover — and the one worth testing: the completion must bring
+// back whatever is still held, whichever way the migration got here.
 func cleanupPlatform(fenced ...otilmv1alpha1.FencedWorkload) *otilmv1alpha1.Platform {
 	if len(fenced) == 0 {
 		fenced = []otilmv1alpha1.FencedWorkload{fencedScheduler()}
@@ -77,7 +79,7 @@ func sourceTopology(p *otilmv1alpha1.Platform) []client.Object {
 
 // cleanupReconciler builds a reconciler over a fake client that can hold the rabbitmq.com kinds,
 // seeded with the given objects, the administrator credentials Secret the barrier authenticates
-// with, and the scheduler the completion has to restore.
+// with, and a still-fenced scheduler for the completion to restore.
 func cleanupReconciler(t *testing.T, p *otilmv1alpha1.Platform, admin rabbitmq.BrokerAdmin, funcs interceptor.Funcs, objs ...client.Object) (*Reconciler, *record.FakeRecorder) {
 	t.Helper()
 	pinMigrationInputs(p)
@@ -91,10 +93,10 @@ func cleanupReconciler(t *testing.T, p *otilmv1alpha1.Platform, admin rabbitmq.B
 	return r, rec
 }
 
-// fencedSchedulerWorkload is the workload the fence is still holding at zero — the one the
+// fencedSchedulerWorkload is a workload the fence is still holding at zero — the one the
 // completion writes the recorded count back onto.
 func fencedSchedulerWorkload() client.Object {
-	return cutoverWorkload("scheduler", "scheduler:2.19.0", platformVersion219, 0, true)
+	return cutoverWorkload(schedulerWorkloadName, "scheduler:2.19.0", platformVersion219, 0, true)
 }
 
 // cleanupPass runs one whole gate pass from a FRESHLY READ Platform, as Reconcile does.
@@ -321,7 +323,8 @@ func TestCleanupDeletesOneClassAtATime(t *testing.T) {
 	stored := storedPlatform(t, r)
 	assert.Nil(t, stored.Status.Upgrade, "the record is discarded once the reclaim is done")
 	assert.Equal(t, platformVersion219, stored.Status.ObservedVersion)
-	assert.Equal(t, int32(1), replicasOf(t, r, "scheduler"), "the last fenced workload is restored at its recorded count")
+	assert.Equal(t, int32(1), replicasOf(t, r, schedulerWorkloadName),
+		"whatever the fence still held is restored at its recorded count")
 
 	cond := migrationCondition(stored)
 	require.NotNil(t, cond)

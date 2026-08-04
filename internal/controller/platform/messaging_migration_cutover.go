@@ -34,23 +34,38 @@ package platform
 // bundle. There is no second applier here; the phase only decides WHEN each part is allowed to
 // move.
 //
-// THE ORDER IS NOT COSMETIC — IT IS A DEADLOCK. A proxy-enabled Core runs the
-// provision-instance-queue init container, which retries against the provisioning API until it
-// answers. The provisioning service is one of the workloads the fence holds at zero replicas.
-// Roll Core while provisioning is still fenced and Core can never become Ready, so a cutover
-// that waits for Core would wait forever, with no deadline (past the drain, the migration is
-// forward-only) and no way back. Hence:
+// THE ORDER IS NOT COSMETIC — IT IS A DEADLOCK. Core's pod starts only when its init containers
+// let it: wait-for-auth polls auth, auth-opa-policies, the broker and the SCHEDULER, and on the
+// proxy path provision-instance-queue retries against the provisioning API until it answers.
+// Several of those are workloads the fence holds at zero replicas — a Service with no endpoints,
+// which an nc-poll waits on forever. Roll Core while one of them is fenced and Core can never
+// become Ready, so a cutover that waits for Core waits forever, with no deadline (past the drain,
+// the migration is forward-only) and no way back. Hence:
 //
 //  1. TOPOLOGY — every target topology CR must report Ready. Not the broker plus its
 //     credentials Secret, which is all the ordinary messaging gate asks: the cutover rolls Core
 //     onto these exchanges, queues and bindings, so each one has to exist in the broker first.
-//  2. PROVISIONING — the target render is applied, the fence is lifted from the provisioning
-//     service, and it must finish rolling out. This is the stage that makes Core's init
-//     container answerable.
+//  2. CORE'S DEPENDENCIES — the target render is applied, the fence is lifted from EVERY fenced
+//     workload Core's init containers block on (cutoverPreCoreReleases, which the invariant test
+//     checks against the builder's own CoreInitServiceDependencies), and each of them must
+//     finish rolling out. This is the stage that makes Core's init containers answerable.
 //  3. CORE — only now may Core be rolled onto the target bundle, and the cutover waits until it
 //     is Ready ON THAT ROLLOUT, never on the source pod template it was already Ready with.
-//  4. GATEWAY — the door is reopened and the migration hands over to the cleanup, with the
-//     scheduler still fenced (its timed jobs stay stopped until the source topology is gone).
+//  4. GATEWAY — the door is reopened and the migration hands over to the cleanup.
+//
+// RELEASING A PRODUCER AT STAGE 2 DOES NOT PUT IT BACK ON THE SOURCE TOPOLOGY, which is what
+// makes stage 2 safe for producers as well as for the provisioner. From the FIRST CuttingOver
+// pass the ordinary reconcile applies the TARGET render to every workload this phase does not
+// hold back — including a fenced one, whose pod template is updated even at zero replicas,
+// because the fence holds .spec.replicas alone and under its own field manager. A workload
+// released here therefore starts pods on the TARGET template and publishes only to the target
+// virtual host, which the cleanup never touches.
+//
+// So the invariant is NOT "no producer runs until the source topology has been reclaimed" — it
+// never was: stage 4 reopens the gateway to real user traffic, producing real messages, before
+// the cleanup runs at all. The invariant is that NO PRODUCER MAY RUN ON THE SOURCE TEMPLATE ONCE
+// THE DRAIN HAS COMPLETED, and releasing only after the target render has been applied is
+// exactly what enforces it.
 //
 // THE STAGE IS MEASURED, NOT COUNTED. Every stage's completion is an observable fact about the
 // cluster, so a restarted operator re-derives exactly where it was from the same reads, and a
@@ -85,6 +100,16 @@ import (
 // the next stage may start.
 const reasonMigrationCutoverError = "MigrationCutoverError"
 
+// cutoverPreCoreReleases names the fenced workloads the cutover releases at stage 2, before it
+// is allowed to roll Core: every one of them is a workload Core's init containers block on, so
+// leaving any of them at zero replicas past this stage is the deadlock described at the top of
+// this file.
+//
+// It is the ONE place that decides which producers come back up early, and everything else in
+// the phase is derived from it: the restore, the stage measurement, and the invariant test that
+// checks it against the builder's CoreInitServiceDependencies.
+var cutoverPreCoreReleases = []string{provisioningWorkloadName, schedulerWorkloadName}
+
 // cutoverStage is how far the CuttingOver phase has got. The stages are ordered, and each one
 // names the work that is still OUTSTANDING — so cutoverStageCore means "everything Core depends
 // on is in place, roll it", not "Core is done".
@@ -93,11 +118,12 @@ type cutoverStage int
 const (
 	// cutoverStageTopology: the target topology is not fully declared in the broker yet.
 	cutoverStageTopology cutoverStage = iota
-	// cutoverStageProvisioning: the topology is declared; the provisioning service still has to
-	// be released from the fence and finish rolling out onto the target bundle.
+	// cutoverStageProvisioning: the topology is declared; the workloads Core's init containers
+	// block on still have to be released from the fence and finish rolling out onto the target
+	// bundle.
 	cutoverStageProvisioning
-	// cutoverStageCore: provisioning answers, so Core may be rolled onto the target bundle; the
-	// cutover waits until that rollout is complete.
+	// cutoverStageCore: every service Core starts behind answers, so Core may be rolled onto the
+	// target bundle; the cutover waits until that rollout is complete.
 	cutoverStageCore
 	// cutoverStageGateway: everything the platform serves from is on the target; the gateway can
 	// be reopened and the migration handed to the cleanup.
@@ -111,7 +137,7 @@ func (s cutoverStage) String() string {
 	case cutoverStageTopology:
 		return "declaring the target messaging topology"
 	case cutoverStageProvisioning:
-		return "restoring the provisioning service onto the target topology"
+		return "restoring the services core depends on onto the target topology"
 	case cutoverStageCore:
 		return "rolling core onto the target bundle"
 	default:
@@ -151,19 +177,22 @@ func (r *Reconciler) migrationCuttingOverPhase(ctx context.Context, p *otilmv1al
 	}
 
 	if stage == cutoverStageProvisioning {
-		// Releasing the provisioning service is the stage's own step: it is a fenced PRODUCER,
-		// so nothing else will ever scale it back up, and Core cannot start without it.
-		if rerr := r.restoreFencedWorkload(ctx, p, provisioningWorkloadName); rerr != nil {
-			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
-			return render, true, res, aerr
+		// Releasing these is the stage's own step: they are fenced workloads, so nothing else
+		// will ever scale them back up, and Core's init containers cannot finish without them.
+		// The target render has already been applied to each — including while it was fenced —
+		// so what comes back up publishes to the target virtual host, never the source one.
+		for _, name := range cutoverPreCoreReleases {
+			if rerr := r.restoreFencedWorkload(ctx, p, name); rerr != nil {
+				res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
+				return render, true, res, aerr
+			}
 		}
 	}
 
 	if stage == cutoverStageGateway {
 		// The gateway is restored BEFORE the phase moves on, so the cleanup can never inherit a
-		// platform whose door is still shut with nothing left that would open it. The scheduler
-		// stays fenced deliberately — its timed jobs must not publish while the source topology
-		// is still being reclaimed.
+		// platform whose door is still shut with nothing left that would open it. It is the last
+		// workload the fence holds: everything Core starts behind came back at stage 2.
 		if rerr := r.restoreFencedWorkload(ctx, p, gatewayWorkloadName); rerr != nil {
 			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationFenceError, rerr)
 			return render, true, res, aerr
@@ -204,12 +233,21 @@ func (r *Reconciler) cutoverStage(ctx context.Context, p *otilmv1alpha1.Platform
 	}
 
 	// Still fenced means the release has not run yet, whatever the workload's own status says:
-	// a fenced provisioning service sits at zero replicas, which a naive readiness check would
-	// happily call "rolled out" — the exact reading that wedges the migration.
-	if _, fenced := fencedWorkloadFor(p, provisioningWorkloadName); fenced {
-		return cutoverStageProvisioning, nil
+	// a fenced workload sits at zero replicas, which a naive readiness check would happily call
+	// "rolled out" — the exact reading that wedges the migration.
+	for _, name := range cutoverPreCoreReleases {
+		if _, fenced := fencedWorkloadFor(p, name); fenced {
+			return cutoverStageProvisioning, nil
+		}
 	}
 	rolled, err := r.provisioningRolledOut(ctx, p)
+	if err != nil {
+		return cutoverStageTopology, err
+	}
+	if !rolled {
+		return cutoverStageProvisioning, nil
+	}
+	rolled, err = r.schedulerRolledOut(ctx, p)
 	if err != nil {
 		return cutoverStageTopology, err
 	}
@@ -355,6 +393,19 @@ func (r *Reconciler) provisioningRolledOut(ctx context.Context, p *otilmv1alpha1
 	}
 	return r.workloadRolledOut(ctx, p.Namespace, provisioningWorkloadName,
 		platformbuilder.ResolveProvisioning(p).Image, migrationTargetVersion(p))
+}
+
+// schedulerRolledOut reports whether the scheduler is running the TARGET version's pod template
+// and has finished rolling out onto it.
+//
+// It is the second half of stage 2, symmetrical with provisioningRolledOut, and for the same
+// reason: Core's wait-for-auth init container polls the scheduler's Service, so a scheduler that
+// has been released but is not serving yet still holds Core's pod in its init phase. There is no
+// mode gate to make here — the scheduler is always rendered, and MigrationFenceTargets lists it
+// unconditionally.
+func (r *Reconciler) schedulerRolledOut(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
+	return r.workloadRolledOut(ctx, p.Namespace, schedulerWorkloadName,
+		platformbuilder.ResolveScheduler(p).Image, migrationTargetVersion(p))
 }
 
 // coreRolledOut reports whether Core is Ready ON THE TARGET ROLLOUT.

@@ -280,9 +280,13 @@ func migrationCleanupDeadlineExceeded(p *otilmv1alpha1.Platform, now time.Time) 
 	return now.Sub(u.PhaseStartedAt.Time) > migrationDrainTimeout(p)
 }
 
-// finishMigration ends the migration: the last fenced workload (the scheduler, whose timed jobs
-// were held back precisely until the source topology was gone) is restored, the version the
+// finishMigration ends the migration: whatever the fence still holds is restored, the version the
 // platform has actually reached is pinned, and the record is discarded.
+//
+// A cutover that ran to completion leaves nothing fenced — it releases Core's dependencies at its
+// stage 2 and the gateway at its stage 4 — so the restore here is the SAFETY NET rather than the
+// ordinary path: a migration forced through, or one whose cutover was interrupted between the two,
+// must never end with a workload parked at zero replicas and no record left to bring it back.
 //
 // The version and the record move in ONE write, deliberately. A cleared record beside a status
 // still naming the source version reads, to the very next reconcile, as a fresh request to
