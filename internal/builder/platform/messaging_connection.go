@@ -35,6 +35,8 @@ package platform
 // secretKeyRef into a credentials Secret), with only the source of those facts differing.
 
 import (
+	"fmt"
+
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/pkg/bom"
 )
@@ -83,6 +85,14 @@ type MessagingConnection struct {
 	// spec.core.provisioning.deploy.proxyCredentials); for managed mode it is the Topology-
 	// generated proxy-user Secret. Consumed by reference only.
 	ProxyCredentialsSecretName string
+	// AdministratorCredentialsSecretName names the Secret holding the full-access
+	// administrator user's credentials — the user a RabbitMQ management-API client (e.g. a
+	// migration's queue-depth poll) authenticates as. For external mode it is empty (the
+	// operator does not manage a foreign broker); for managed mode it is the Topology-
+	// generated administrator-user Secret, EXCEPT on the 2.17.0 bundle, whose single-user
+	// topology has no administrator ROLE (its lone user is Core, merely TAGGED
+	// administrator) — so it is empty there too. Consumed by reference only.
+	AdministratorCredentialsSecretName string
 }
 
 // ResolveMessagingConnection resolves the mode-agnostic MessagingConnection for a Platform:
@@ -106,12 +116,13 @@ func ResolveMessagingConnection(p *otilmv1alpha1.Platform) MessagingConnection {
 			// The RabbitMQ Cluster Operator exposes the cluster's client (AMQP) Service under
 			// the RabbitmqCluster's own name in the same namespace (ServiceSuffix=""), which is
 			// the host the readback wires dependents to.
-			Host:                              ManagedMessagingName(p),
-			Port:                              managedBrokerPort,
-			VirtualHost:                       managedVirtualHost(p),
-			CredentialsSecretName:             managedUserCredentialsSecretName(p, bom.MessagingUserCore),
-			ProvisioningCredentialsSecretName: managedUserCredentialsSecretName(p, bom.MessagingUserProvisioner),
-			ProxyCredentialsSecretName:        managedUserCredentialsSecretName(p, bom.MessagingUserProxy),
+			Host:                               ManagedMessagingName(p),
+			Port:                               managedBrokerPort,
+			VirtualHost:                        managedVirtualHost(p),
+			CredentialsSecretName:              managedUserCredentialsSecretName(p, bom.MessagingUserCore),
+			ProvisioningCredentialsSecretName:  managedUserCredentialsSecretName(p, bom.MessagingUserProvisioner),
+			ProxyCredentialsSecretName:         managedUserCredentialsSecretName(p, bom.MessagingUserProxy),
+			AdministratorCredentialsSecretName: administratorCredentialsSecretName(p),
 			// Managed: the keys are the Topology Operator's generated-Secret convention (which
 			// matches the wiring defaults), NOT user-mappable.
 			UsernameKey: w.MessagingCred.UsernameKey,
@@ -147,4 +158,40 @@ func msgCredPasswordKey(c *otilmv1alpha1.CredentialsRef, w bom.WiringProfile) st
 		return c.PasswordKey
 	}
 	return w.MessagingCred.PasswordKey
+}
+
+// administratorCredentialsSecretName resolves the managed broker's administrator-user
+// credentials Secret name, or empty when the selected bundle's messaging topology carries no
+// administrator ROLE. The 2.17.0 bundle's sole broker user is Core (merely TAGGED
+// administrator), so it has no distinct administrator-user Secret to reference.
+func administratorCredentialsSecretName(p *otilmv1alpha1.Platform) string {
+	if !messagingTopologyHasRole(resolveBundle(p).Messaging, bom.MessagingUserAdministrator) {
+		return ""
+	}
+	return managedUserCredentialsSecretName(p, bom.MessagingUserAdministrator)
+}
+
+// messagingTopologyHasRole reports whether a messaging topology provisions a user with the
+// given role.
+func messagingTopologyHasRole(topo bom.MessagingTopology, role bom.MessagingUserRole) bool {
+	for _, u := range topo.Users {
+		if u.Role == role {
+			return true
+		}
+	}
+	return false
+}
+
+// ManagedMessagingManagementEndpoint returns the managed broker's RabbitMQ HTTP management
+// API base URL — http://<cluster-service>.<namespace>.svc:<managedManagementPort> — for a
+// managed broker; empty for external mode, since the operator does not manage a foreign
+// broker's management API.
+//
+// SECURITY: like MessagingConnection, this is builder output consumed in memory only — it
+// must never be placed (in whole or in part) into status, conditions, events, or logs.
+func ManagedMessagingManagementEndpoint(p *otilmv1alpha1.Platform) string {
+	if !MessagingManaged(p) {
+		return ""
+	}
+	return fmt.Sprintf("http://%s.%s.svc:%d", ManagedMessagingName(p), p.Namespace, managedManagementPort)
 }

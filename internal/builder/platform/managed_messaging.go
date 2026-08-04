@@ -106,6 +106,11 @@ const (
 	// managedBrokerPort is the AMQP port the managed RabbitMQ cluster serves on.
 	managedBrokerPort int32 = 5672
 
+	// managedManagementPort is the RabbitMQ HTTP management API port the managed cluster's
+	// client Service exposes alongside AMQP and Prometheus (verified on the generated
+	// Service: amqp:5672, management:15672, prometheus:15692).
+	managedManagementPort int32 = 15672
+
 	// userCredentialsSecretSuffix is the Messaging Topology Operator's generated-Secret
 	// naming convention for a User CR named <user>: it creates a Secret <user>-user-credentials
 	// holding the user's username/password (Topology Operator source: Name = user.Name +
