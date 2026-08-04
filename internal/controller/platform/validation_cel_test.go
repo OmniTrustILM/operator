@@ -632,7 +632,8 @@ var _ = Describe("Platform CEL validation", func() {
 			field := f
 			for vi, bad := range badValues {
 				value := bad
-				It("rejects a shell metacharacter in "+field.name+": "+value, func() {
+				// %q keeps the spec name single-line: badValues includes a literal newline.
+				It(fmt.Sprintf("rejects a shell metacharacter in %s: %q", field.name, value), func() {
 					ns := freshNS(fmt.Sprintf("cel-charset-%d-%d", fi, vi))
 					p := platformIn(ns)
 					field.set(p, value)
@@ -754,7 +755,8 @@ var _ = Describe("Platform CEL validation", func() {
 			field := f
 			for vi, bad := range badValues {
 				value := bad
-				It("rejects a shell metacharacter in "+field.name+": "+value, func() {
+				// %q keeps the spec name single-line: badValues includes a literal newline.
+				It(fmt.Sprintf("rejects a shell metacharacter in %s: %q", field.name, value), func() {
 					ns := freshNS(fmt.Sprintf("cel-migver-bad-%d-%d", fi, vi))
 					p := platformIn(ns)
 					field.set(p, value)
