@@ -69,9 +69,10 @@ const (
 	keycloakVersion    = "26.4.0"
 	platformVersion217 = "2.17.0"
 	platformVersion218 = "2.18.0"
-	// platformVersion219 is the 2.19.0 fixture version: a RELEASED bundle this operator
-	// build carries (but not DefaultVersion — see bom.go), used to exercise the messaging
-	// migration engine and the running-vs-requested version split on deletion.
+	// platformVersion219 is the 2.19.0 fixture version: the PREVIEW (unreleased) bundle this
+	// operator build carries — resolvable only via an explicit spec.version, never advertised
+	// or DefaultVersion-eligible (see bom.go) — used to exercise the messaging migration
+	// engine and the running-vs-requested version split on deletion.
 	platformVersion219 = "2.19.0"
 
 	// Repeated Ginkgo step descriptions.

@@ -22,15 +22,12 @@ This operator build ships the following tested bundles. The engine columns are t
 
 | Platform version | PostgreSQL | RabbitMQ | Keycloak |
 | ---------------- | ---------- | -------- | -------- |
-| 2.19.0 | 18 | 4.3.1 | 26.6.3 |
 | **2.18.0** (default) | 18 | 4.3.1 | 26.6.3 |
 | 2.17.0 | 16 | 4.2.0 | 26.4.0 |
 
 `2.18.0` is the operator's **default** — the bundle selected when `spec.version` is empty at
-creation. It is not necessarily the newest bundle this build carries: a newer release (like
-`2.19.0` here) can ship and be fully supported before the default moves to it, so pin
-`spec.version` explicitly to use it. See [upgrades.md](upgrades.md) to move a running platform
-onto it.
+creation. It is not necessarily the newest bundle this build carries: the default moves only
+via a separate, deliberate change, once a newer release is fully supported.
 
 You select a bundle with **`spec.version`**.
 
@@ -104,7 +101,7 @@ kubectl describe platform ilm -n ilm
 # Conditions:
 #   Type      Status  Reason              Message
 #   Degraded  True    UnsupportedVersion  platform version "9.9.9" is not supported by this
-#                                         operator; supported versions: 2.17.0, 2.18.0, 2.19.0
+#                                         operator; supported versions: 2.17.0, 2.18.0
 ```
 
 A `Warning` Event with reason `UnsupportedVersion` is recorded alongside the condition.

@@ -1,20 +1,27 @@
-# platform_2190.yaml — a Platform pinned to the ILM 2.19.0 bundle.
+# platform_2190.yaml — a Platform pinned to the ILM 2.19.0 PREVIEW bundle.
 #
-# 2.19.0 is a RELEASED, supported bundle — it is just not the operator's DEFAULT yet (that
-# stays 2.18.0; omit spec.version to get the default). Two ways to land on 2.19.0:
+# 2.19.0 is a PREVIEW version bundle (Released: false): the operator does not advertise it yet —
+# SupportedVersions() excludes it and it can never become the fresh-install default — but its
+# coordinates and wiring are recorded and rendered, and spec.version reaches it exactly like a
+# released bundle. Two ways to land on 2.19.0:
 #   - FRESH INSTALL. Pin spec.version to "2.19.0" at creation, like this sample.
-#   - UPGRADE. Setting spec.version: "2.19.0" on a running platform now upgrades it: a managed
+#   - UPGRADE. Setting spec.version: "2.19.0" on a running platform upgrades it: a managed
 #     broker is moved by the operator's own messaging migration engine (fencing/drain/cutover),
 #     an external broker requires you to migrate it yourself and acknowledge the move via
 #     spec.messaging.migrationAcknowledgedForVersion. See docs/upgrades.md for the procedure.
+#
+# WHY IT'S STILL PREVIEW: the operator has no Platform CR fields yet for 2.19.0's time-quality
+# integration, the time-quality-monitor sidecar, or the platform instance-id env var — those
+# exist in ILM Core and the Helm chart, but this CR cannot configure them. A platform pinned
+# here therefore comes up WITHOUT that integration, WITHOUT the monitor sidecar, and WITHOUT
+# the instance-id env. Release day (Released: true + advertised) lands once the operator adds
+# those CR fields and reaches Helm-chart parity.
 #
 # WHAT 2.19.0 CHANGES (the operator wires all of it — you configure no env-var names):
 #   - images: core and frontend-administrator 2.19.0, auth 1.7.0, scheduler 1.1.1,
 #   - the log-level env var is renamed LOGGING_LEVEL_COM_CZERTAINLY → LOGGING_LEVEL_COM_OTILM,
 #   - the messaging exchanges are renamed (czertainly → ilm, czertainly-proxy → ilm-proxy), so
 #     the per-instance queue Core registers at startup binds under ilm-proxy.
-# Not yet wired: 2.19.0's time-quality integration, the time-quality-monitor sidecar and the
-# platform instance-id env var are carried in the version data but no component renders them.
 #
 # PREREQUISITES
 #   - The ILM operator running in the cluster (make deploy / helm install).
@@ -34,7 +41,7 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
-  version: "2.19.0"                   # pin the released 2.19.0 bundle (not yet the default)
+  version: "2.19.0"                   # opt in to the preview bundle (fresh install or upgrade)
   database:
     mode: external
     host: postgres.example.com

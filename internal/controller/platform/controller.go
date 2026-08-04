@@ -284,10 +284,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
 	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
-	// downgrade, an unsupported version, and an upgrade onto an unreleased preview bundle
-	// (each a terminal steady state), pins the resolved version onto the in-memory Platform,
-	// and returns the version bundle. A handled=true result means a guard short-circuited
-	// the reconcile.
+	// downgrade and an unsupported version (each a terminal steady state), pins the resolved
+	// version onto the in-memory Platform, and returns the version bundle. A handled=true
+	// result means a guard short-circuited the reconcile.
 	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, &platform)
 	if handled || err != nil {
 		return res, err
@@ -574,16 +573,19 @@ func (r *Reconciler) checkSingletonGuard(ctx context.Context, platform *otilmv1a
 	return false, ctrl.Result{}, nil
 }
 
-// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD + PREVIEW-UPGRADE
-// GUARD and resolves the version bundle for this reconcile. effectivePlatformVersion makes an
-// empty spec.version FOLLOW the pinned status.observedVersion (not the operator's current
-// default), so upgrading the operator — which changes the built-in DefaultVersion — never
-// silently upgrades a running platform; an explicit spec.version is the only upgrade trigger.
+// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD and resolves the
+// version bundle for this reconcile. effectivePlatformVersion makes an empty spec.version
+// FOLLOW the pinned status.observedVersion (not the operator's current default), so upgrading
+// the operator — which changes the built-in DefaultVersion — never silently upgrades a
+// running platform; an explicit spec.version is the only upgrade trigger.
 //
-// It refuses an explicit DOWNGRADE, an UNSUPPORTED version, and an UPGRADE onto an unreleased
-// (preview) bundle (each a terminal steady state → handled=true), pins the resolved version onto
-// the IN-MEMORY Platform so the version-specific builders resolve the SAME bundle the reconciler
-// gated on, and returns that bundle.
+// It refuses an explicit DOWNGRADE and an UNSUPPORTED version (each a terminal steady state →
+// handled=true), pins the resolved version onto the IN-MEMORY Platform so the version-specific
+// builders resolve the SAME bundle the reconciler gated on, and returns that bundle. A bundle
+// this operator carries but does not yet ADVERTISE (Bundle.Released=false) resolves and applies
+// exactly like a released one once spec.version names it explicitly, on a fresh install or as
+// an upgrade of a live platform — Released only gates SupportedVersions()/DefaultVersion
+// eligibility, never whether an explicit opt-in is honored.
 func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilmv1alpha1.Platform) (resolvedVersion string, bundle bom.Bundle, handled bool, res ctrl.Result, err error) {
 	effectiveVersion := effectivePlatformVersion(platform)
 
@@ -618,20 +620,6 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	resolvedVersion = effectiveVersion
 	if resolvedVersion == "" {
 		resolvedVersion = bom.DefaultVersion
-	}
-
-	// Preview bundles are for fresh installs and explicit testing only: refuse to
-	// UPGRADE a live platform onto an unreleased bundle — the messaging migration
-	// engine that makes such a move safe ships separately, and the release-day flip
-	// (Released=true) is what opens the path. Fresh installs (no observed version)
-	// may pin a preview explicitly, and a migration already in flight to this exact
-	// version is let through rather than stranded (see previewUpgradeRefused).
-	if previewUpgradeRefused(platform, resolvedBundle, resolvedVersion) {
-		res, err = r.steadyState(ctx, platform, reasonPreviewVersionUpgradeBlocked,
-			fmt.Sprintf("version %s is a preview (unreleased) bundle; upgrading a running platform onto it is not supported — released versions: %s; "+
-				"keep spec.version at %q, or wait for %s to be released",
-				resolvedVersion, strings.Join(bom.SupportedVersions(), ", "), platform.Status.ObservedVersion, resolvedVersion))
-		return "", bundle, true, res, err
 	}
 
 	// Pin the resolved version onto the IN-MEMORY Platform so the version-specific builders
@@ -1140,8 +1128,8 @@ func (r *Reconciler) setReadinessStatus(p *otilmv1alpha1.Platform, ready bool) {
 
 // clearStaleDegraded flips a leftover Degraded=True to False on a SUCCESSFUL reconcile pass,
 // so a platform that was degraded by a deterministic, user-correctable condition (a refused
-// version — PreviewVersionUpgradeBlocked / DowngradeForbidden / UnsupportedVersion — the
-// singleton loser, a render error) stops advertising Degraded once the cause is gone.
+// version — DowngradeForbidden / UnsupportedVersion — the singleton loser, a render error)
+// stops advertising Degraded once the cause is gone.
 //
 // It touches the condition ONLY when it is currently True: a platform that never degraded
 // keeps a Degraded-free condition list rather than gaining a permanent Degraded=False entry.

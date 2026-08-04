@@ -3113,8 +3113,11 @@ spec:
 // (plus the auth/scheduler images of that bundle, each actually rolled out), the renamed
 // LOGGING_LEVEL_COM_OTILM env, and, read back THROUGH the Messaging Topology Operator, the
 // default "/" vhost, the renamed ilm / ilm-proxy exchanges and the new provider.status-poll
-// queue. A fresh install MAY name an unreleased (preview) bundle; only UPGRADING a live platform
-// onto one is refused (that refusal is the upgrade block's spec).
+// queue. spec.version resolves an unreleased (preview) bundle exactly like a released one — on
+// a fresh install (here) or as an upgrade of a live platform (platformVersionMatrixUpgradeSpecs
+// and platformVersionMatrixMigrationSpecs cover that half): Released only gates whether the
+// version is ADVERTISED (SupportedVersions()/DefaultVersion), never whether an explicit
+// spec.version is honored.
 //
 // Labelled "matrix-preview" so CI runs it in its OWN job on its OWN fresh cluster, in parallel
 // with platformVersionMatrixUpgradeSpecs — the two bring-ups used to run serially in one Context

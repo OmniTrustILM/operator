@@ -33,11 +33,6 @@ import (
 // older than the version already running (status.observedVersion).
 const reasonDowngradeForbidden = "DowngradeForbidden"
 
-// reasonPreviewVersionUpgradeBlocked is the Degraded condition reason when an explicit
-// spec.version resolves to an unreleased (preview) bundle while a different version is
-// already running: a live platform cannot be upgraded onto a preview bundle.
-const reasonPreviewVersionUpgradeBlocked = "PreviewVersionUpgradeBlocked"
-
 // effectivePlatformVersion implements the PIN-ON-CREATE policy: the version the operator
 // reconciles a Platform against, in precedence order, is
 //
@@ -68,9 +63,9 @@ func effectivePlatformVersion(p *otilmv1alpha1.Platform) string {
 // Teardown must reclaim the objects that actually EXIST, and those were rendered from the
 // running version. Two cases make the requested version wrong:
 //
-//   - a blocked upgrade (spec.version names a bundle the version guards refused, e.g. an
-//     unreleased preview) left the platform running the OLD topology, whose object names the
-//     new bundle may have renamed;
+//   - a blocked upgrade (spec.version names a bundle the version guards refused, e.g. a
+//     downgrade or an unsupported version) left the platform running the OLD topology, whose
+//     object names the new bundle may have renamed;
 //   - an empty spec.version on a pinned platform would resolve to the operator's built-in
 //     default, which is not necessarily the running version.
 //
@@ -126,28 +121,6 @@ func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platfor
 	legacy.Spec.Version = teardownPlatformVersion(p)
 	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
 	return append(out, legacy)
-}
-
-// previewUpgradeRefused reports whether the preview-upgrade guard must refuse this reconcile:
-// the resolved bundle is unreleased (preview) AND the platform is already LIVE on a different
-// version. Preview bundles are for fresh installs and explicit testing, so a fresh install (no
-// observed version) may pin one and a platform already running that very version keeps
-// converging on it.
-//
-// The one exception is a migration ALREADY IN FLIGHT to this exact version. That is not the
-// move the guard exists to stop — the move was permitted when it started, and the platform is
-// mid-flight with its message producers fenced at zero replicas. Refusing it now would strand
-// them there with no way forward (the engine never runs) and no way back (a revert is only
-// honoured while the migration is still reversible), so the in-flight target is let through and
-// the migration is allowed to reach its end state.
-func previewUpgradeRefused(p *otilmv1alpha1.Platform, bundle bom.Bundle, resolvedVersion string) bool {
-	if bundle.Released || p.Status.ObservedVersion == "" || p.Status.ObservedVersion == resolvedVersion {
-		return false
-	}
-	if u := p.Status.Upgrade; u != nil && u.ToVersion == resolvedVersion {
-		return false
-	}
-	return true
 }
 
 // isPlatformDowngrade reports whether requested is strictly OLDER (by semver) than running.

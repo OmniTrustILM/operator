@@ -170,12 +170,14 @@ type Bundle struct {
 
 	// Released marks a bundle whose platform artifacts are published. Unreleased
 	// (preview) bundles resolve ONLY via an explicit spec.version — they are excluded
-	// from the advertised SupportedVersions(), are not eligible to be DefaultVersion,
-	// and a LIVE platform cannot be upgraded onto one (see the controller's
-	// preview-upgrade guard). A release-day flip PR sets Released; moving DefaultVersion
-	// to the newly-released bundle is a SEPARATE decision the same or a later PR makes —
-	// releasing a version does not, by itself, change what a version-less fresh install
-	// resolves to.
+	// from the advertised SupportedVersions() and are not eligible to be DefaultVersion.
+	// Released is purely an ADVERTISING gate: an explicit spec.version reaches an
+	// unreleased bundle exactly like a released one, whether on a fresh install or as an
+	// upgrade of a live platform — the messaging migration engine (and the downgrade /
+	// unsupported-version guards) govern the move, not this flag. A release-day flip PR
+	// sets Released; moving DefaultVersion to the newly-released bundle is a SEPARATE
+	// decision the same or a later PR makes — releasing a version does not, by itself,
+	// change what a version-less fresh install resolves to.
 	Released bool
 
 	// Managed-infrastructure default versions for this platform version. They are the
@@ -252,21 +254,23 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
 	},
-	// 2.19.0 — RELEASED: advertised via SupportedVersions, and a live platform can be
-	// upgraded onto it (the messaging migration engine governs a managed-broker move; an
-	// external broker needs spec.messaging.migrationAcknowledgedForVersion). It is NOT
-	// DefaultVersion — that stays 2.18.0 until a separate PR moves it, so a version-less
-	// fresh install is unaffected by this release. Image coordinates verified against the
-	// released helm-charts 2.19.0 tag.
+	// 2.19.0 — PREVIEW (Released: false): excluded from SupportedVersions() and never
+	// DefaultVersion-eligible, so it resolves ONLY via an explicit spec.version — on a
+	// fresh install or as an upgrade of a live platform (the messaging migration engine
+	// governs a managed-broker move; an external broker needs
+	// spec.messaging.migrationAcknowledgedForVersion). Image coordinates verified against
+	// the released helm-charts 2.19.0 tag.
 	//
-	// COMPLETENESS: parts of this bundle are carried as version DATA that no builder reads
-	// yet. The wiring's TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and
-	// PlatformInstanceIDEnv (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image
-	// below, are recorded here so the version contract is complete and reviewable — but
-	// nothing renders them. A platform pinned to 2.19.0 today therefore comes up WITHOUT the
-	// time-quality integration, WITHOUT the time-quality-monitor sidecar, and WITHOUT the
-	// instance-id env var. The data stays: consuming it is the remaining work, and removing
-	// it would lose the verified coordinates.
+	// COMPLETENESS: this bundle stays preview because the operator has no Platform CR
+	// fields yet for parts of what it carries as version DATA. The wiring's
+	// TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and PlatformInstanceIDEnv
+	// (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image below, are recorded here
+	// so the version contract is complete and reviewable — but no builder reads them and no
+	// CR field configures them. A platform pinned to 2.19.0 today therefore comes up
+	// WITHOUT the time-quality integration, WITHOUT the time-quality-monitor sidecar, and
+	// WITHOUT the instance-id env var. Adding those CR fields (and the builder wiring that
+	// reads them) is the remaining work; the release-day flip to Released: true happens in
+	// that same PR, once the operator reaches Helm-chart parity.
 	version2190: {
 		Components: map[string]Image{
 			"core":                   {Name: "core", Tag: version2190},
@@ -286,7 +290,7 @@ var bundles = map[string]Bundle{
 		Wiring:          wiring2190,
 		Messaging:       messagingTopology2190,
 		HasProvisioning: true,
-		Released:        true,
+		Released:        false,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",

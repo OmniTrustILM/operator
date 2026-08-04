@@ -163,9 +163,9 @@ func namesContaining(names []string, sub string) []string {
 }
 
 // TestHandleDeletionRendersTeardownFromRunningVersion is the version-mismatch deletion-safety
-// guard. A platform whose requested spec.version was REFUSED by the version guards (here the
-// 2.19.0 preview, blocked by PreviewVersionUpgradeBlocked) keeps running the version pinned on
-// status.observedVersion — and 2.19.0 RENAMED the messaging topology (exchange czertainly →
+// guard. A platform whose spec.version names a bundle it has not (yet) reconciled onto — e.g. a
+// messaging migration still fencing/draining toward 2.19.0 — keeps running the version pinned on
+// status.observedVersion, and 2.19.0 RENAMED the messaging topology (exchange czertainly →
 // ilm). Teardown must therefore render from the RUNNING version: rendering from the raw
 // spec.version would try to delete 2.19.0-named objects that never existed and ORPHAN the live
 // 2.18.0 topology under deletionPolicy=Delete.
@@ -190,8 +190,8 @@ func TestHandleDeletionRendersTeardownFromRunningVersion(t *testing.T) {
 	require.Empty(t, namesContaining(requestedNames, "exchange-czertainly"),
 		"precondition: the 2.19.0 topology renamed the exchanges (so a spec-version render misses the live CRs)")
 
-	// The CR as the API server holds it while being deleted: an explicit spec.version the
-	// preview guard refused, with status.observedVersion still on the running version.
+	// The CR as the API server holds it while being deleted: spec.version already names the
+	// target bundle while status.observedVersion still reflects the running one.
 	p := managedMQPlatformCR()
 	p.Spec.Version = platformVersion219
 	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyDelete

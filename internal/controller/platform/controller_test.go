@@ -1262,12 +1262,13 @@ var _ = Describe("Platform Controller", func() {
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
-		It("allows a fresh platform to pin directly to the released 2.19.0 bundle", func() {
-			// 2.19.0 is released (not preview) but not DefaultVersion — a fresh install must
-			// still be able to name it explicitly. The preview-upgrade guard no longer applies
-			// to a released bundle; see TestPreviewUpgradeRefused (version_test.go) for that
-			// guard's own coverage, and the messaging-migration suite for what governs a LIVE
-			// platform's move onto 2.19.0.
+		It("allows a fresh platform to pin directly to the preview 2.19.0 bundle", func() {
+			// 2.19.0 is a preview bundle (Released: false): excluded from SupportedVersions()
+			// and never DefaultVersion-eligible, but an explicit spec.version still resolves it
+			// on a fresh install like this one. There is no separate preview-upgrade guard — a
+			// LIVE platform can name it too; the messaging-migration suite covers what governs
+			// that move (fence/drain/cutover for a managed broker, migrationAcknowledgedForVersion
+			// for an external one).
 			const ns = "ilm-version-2190-fresh"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion219))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
