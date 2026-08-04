@@ -515,6 +515,99 @@ func TestBlockMigrationLiftsTheFenceAndKeepsTheRecord(t *testing.T) {
 	assert.Empty(t, drainEvents(rec), "a state already reported is not reported again on every reconcile")
 }
 
+// TestFencingTimeoutHonoursAnAuthorisedForcedCutover: the blocked state's message offers the
+// forced cutover from EVERY reversible phase, so the phase that produced it must take it. A
+// fence that outlives its budget is the case where producers will not wind down at all — the
+// one an operator is most likely to have to force their way out of.
+func TestFencingTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
+	t.Run("the fence is still held", func(t *testing.T) {
+		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
+			otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+		p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+		p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+		_, to := migrationBundles(t)
+		// The producers never wound down — which is why the fence expired.
+		r, rec := migrationReconciler(t, p, interceptor.Funcs{}, runningProducerWorkloads()...)
+
+		_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+		require.NoError(t, err)
+		assert.True(t, handled)
+		assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
+		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r),
+			"the authorisation proceeds past producers that never stopped")
+		assert.Equal(t, []otilmv1alpha1.FencedWorkload{{Name: "scheduler", Kind: "Deployment", Replicas: 3}},
+			fenced(storedPlatform(t, r)), "an already-held fence is left exactly as it was")
+
+		events := strings.Join(drainEvents(rec), " ")
+		assert.Contains(t, events, eventMigrationForcedCutover)
+		assertNoBrokerCoordinates(t, events)
+	})
+
+	t.Run("the fence was already lifted by an earlier block", func(t *testing.T) {
+		p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing) // nothing fenced any more
+		p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+		p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+		_, to := migrationBundles(t)
+		r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
+
+		_, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+		require.NoError(t, err)
+		assert.True(t, handled)
+		assert.Equal(t, otilmv1alpha1.MigrationPhaseCuttingOver, storedPhase(t, r))
+		assert.ElementsMatch(t, []otilmv1alpha1.FencedWorkload{
+			{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+			{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+		}, fenced(storedPlatform(t, r)), "the producers the block released are stopped again before the cutover")
+		assert.Zero(t, replicasOf(t, r, "api-gateway"))
+		assert.Zero(t, replicasOf(t, r, "scheduler"))
+	})
+}
+
+// TestFencingTimeoutWithAForceForAnotherVersionStaysBlocked: the authorisation is target-scoped
+// at EVERY site that consults it, so a value left behind by an older migration releases nothing
+// — the expired fence blocks exactly as it would with no value at all.
+func TestFencingTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
+	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseFencing,
+		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion217
+	_, to := migrationBundles(t)
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	_, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err)
+	assert.False(t, handled)
+
+	stored := storedPlatform(t, r)
+	require.NotNil(t, stored.Status.Upgrade)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseFencing, stored.Status.Upgrade.Phase,
+		"a stale authorisation may not move the migration on")
+	assert.Empty(t, fenced(stored), "the block lifts the fence, as it does with no authorisation at all")
+	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+	cond := migrationCondition(stored)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonMigrationDrainTimeout, cond.Reason)
+	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
+}
+
+// runningProducerWorkloads are the fence targets with their pods still up: patched to zero
+// replicas, but with the workload controller still reporting one — a producer that is still
+// publishing, and the reason a fence can outlive its budget.
+func runningProducerWorkloads() []client.Object {
+	return []client.Object{
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "api-gateway", Namespace: migrationTestNS},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
+			Status:     appsv1.DeploymentStatus{Replicas: 1},
+		},
+		&appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "scheduler", Namespace: migrationTestNS},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
+			Status:     appsv1.DeploymentStatus{Replicas: 1},
+		},
+	}
+}
+
 // TestMigrationPhaseDeadlineExceeded pins which phases the deadline governs and where it is
 // measured from.
 func TestMigrationPhaseDeadlineExceeded(t *testing.T) {

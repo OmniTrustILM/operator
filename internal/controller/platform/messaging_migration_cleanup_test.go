@@ -736,6 +736,47 @@ func TestFinishMigrationPinsTheVersionItReached(t *testing.T) {
 	assert.Nil(t, next.Status.Upgrade, "a finished migration does not start itself again")
 }
 
+// TestFinishMigrationDiscardsTheRecordAndPinsTheVersionInOneUpdate proves the invariant above
+// where it actually lives — in the WRITES, not in the state they add up to. Every status update
+// the completion makes is captured, and the intermediate the split version of this code would
+// produce (the record already gone, the reported version still the source) must never be one of
+// them: a reconcile that read it would see a platform running 2.18.0 with 2.19.0 requested and
+// nothing recorded, and start the whole migration again.
+func TestFinishMigrationDiscardsTheRecordAndPinsTheVersionInOneUpdate(t *testing.T) {
+	p := cleanupPlatform()
+	p.Status.ObservedVersion = platformVersion218
+
+	var written []*otilmv1alpha1.Platform
+	r, _ := cleanupReconciler(t, p, idleBroker(), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if pl, isPlatform := obj.(*otilmv1alpha1.Platform); isPlatform {
+				written = append(written, pl.DeepCopy())
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+
+	_, _, _, err := cleanupPass(t, r)
+	require.NoError(t, err)
+
+	cleared := 0
+	for i, w := range written {
+		if w.Status.Upgrade != nil {
+			assert.Equal(t, platformVersion218, w.Status.ObservedVersion,
+				"write %d: the reported version moves only as the record is discarded", i)
+			continue
+		}
+		cleared++
+		assert.Equal(t, platformVersion219, w.Status.ObservedVersion,
+			"write %d: the write that discards the record carries the version the platform reached", i)
+	}
+	assert.Equal(t, 1, cleared, "the record is discarded exactly once, and in a single write")
+
+	stored := storedPlatform(t, r)
+	assert.Nil(t, stored.Status.Upgrade)
+	assert.Equal(t, platformVersion219, stored.Status.ObservedVersion)
+}
+
 // TestFinishMigrationRollsBackWhenTheWriteFails: a conclusion the cluster did not accept must
 // not survive in the copy the rest of the pass reads either.
 func TestFinishMigrationRollsBackWhenTheWriteFails(t *testing.T) {

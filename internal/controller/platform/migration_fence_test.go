@@ -29,6 +29,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -38,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const fenceTestNS = "ns"
@@ -158,6 +160,127 @@ func TestRestoreWorkloadIsIdempotent(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(sched), &got))
 	require.NotNil(t, got.Spec.Replicas)
 	assert.Equal(t, int32(3), *got.Spec.Replicas)
+}
+
+// TestRestoreWorkloadRemovesExactlyOneEntry: the fenced list is the migration's state, so a
+// restore must account for precisely the workload it restored — one entry gone, every other
+// entry and its recorded count untouched.
+func TestRestoreWorkloadRemovesExactlyOneEntry(t *testing.T) {
+	p := fencedMigrationPlatform(
+		otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: "Deployment", Replicas: 1},
+		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+	)
+	r := fenceReconcilerFor(t, p, fencedWorkloadObjects()...)
+
+	require.NoError(t, r.restoreWorkload(context.Background(), p, p.Status.Upgrade.Fenced[1]))
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{
+		{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+	}, p.Status.Upgrade.Fenced)
+	assert.Equal(t, int32(1), replicasOf(t, r, "provisioning"))
+	assert.Zero(t, replicasOf(t, r, "api-gateway"), "the others stay down")
+	assert.Zero(t, replicasOf(t, r, "scheduler"))
+}
+
+// TestRestoreWorkloadReEntersAfterAFailedWrite is the crash contract of a single restore. The
+// patch lands and the status write does not, so the entry is still listed — which is what keeps
+// the render omitting replicas and the fence re-asserting behind it. Re-entering repeats the
+// patch (idempotent) and finishes the job.
+func TestRestoreWorkloadReEntersAfterAFailedWrite(t *testing.T) {
+	p := fencedMigrationPlatform(otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3})
+	crash := true
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if crash {
+				return errors.New("status write rejected")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}, fencedWorkloadObjects()...)
+
+	entry := p.Status.Upgrade.Fenced[0]
+	require.Error(t, r.restoreWorkload(context.Background(), p, entry))
+	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the workload is back up")
+	assert.Len(t, storedFenced(t, r), 1, "but the fence still lists it, so it is restored again if this pass is lost")
+
+	crash = false
+	require.NoError(t, r.restoreWorkload(context.Background(), storedPlatform(t, r), entry))
+	assert.Empty(t, storedFenced(t, r))
+	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+}
+
+// TestLiftMigrationFenceResumesAfterAPartialRestore is the re-entrancy claim the whole
+// conclusion rests on: a crash between two restores leaves the workloads already released
+// released, and the fenced list naming exactly the ones that are not. Re-entering finishes from
+// there — nothing is restored twice to a stale count, and nothing is left at zero with no record
+// that it should come back up.
+func TestLiftMigrationFenceResumesAfterAPartialRestore(t *testing.T) {
+	p := fencedMigrationPlatform(
+		otilmv1alpha1.FencedWorkload{Name: "api-gateway", Kind: "Deployment", Replicas: 2},
+		otilmv1alpha1.FencedWorkload{Name: "provisioning", Kind: "Deployment", Replicas: 1},
+		otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+	)
+	writes := 0
+	crash := true
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			if crash && writes == 2 {
+				return errors.New("status write rejected")
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}, fencedWorkloadObjects()...)
+
+	require.Error(t, r.liftMigrationFence(context.Background(), p), "the pass stops at the write it could not make")
+	assert.Equal(t, []otilmv1alpha1.FencedWorkload{
+		{Name: "provisioning", Kind: "Deployment", Replicas: 1},
+		{Name: "scheduler", Kind: "Deployment", Replicas: 3},
+	}, storedFenced(t, r), "only the restore that was persisted is accounted for")
+	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"))
+	assert.Zero(t, replicasOf(t, r, "scheduler"), "the restores past the failure never ran")
+
+	// The restart: a fresh read of what survived, and the same call again.
+	crash = false
+	resumed := storedPlatform(t, r)
+	require.NoError(t, r.liftMigrationFence(context.Background(), resumed))
+	assert.Empty(t, storedFenced(t, r), "the fenced list is empty only once every workload is back")
+	assert.Equal(t, int32(2), replicasOf(t, r, "api-gateway"), "an already-restored workload keeps its count")
+	assert.Equal(t, int32(1), replicasOf(t, r, "provisioning"))
+	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"))
+}
+
+// TestLiftMigrationFenceIsANoOpWhenNothingIsFenced: the conclusion runs it unconditionally, so
+// an empty list — and a platform with no migration at all — must simply cost nothing.
+func TestLiftMigrationFenceIsANoOpWhenNothingIsFenced(t *testing.T) {
+	empty := fencedMigrationPlatform()
+	assert.NoError(t, fenceReconcilerFor(t, empty).liftMigrationFence(context.Background(), empty))
+
+	plain := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Name: "ilm", Namespace: fenceTestNS}}
+	assert.NoError(t, fenceReconcilerFor(t, plain).liftMigrationFence(context.Background(), plain))
+}
+
+// fencedWorkloadObjects are the three producers the restore tests hold at zero replicas.
+func fencedWorkloadObjects() []client.Object {
+	names := []string{"api-gateway", "provisioning", "scheduler"}
+	objs := make([]client.Object, 0, len(names))
+	for _, name := range names {
+		objs = append(objs, &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: fenceTestNS},
+			Spec:       appsv1.DeploymentSpec{Replicas: ptr(int32(0))},
+		})
+	}
+	return objs
+}
+
+// storedFenced returns the PERSISTED fence entries — what a resume would start from, rather than
+// the in-memory copy a failed pass left behind.
+func storedFenced(t *testing.T, r *Reconciler) []otilmv1alpha1.FencedWorkload {
+	t.Helper()
+	u := storedPlatform(t, r).Status.Upgrade
+	require.NotNil(t, u)
+	return u.Fenced
 }
 
 // TestRestoreWorkloadWithoutMigration: nothing is recorded, so there is nothing to restore.

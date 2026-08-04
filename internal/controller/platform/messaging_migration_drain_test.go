@@ -487,6 +487,49 @@ func TestDrainTimeoutHonoursAnAuthorisedForcedCutover(t *testing.T) {
 	})
 }
 
+// TestDrainTimeoutWithAForceForAnotherVersionStaysBlocked: the authorisation names the version
+// it authorises at the deadline too, so a value left behind by an older migration takes the
+// blocked exit rather than the forced one — nothing is cut over and nothing is discarded.
+func TestDrainTimeoutWithAForceForAnotherVersionStaysBlocked(t *testing.T) {
+	p := drainingPlatform(0)
+	p.Status.Upgrade.PhaseStartedAt = metav1.NewTime(time.Now().Add(-time.Hour))
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion217
+	admin := &fakeBrokerAdmin{queues: sourceQueueListing(rabbitmq.QueueState{Name: "core", MessagesReady: 12})}
+	r, rec, _ := drainReconciler(t, p, admin, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	_, handled, _, err := drainPass(t, r)
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r),
+		"a stale authorisation may not move the migration on")
+	assert.Equal(t, int32(3), replicasOf(t, r, "scheduler"), "the fence is lifted, as it is with no authorisation at all")
+
+	cond := migrationCondition(storedPlatform(t, r))
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonMigrationDrainTimeout, cond.Reason)
+	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
+}
+
+// TestForceBeforeTheDeadlineStillWaitsForACleanDrain pins what the authorisation is FOR: it
+// overrides the stop at spec.messaging.managed.drainTimeout, not the drain itself. Set while the
+// phase still has budget, it changes nothing — the source virtual host is still given its full
+// window to empty cleanly, and only a deadline it does not meet spends the authorisation.
+func TestForceBeforeTheDeadlineStillWaitsForACleanDrain(t *testing.T) {
+	p := drainingPlatform(0)
+	p.Spec.Messaging.Managed.ForceCutoverForVersion = platformVersion219
+	admin := &fakeBrokerAdmin{queues: sourceQueueListing(rabbitmq.QueueState{Name: "core", MessagesReady: 12})}
+	r, rec, _ := drainReconciler(t, p, admin, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	render, handled, _, err := drainPass(t, r)
+	require.NoError(t, err)
+	assert.False(t, handled)
+	assert.Equal(t, platformVersion218, render.version, "the platform still serves its source version")
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, storedPhase(t, r))
+	assert.Zero(t, storedPolls(t, r), "the queue that still holds messages is not counted as clean")
+	assert.Zero(t, replicasOf(t, r, "scheduler"), "the producers stay fenced")
+	assert.NotContains(t, strings.Join(drainEvents(rec), " "), eventMigrationForcedCutover)
+}
+
 // TestMigrationForceCutoverAuthorized: the authorisation is target-scoped, so one migration's
 // acceptance of data loss can never carry over to the next.
 func TestMigrationForceCutoverAuthorized(t *testing.T) {

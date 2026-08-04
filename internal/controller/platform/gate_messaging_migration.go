@@ -236,7 +236,7 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 // or the first pass after a crash.
 func (r *Reconciler) migrationFencingPhase(ctx context.Context, p *otilmv1alpha1.Platform, render migrationRender) (migrationRender, bool, ctrl.Result, error) {
 	if migrationPhaseDeadlineExceeded(p, time.Now()) {
-		return r.blockMigration(ctx, p, render)
+		return r.migrationDeadlineExit(ctx, p, render)
 	}
 
 	if err := r.fenceWorkloads(ctx, p); err != nil {
@@ -402,6 +402,22 @@ func (r *Reconciler) concludeMigration(ctx context.Context, p *otilmv1alpha1.Pla
 	}
 	r.event(p, corev1.EventTypeNormal, eventReason, message)
 	return nil
+}
+
+// migrationDeadlineExit takes whichever exit a reversible phase that has outlived its deadline is
+// entitled to: the forced cutover when the platform authorises one for THIS target, and otherwise
+// the blocked wait.
+//
+// Both reversible phases route through it so the two cannot drift apart. They must not: the
+// blocked state's own message offers the forced cutover, and it is written by the same
+// blockMigration whichever phase expired — a phase that produced that message and then ignored the
+// value it asked for would leave the platform with one working exit where its status advertises
+// two.
+func (r *Reconciler) migrationDeadlineExit(ctx context.Context, p *otilmv1alpha1.Platform, render migrationRender) (migrationRender, bool, ctrl.Result, error) {
+	if migrationForceCutoverAuthorized(p) {
+		return r.forceMigrationCutover(ctx, p, render)
+	}
+	return r.blockMigration(ctx, p, render)
 }
 
 // blockMigration ends the WAIT — not the migration — when a reversible phase outlives its

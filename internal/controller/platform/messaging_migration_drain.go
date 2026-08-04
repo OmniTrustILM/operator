@@ -117,10 +117,7 @@ func (r *Reconciler) migrationDrainingPhase(ctx context.Context, p *otilmv1alpha
 	}
 
 	if migrationPhaseDeadlineExceeded(p, time.Now()) {
-		if migrationForceCutoverAuthorized(p) {
-			return r.forceMigrationCutover(ctx, p, src)
-		}
-		return r.blockMigration(ctx, p, render)
+		return r.migrationDeadlineExit(ctx, p, src)
 	}
 
 	outstanding, perr := r.pollSourceDrain(ctx, p, src.bundle)
@@ -201,8 +198,10 @@ func migrationForceCutoverAuthorized(p *otilmv1alpha1.Platform) bool {
 	return m.ForceCutoverForVersion == p.Status.Upgrade.ToVersion
 }
 
-// forceMigrationCutover takes the exit the drain deadline's own message offers: cut over
-// anyway, accepting the loss of whatever the source virtual host still holds.
+// forceMigrationCutover takes the exit an expired reversible phase's own message offers: cut over
+// anyway, accepting the loss of whatever the source virtual host still holds. Either reversible
+// phase can reach it — a fence whose producers never wound down and a drain that never emptied
+// are the same situation from the operator's side, and the message they produce is the same one.
 //
 // It re-asserts the fence first. The deadline may already have been reached once and blocked,
 // which LIFTS the fence — so the producers can be back up by the time the authorisation
