@@ -204,35 +204,35 @@ var _ = Describe("Messaging migration cutover", func() {
 				g.Expect(getPlatform(ns).Status.Upgrade.Phase).To(Equal(otilmv1alpha1.MigrationPhaseCuttingOver))
 			}, "2s", platformInterval).Should(Succeed())
 
-			By("reopening the gateway and handing over with only the scheduler still stopped")
+			By("reopening the gateway, handing over, and finishing the migration")
+			// The hand-over reopens the gateway and leaves ONLY the scheduler fenced — an
+			// intermediate state the fake-client tests assert precisely, and one that cannot be
+			// caught reliably here: this platform's broker is EXTERNAL, so the cleanup it hands
+			// to has no topology of its own to reclaim and finishes on the very next pass.
 			Eventually(func(g Gomega) {
 				markRolledOut(ns, provisioningWorkloadName)
 				markRolledOut(ns, coreDeploymentName)
 				reconcileOnce(ns)
-				u := getPlatform(ns).Status.Upgrade
-				g.Expect(u).NotTo(BeNil())
-				g.Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseCleaningUp))
-				g.Expect(u.Fenced).To(ConsistOf(
-					otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1},
-				))
+				p := getPlatform(ns)
+				g.Expect(p.Status.Upgrade).To(BeNil())
+				g.Expect(p.Status.ObservedVersion).To(Equal(platformVersion219))
 			}, platformTimeout, platformInterval).Should(Succeed())
 
 			Eventually(func() int32 {
 				return workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)
 			}, platformTimeout, platformInterval).Should(Equal(int32(1)), "the door is reopened at its recorded count")
-			Expect(workloadSpecReplicas(ns, "Deployment", "scheduler")).To(BeZero(),
-				"the scheduler's timed jobs stay stopped until the source topology is reclaimed")
+			Eventually(func() int32 {
+				return workloadSpecReplicas(ns, "Deployment", "scheduler")
+			}, platformTimeout, platformInterval).Should(Equal(int32(1)),
+				"the scheduler's timed jobs run again once the reclaim is done")
 
-			By("re-entering the cleanup without reopening or handing over twice")
+			By("re-entering afterwards without undoing any of it")
 			for i := 0; i < 3; i++ {
 				reconcileOnce(ns)
 			}
-			u := getPlatform(ns).Status.Upgrade
-			Expect(u).NotTo(BeNil())
-			Expect(u.Phase).To(Equal(otilmv1alpha1.MigrationPhaseCleaningUp))
-			Expect(u.Fenced).To(ConsistOf(
-				otilmv1alpha1.FencedWorkload{Name: "scheduler", Kind: "Deployment", Replicas: 1},
-			))
+			Expect(getPlatform(ns).Status.Upgrade).To(BeNil())
+			Expect(getPlatform(ns).Status.ObservedVersion).To(Equal(platformVersion219))
+			Expect(workloadSpecReplicas(ns, "Deployment", gatewayWorkloadName)).To(Equal(int32(1)))
 		})
 	})
 })

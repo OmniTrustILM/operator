@@ -82,8 +82,8 @@ const migrationRequeueAfter = 15 * time.Second
 const defaultMigrationDrainTimeout = 15 * time.Minute
 
 // conditionMessagingMigration reports an in-flight messaging migration. True means one is
-// running and progressing, with the phase as the reason; False means it has stopped — aborted
-// by the user, refused by the trigger layer, or held at a deadline it did not meet.
+// running and progressing, with the phase as the reason; False means it has stopped — finished,
+// aborted by the user, refused by the trigger layer, or held at a deadline it did not meet.
 //
 // Like MessagingReady / DatabaseReady it is an ADJUNCT: a migration that stops does not by
 // itself make the platform Degraded, because the platform goes on running its source version
@@ -219,12 +219,12 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 		return r.migrationCuttingOverPhase(ctx, p, render)
 
 	default:
-		// CleaningUp is past the point of no return, so neither the deadline nor the source
-		// re-pin applies to it. Its broker-side work — reclaiming the source topology once the
-		// platform is serving from the target one — lands with the last step of the engine;
-		// until then the phase simply holds its recorded state and re-checks, which is what
-		// keeps the persisted state and the resume path honest.
-		return render, true, ctrl.Result{RequeueAfter: migrationRequeueAfter}, nil
+		// messaging_migration_cleanup.go: reclaim the topology the platform has moved off, one
+		// class at a time and behind a final barrier, then finish the migration. Like the
+		// cutover it renders the TARGET — the source re-pin ended two phases ago — and it is
+		// past the point of no return, so the deadline it applies ends a WAIT rather than
+		// unwinding anything.
+		return r.migrationCleaningUpPhase(ctx, p, render)
 	}
 }
 
@@ -284,14 +284,32 @@ func (r *Reconciler) holdOnSourceVersion(ctx context.Context, p *otilmv1alpha1.P
 // is the wrong one, and undoing it here is the single point where the target stops being
 // rendered. In-memory only, exactly like the pin it overrides.
 func migrationSourceRender(p *otilmv1alpha1.Platform) (migrationRender, error) {
-	from := p.Status.Upgrade.FromVersion
-	bundle, ok := bom.BundleFor(from)
-	if from == "" || !ok {
-		return migrationRender{}, fmt.Errorf(
-			"the in-flight messaging migration is moving away from platform version %q, which this operator build does not carry", from)
+	bundle, err := migrationSourceBundle(p)
+	if err != nil {
+		return migrationRender{}, err
 	}
+	from := p.Status.Upgrade.FromVersion
 	p.Spec.Version = from
 	return migrationRender{version: from, bundle: bundle}, nil
+}
+
+// migrationSourceBundle returns the bundle of the version an in-flight migration is moving away
+// from, and refuses one this operator build does not carry.
+//
+// It is shared by everything that has to address the SOURCE — the re-pin, the drain's poll, and
+// the cleanup's render of the topology to reclaim — so a missing bundle is one error with one
+// wording rather than a per-caller guess.
+func migrationSourceBundle(p *otilmv1alpha1.Platform) (bom.Bundle, error) {
+	var from string
+	if p.Status.Upgrade != nil {
+		from = p.Status.Upgrade.FromVersion
+	}
+	bundle, ok := bom.BundleFor(from)
+	if from == "" || !ok {
+		return bom.Bundle{}, fmt.Errorf(
+			"the in-flight messaging migration is moving away from platform version %q, which this operator build does not carry", from)
+	}
+	return bundle, nil
 }
 
 // refuseMigration reports a move the trigger layer will not make. It is a DETERMINISTIC,
@@ -347,28 +365,42 @@ func (r *Reconciler) transitionMigrationPhase(ctx context.Context, p *otilmv1alp
 	return nil
 }
 
-// abortMigration unwinds a migration the user reverted while it was still reversible: the
-// fence is lifted workload by workload (each restore persisted as it completes) and only then
-// is the record discarded.
-//
-// That order is deliberate. While the record survives, a crash mid-abort resumes as another
-// abort and finishes the job; discarding it first would leave producers at zero replicas with
-// nothing left to say they should come back up.
+// abortMigration unwinds a migration the user reverted while it was still reversible. The
+// platform keeps running the version it started from, so the version it reports is left exactly
+// as it is.
 func (r *Reconciler) abortMigration(ctx context.Context, p *otilmv1alpha1.Platform) error {
+	u := p.Status.Upgrade
+	message := fmt.Sprintf("the messaging migration to platform version %s was aborted at phase %s; the platform keeps running version %s",
+		u.ToVersion, u.Phase, u.FromVersion)
+	return r.concludeMigration(ctx, p, "", reasonMigrationAborted, message, eventMigrationAborted)
+}
+
+// concludeMigration ends a migration for good, whichever way it ended: the fence is lifted
+// workload by workload (each restore persisted as it completes) and only then is the record
+// discarded.
+//
+// That order is deliberate. While the record survives, a crash mid-conclusion resumes as another
+// conclusion and finishes the job; discarding it first would leave workloads at zero replicas
+// with nothing left to say they should come back up.
+//
+// observedVersion, when non-empty, is pinned in the SAME write that discards the record — see
+// finishMigration for why those two cannot be allowed to land separately. An empty value leaves
+// the reported version untouched, which is what an abort needs.
+func (r *Reconciler) concludeMigration(ctx context.Context, p *otilmv1alpha1.Platform, observedVersion, reason, message, eventReason string) error {
 	if err := r.liftMigrationFence(ctx, p); err != nil {
 		return err
 	}
 
-	recorded := p.Status.Upgrade
-	message := fmt.Sprintf("the messaging migration to platform version %s was aborted at phase %s; the platform keeps running version %s",
-		recorded.ToVersion, recorded.Phase, recorded.FromVersion)
-
+	recorded, reported := p.Status.Upgrade, p.Status.ObservedVersion
 	p.Status.Upgrade = nil
-	if err := r.writeMigrationState(ctx, p, metav1.ConditionFalse, reasonMigrationAborted, message); err != nil {
-		p.Status.Upgrade = recorded
+	if observedVersion != "" {
+		p.Status.ObservedVersion = observedVersion
+	}
+	if err := r.writeMigrationState(ctx, p, metav1.ConditionFalse, reason, message); err != nil {
+		p.Status.Upgrade, p.Status.ObservedVersion = recorded, reported
 		return err
 	}
-	r.event(p, corev1.EventTypeNormal, eventMigrationAborted, message)
+	r.event(p, corev1.EventTypeNormal, eventReason, message)
 	return nil
 }
 

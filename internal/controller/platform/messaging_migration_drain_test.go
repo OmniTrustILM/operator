@@ -80,7 +80,13 @@ type fakeBrokerAdmin struct {
 	queuesErr error
 	bound     map[string][]string
 	boundErr  error
-	calls     []brokerCall
+	// connections / connectionsErr and closeErr script the two calls only the CLEANUP makes:
+	// the connection count its final barrier requires to be zero, and the force-close its
+	// forced path issues.
+	connections    int
+	connectionsErr error
+	closeErr       error
+	calls          []brokerCall
 }
 
 // Queues returns the scripted queue listing (or the scripted failure).
@@ -105,21 +111,26 @@ func (f *fakeBrokerAdmin) BoundQueues(_ context.Context, vhost, exchange string)
 	return f.bound[exchange], nil
 }
 
-// Connections is part of the interface; the drain never asks (consumers and connections gate
-// the cleanup, not the drain), which the call log proves.
+// Connections returns the scripted open-connection count (or the scripted failure). The DRAIN
+// never asks — consumers and connections gate the cleanup, not the drain — which the call log
+// proves; the cleanup's final barrier does.
 func (f *fakeBrokerAdmin) Connections(_ context.Context, vhost string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, brokerCall{method: "Connections", vhost: vhost})
-	return 0, nil
+	if f.connectionsErr != nil {
+		return 0, f.connectionsErr
+	}
+	return f.connections, nil
 }
 
-// CloseConnections is part of the interface; the drain never closes anything.
+// CloseConnections records the force-close the cleanup's forced path issues (or the scripted
+// failure). The drain never closes anything.
 func (f *fakeBrokerAdmin) CloseConnections(_ context.Context, vhost string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, brokerCall{method: "CloseConnections", vhost: vhost})
-	return nil
+	return f.closeErr
 }
 
 // callLog returns a copy of the recorded calls.

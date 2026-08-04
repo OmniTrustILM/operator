@@ -792,3 +792,28 @@ func TestResolveManagedMessaging2190(t *testing.T) {
 	}
 	assert.Contains(t, queueNames, "provider.status-poll")
 }
+
+// TestManagedMessagingReclaimKinds pins the one list in the builder that authorises DELETION:
+// the classes a messaging migration reclaims from the virtual host it moved away from, in the
+// order the Topology Operator's finalizers require, with the two Kinds that must never be
+// deleted absent from it.
+func TestManagedMessagingReclaimKinds(t *testing.T) {
+	kinds := ManagedMessagingReclaimKinds()
+
+	assert.Equal(t, []string{rmqKindBinding, rmqKindQueue, rmqKindExchange, rmqKindPermission, rmqKindVhost}, kinds,
+		"a dependent deleted after what it depends on is stranded behind a finalizer")
+	assert.NotContains(t, kinds, rmqKindCluster, "the broker itself goes on serving the target topology")
+	assert.NotContains(t, kinds, rmqKindUser,
+		"broker users are global, shared with the target topology, and own the credentials Secrets every component reads")
+
+	// Every reclaimable Kind is one the renderer actually produces, so the list can never name a
+	// class that would silently reclaim nothing.
+	p := managedMQPlatform(nil)
+	rendered := map[string]bool{}
+	for _, obj := range ResolveManagedMessaging(p) {
+		rendered[obj.GetObjectKind().GroupVersionKind().Kind] = true
+	}
+	for _, kind := range kinds {
+		assert.True(t, rendered[kind], "the render must produce a %s for the reclaim to address", kind)
+	}
+}

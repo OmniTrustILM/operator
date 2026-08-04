@@ -366,21 +366,25 @@ func TestGateMessagingMigrationResumesDraining(t *testing.T) {
 	assert.Empty(t, drainEvents(rec), "re-entering a phase is not a transition and announces nothing")
 }
 
-// TestGateMessagingMigrationCleaningUpDoesNotRender: the last phase has nothing left to render —
-// the platform is already serving the target — so it holds its state and re-checks on the
-// migration's own cadence. (Its forward-only sibling, CuttingOver, is the phase that DOES render
-// the target; messaging_migration_cutover_test.go drives it.)
-func TestGateMessagingMigrationCleaningUpDoesNotRender(t *testing.T) {
-	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseCleaningUp)
+// TestGateMessagingMigrationCleaningUpKeepsTheTargetPin: the last phase renders the TARGET like
+// the cutover before it — the source re-pin is two phases behind — and lets the reconcile
+// CONTINUE, because the platform is live on the target topology for the whole of it and must go
+// on converging as one. (messaging_migration_cleanup_test.go drives what it reclaims.)
+func TestGateMessagingMigrationCleaningUpKeepsTheTargetPin(t *testing.T) {
+	p := cleanupPlatform()
 	_, to := migrationBundles(t)
-	r, _ := migrationReconciler(t, p, interceptor.Funcs{})
+	r, _ := cleanupReconciler(t, p, idleBroker(), interceptor.Funcs{}, sourceTopology(p)...)
 
-	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	render, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
 	require.NoError(t, err)
-	assert.True(t, handled, "the reconcile stops at the gate")
-	assert.Equal(t, ctrl.Result{RequeueAfter: migrationRequeueAfter}, res)
+	assert.False(t, handled, "the platform keeps converging while the previous topology is reclaimed")
+	assert.Equal(t, to, render.bundle)
+	assert.Equal(t, platformVersion219, render.version)
+	assert.Equal(t, platformVersion219, p.Spec.Version, "the cleanup never re-pins the source")
+	assert.True(t, render.requeue, "the reclaim advances on the migration's own cadence")
+	assert.Equal(t, ctrl.Result{}, res)
 	assert.Equal(t, otilmv1alpha1.MigrationPhaseCleaningUp, storedPlatform(t, r).Status.Upgrade.Phase,
-		"the recorded phase is unchanged")
+		"the recorded phase is unchanged while classes remain")
 }
 
 // TestGateMessagingMigrationCuttingOverKeepsTheTargetPin is the counterpart of the re-pin the

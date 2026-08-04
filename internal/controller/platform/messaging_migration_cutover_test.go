@@ -457,6 +457,11 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 		wantPhase  otilmv1alpha1.MigrationPhase
 		wantFenced []otilmv1alpha1.FencedWorkload
 		wantHold   bool
+		// wantHandedOver marks the row that has passed the cutover altogether: the repeated
+		// passes run the CLEANUP, which finds nothing of the source topology left in this fixture
+		// and finishes the migration. What the row still proves is the same thing — the repeats
+		// neither re-open a workload at a stale count nor hand over a second time.
+		wantHandedOver bool
 	}{
 		{
 			name:       "re-entering the provisioning stage does not restore twice",
@@ -476,12 +481,11 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			wantFenced: []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
 		},
 		{
-			name:       "re-entering the hand-over stage does not re-open or re-announce",
-			fenced:     []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
-			coreImage:  platformVersion219,
-			provRolled: true,
-			wantPhase:  otilmv1alpha1.MigrationPhaseCleaningUp,
-			wantFenced: []otilmv1alpha1.FencedWorkload{fencedScheduler()},
+			name:           "re-entering past the hand-over does not re-open or hand over twice",
+			fenced:         []otilmv1alpha1.FencedWorkload{fencedGateway(), fencedScheduler()},
+			coreImage:      platformVersion219,
+			provRolled:     true,
+			wantHandedOver: true,
 		},
 	}
 	for _, tc := range tests {
@@ -493,7 +497,7 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 				cutoverWorkload(coreDeploymentName, coreImageFor(p, tc.coreImage), 1, true),
 				cutoverWorkload(gatewayWorkloadName, "kong:3.9.1", 0, true),
 			)
-			r, _ := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
+			r, rec := cutoverReconciler(t, p, interceptor.Funcs{}, seed...)
 
 			// Three passes on a reconciler that carries nothing from the one before: the
 			// operator restarting, over and over, at the same stage boundary.
@@ -505,8 +509,21 @@ func TestCutoverResumesAtEveryStageBoundary(t *testing.T) {
 			}
 
 			stored := storedPlatform(t, r)
-			assert.Equal(t, tc.wantPhase, stored.Status.Upgrade.Phase)
-			assert.Equal(t, tc.wantFenced, stored.Status.Upgrade.Fenced)
+			if tc.wantHandedOver {
+				assert.Nil(t, stored.Status.Upgrade, "the hand-over led on to a cleanup with nothing to reclaim")
+				assert.Equal(t, int32(3), replicasOf(t, r, gatewayWorkloadName),
+					"the door was reopened once, at the count the fence recorded")
+				handOvers := 0
+				for _, e := range drainEvents(rec) {
+					if strings.Contains(e, eventMigrationPhase) {
+						handOvers++
+					}
+				}
+				assert.Equal(t, 1, handOvers, "a repeated pass announces no second hand-over")
+			} else {
+				assert.Equal(t, tc.wantPhase, stored.Status.Upgrade.Phase)
+				assert.Equal(t, tc.wantFenced, stored.Status.Upgrade.Fenced)
+			}
 			assert.Equal(t, tc.wantHold, render.holdCore)
 			// Whatever the fence wrote back stays written back: a repeat must not re-record a
 			// restored workload, nor re-patch it to a stale count.

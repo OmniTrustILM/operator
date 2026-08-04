@@ -162,6 +162,22 @@ func ManagedMessagingVhostGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: rabbitmqGroup, Version: rabbitmqVersion, Kind: rmqKindVhost}
 }
 
+// ManagedMessagingReclaimKinds returns the vhost-scoped topology Kinds a messaging migration
+// reclaims from the virtual host it moved away from, in the order they must be deleted:
+// bindings → queues → exchanges → permissions → virtual host. A dependent deleted after the
+// object it depends on is stranded behind the Messaging Topology Operator's finalizer, so the
+// order is a correctness contract, not a preference.
+//
+// Two rendered Kinds are DELIBERATELY absent. The RabbitmqCluster is the broker itself — the
+// same one that goes on serving the target topology. The Users are broker-global rather than
+// vhost-scoped (see managedUserName): both renders produce the identical objects, and the
+// per-user credentials Secrets the Topology Operator generates from them are wired into every
+// component's secretKeyRef, so deleting one would take the running platform's credentials with
+// it.
+func ManagedMessagingReclaimKinds() []string {
+	return []string{rmqKindBinding, rmqKindQueue, rmqKindExchange, rmqKindPermission, rmqKindVhost}
+}
+
 // ManagedMessagingVhostName returns the stable k8s object name of the Vhost CR the operator
 // renders: "<platform>-messaging<scope>-vhost" (NOT the vhost's spec.name, which is the
 // broker vhost the components connect to). It is a fixed function of the operator-owned
