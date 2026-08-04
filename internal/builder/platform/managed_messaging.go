@@ -188,10 +188,26 @@ const (
 // broker: the configured spec.messaging.virtualHost, or the selected bundle's
 // per-version default when empty. The exchanges/queues/bindings all bind to this vhost.
 func managedVirtualHost(p *otilmv1alpha1.Platform) string {
+	return ManagedVirtualHostFor(p, resolveBundle(p))
+}
+
+// ManagedVirtualHostFor returns the vhost a managed broker's topology lives on under the
+// GIVEN version bundle, applying the same precedence managedVirtualHost applies to the
+// platform's own selected bundle: spec.messaging.virtualHost when set, else that bundle's
+// per-version default. It is the per-bundle form so a caller comparing two bundles (a version
+// upgrade's source and target) derives both answers from the ONE precedence rule.
+//
+// A user override wins over every bundle default, so a pinned vhost resolves identically under
+// every bundle — which is exactly why such a platform never experiences the vhost rename a
+// version upgrade otherwise causes.
+//
+// MANAGED mode only: external mode passes spec.messaging.virtualHost through verbatim and
+// applies no version default, so this is not the external-mode answer.
+func ManagedVirtualHostFor(p *otilmv1alpha1.Platform, b bom.Bundle) string {
 	if v := p.Spec.Messaging.VirtualHost; v != "" {
 		return v
 	}
-	return resolveBundle(p).Messaging.DefaultVirtualHost
+	return b.Messaging.DefaultVirtualHost
 }
 
 // vhostIsUserPinned reports whether managedVirtualHost's result came from the platform's own

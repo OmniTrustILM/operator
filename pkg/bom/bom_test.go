@@ -345,6 +345,22 @@ func TestTopologyCarriesVhost(t *testing.T) {
 	}
 }
 
+// TestTopologyHasUserRole pins the per-bundle user-role fact two behaviours key on: which
+// generated credentials Secret the administrator paths may reference, and which SOURCE
+// topologies a messaging migration is supported from. 2.17.0's single-user layout declares no
+// administrator ROLE (its lone user is Core, merely TAGGED administrator); 2.18.0 onwards do.
+func TestTopologyHasUserRole(t *testing.T) {
+	b217, _ := BundleFor(testVersion2170)
+	assert.False(t, b217.Messaging.HasUserRole(MessagingUserAdministrator))
+	assert.True(t, b217.Messaging.HasUserRole(MessagingUserCore))
+
+	for _, v := range []string{testVersion2180, testVersion2190} {
+		b, _ := BundleFor(v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), "bundle %s", v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), "bundle %s", v)
+	}
+}
+
 // TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
 // helm-charts 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a
 // provisioning-exchange bug through review once already.

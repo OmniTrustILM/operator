@@ -127,6 +127,28 @@ func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platfor
 	return append(out, legacy)
 }
 
+// previewUpgradeRefused reports whether the preview-upgrade guard must refuse this reconcile:
+// the resolved bundle is unreleased (preview) AND the platform is already LIVE on a different
+// version. Preview bundles are for fresh installs and explicit testing, so a fresh install (no
+// observed version) may pin one and a platform already running that very version keeps
+// converging on it.
+//
+// The one exception is a migration ALREADY IN FLIGHT to this exact version. That is not the
+// move the guard exists to stop — the move was permitted when it started, and the platform is
+// mid-flight with its message producers fenced at zero replicas. Refusing it now would strand
+// them there with no way forward (the engine never runs) and no way back (a revert is only
+// honoured while the migration is still reversible), so the in-flight target is let through and
+// the migration is allowed to reach its end state.
+func previewUpgradeRefused(p *otilmv1alpha1.Platform, bundle bom.Bundle, resolvedVersion string) bool {
+	if bundle.Released || p.Status.ObservedVersion == "" || p.Status.ObservedVersion == resolvedVersion {
+		return false
+	}
+	if u := p.Status.Upgrade; u != nil && u.ToVersion == resolvedVersion {
+		return false
+	}
+	return true
+}
+
 // isPlatformDowngrade reports whether requested is strictly OLDER (by semver) than running.
 // Both must parse as semver; an unparseable input is treated as "not a downgrade" — the CRD
 // format guards the shape, and refusing to render on a parse quirk would be worse than

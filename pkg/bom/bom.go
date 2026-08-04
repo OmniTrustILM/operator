@@ -820,6 +820,19 @@ type MessagingTopology struct {
 	Bindings []MessagingBinding
 }
 
+// HasUserRole reports whether the topology provisions a broker user in the given role. It is
+// the data-level question behind two version-agnostic behaviours: which generated credentials
+// Secret a component may be pointed at, and whether a version's topology carries the dedicated
+// administrator user the management-API paths authenticate as.
+func (t MessagingTopology) HasUserRole(role MessagingUserRole) bool {
+	for _, u := range t.Users {
+		if u.Role == role {
+			return true
+		}
+	}
+	return false
+}
+
 // LegacyUnscopedVirtualHost is the pre-2.19 messaging vhost name, and the ONE vhost whose
 // managed-topology object names are rendered UNSCOPED. Live 2.17.0/2.18.0 platforms carry
 // those unscoped names in their clusters, so the operator must keep composing them

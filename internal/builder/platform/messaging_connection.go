@@ -165,21 +165,10 @@ func msgCredPasswordKey(c *otilmv1alpha1.CredentialsRef, w bom.WiringProfile) st
 // administrator ROLE. The 2.17.0 bundle's sole broker user is Core (merely TAGGED
 // administrator), so it has no distinct administrator-user Secret to reference.
 func administratorCredentialsSecretName(p *otilmv1alpha1.Platform) string {
-	if !messagingTopologyHasRole(resolveBundle(p).Messaging, bom.MessagingUserAdministrator) {
+	if !resolveBundle(p).Messaging.HasUserRole(bom.MessagingUserAdministrator) {
 		return ""
 	}
 	return managedUserCredentialsSecretName(p, bom.MessagingUserAdministrator)
-}
-
-// messagingTopologyHasRole reports whether a messaging topology provisions a user with the
-// given role.
-func messagingTopologyHasRole(topo bom.MessagingTopology, role bom.MessagingUserRole) bool {
-	for _, u := range topo.Users {
-		if u.Role == role {
-			return true
-		}
-	}
-	return false
 }
 
 // ManagedMessagingManagementEndpoint returns the managed broker's RabbitMQ HTTP management

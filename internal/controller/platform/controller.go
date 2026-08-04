@@ -571,8 +571,9 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	// UPGRADE a live platform onto an unreleased bundle — the messaging migration
 	// engine that makes such a move safe ships separately, and the release-day flip
 	// (Released=true) is what opens the path. Fresh installs (no observed version)
-	// may pin a preview explicitly.
-	if !resolvedBundle.Released && platform.Status.ObservedVersion != "" && platform.Status.ObservedVersion != resolvedVersion {
+	// may pin a preview explicitly, and a migration already in flight to this exact
+	// version is let through rather than stranded (see previewUpgradeRefused).
+	if previewUpgradeRefused(platform, resolvedBundle, resolvedVersion) {
 		res, err = r.steadyState(ctx, platform, reasonPreviewVersionUpgradeBlocked,
 			fmt.Sprintf("version %s is a preview (unreleased) bundle; upgrading a running platform onto it is not supported — released versions: %s; "+
 				"keep spec.version at %q, or wait for %s to be released",

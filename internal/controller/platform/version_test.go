@@ -247,3 +247,37 @@ func TestIsPlatformDowngrade(t *testing.T) {
 		})
 	}
 }
+
+// TestPreviewUpgradeRefused locks the preview-upgrade guard's predicate, including the one
+// exception the migration engine needs: a migration already in flight to the very version being
+// resolved is let through, so its fenced workloads are never stranded at zero replicas by a
+// guard that would otherwise refuse every remaining reconcile.
+func TestPreviewUpgradeRefused(t *testing.T) {
+	cases := []struct {
+		name       string
+		released   bool
+		observed   string
+		resolved   string
+		upgradeTo  string
+		wantRefuse bool
+	}{
+		{name: "released bundle is never refused", released: true, observed: platformVersion218, resolved: platformVersion219},
+		{name: "fresh install may pin a preview", observed: "", resolved: platformVersion219},
+		{name: "already running that preview keeps converging", observed: platformVersion219, resolved: platformVersion219},
+		{name: "live platform upgrading onto a preview is refused", observed: platformVersion218, resolved: platformVersion219, wantRefuse: true},
+		{name: "migration in flight to this exact version is let through", observed: platformVersion218, resolved: platformVersion219, upgradeTo: platformVersion219},
+		{name: "migration in flight to a different version is still refused", observed: platformVersion217, resolved: platformVersion219, upgradeTo: platformVersion218, wantRefuse: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &otilmv1alpha1.Platform{}
+			p.Status.ObservedVersion = c.observed
+			if c.upgradeTo != "" {
+				p.Status.Upgrade = &otilmv1alpha1.UpgradeStatus{
+					FromVersion: c.observed, ToVersion: c.upgradeTo, Phase: otilmv1alpha1.MigrationPhaseDraining,
+				}
+			}
+			assert.Equal(t, c.wantRefuse, previewUpgradeRefused(p, bom.Bundle{Released: c.released}, c.resolved))
+		})
+	}
+}
