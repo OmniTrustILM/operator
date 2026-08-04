@@ -66,7 +66,7 @@ func applyComponentSpec(p *otilmv1alpha1.Platform, c *common.Component, spec oti
 	// unset), so the per-component overrides below still win. c.Name is the component role.
 	spec = applyHADefaults(p, c.Name, spec)
 
-	applyScalingOverrides(c, spec)
+	applyScalingOverrides(p, c, spec)
 
 	// Env: APPEND user env AFTER the operator-derived env. BuildDeployment emits env in
 	// slice order and Kubernetes container-env semantics make the LAST duplicate win, so a
@@ -95,8 +95,10 @@ func applyComponentSpec(p *otilmv1alpha1.Platform, c *common.Component, spec oti
 }
 
 // applyScalingOverrides layers the user's scaling-related overrides (replicas, workload
-// kind, autoscaling, resources) onto the component.
-func applyScalingOverrides(c *common.Component, spec otilmv1alpha1.ComponentSpec) {
+// kind, autoscaling, resources) onto the component, and applies the two cases where an
+// EXTERNAL actor owns .spec.replicas and the operator must therefore stop sending it: a
+// configured HPA, and the messaging-migration fence.
+func applyScalingOverrides(p *otilmv1alpha1.Platform, c *common.Component, spec otilmv1alpha1.ComponentSpec) {
 	// Replicas: override when set. Ignored when Autoscaling owns scaling (handled below),
 	// where the HPA owns the replica count and the Deployment omits .spec.replicas.
 	if spec.Replicas != nil {
@@ -117,6 +119,17 @@ func applyScalingOverrides(c *common.Component, spec otilmv1alpha1.ComponentSpec
 	// render layer (RenderPlatformBase) from this same spec; here we only flip the
 	// Deployment's omit-replicas flag.
 	if spec.Autoscaling != nil {
+		c.OmitReplicas = true
+	}
+
+	// Migration fence: while this component is listed in status.upgrade.fenced, the
+	// controller holds its workload at .spec.replicas=0 under its own field manager, so the
+	// render must not send replicas either — an apply carrying the configured count would
+	// restart a message producer the migration has deliberately stopped. Same
+	// omit-so-another-actor-owns-it mechanic as the HPA case above, keyed on MEMBERSHIP of
+	// the fenced list (never on the migration phase) so it lifts the moment the controller
+	// removes the entry, having first patched the recorded count back.
+	if FenceOmitsReplicas(p, c.Name) {
 		c.OmitReplicas = true
 	}
 

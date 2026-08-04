@@ -314,6 +314,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return res, err
 	}
 
+	// Messaging-migration fence: re-claim .spec.replicas=0 on every workload listed in
+	// status.upgrade.fenced, under the fence's own field manager. It sits HERE — immediately
+	// after this pass's Server-Side Apply of the base objects, in the SAME pass — because the
+	// apply is the only actor that can un-fence a producer: it force-owns the fields it sends,
+	// so a fenced workload's zero has to be re-written behind it on EVERY reconcile, for as
+	// long as the workload appears in the list. Membership is the whole condition; a platform
+	// with no migration in flight has an empty list and this is a no-op.
+	if ferr := r.enforceMigrationFence(ctx, &platform); ferr != nil {
+		return r.applyOrDegrade(ctx, &platform, reasonMigrationFenceError, ferr)
+	}
+
 	// Edge / admin-cert / ServiceMonitors: each gated on the upstream CRDs its configured mode
 	// needs. A missing prerequisite is a non-fatal waiting state surfaced on its own condition;
 	// the rest of the platform stays Available and the reconcile requeues to self-heal. Returns
