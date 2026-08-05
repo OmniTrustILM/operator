@@ -25,7 +25,7 @@ SOFTWARE.
 // profile (default connection-string template, Secret-key names, target env-var
 // names), the managed-RabbitMQ messaging topology, and the managed-infra default
 // versions for ONE platform version. It is versioned DATA — the reconciler selects
-// a bundle (spec.version, defaulting to the operator's newest) and reads it, the CR
+// a bundle (spec.version, defaulting to DefaultVersion) and reads it, the CR
 // overrides it, so no env-var names are hard-coded in reconcile logic.
 //
 // Decoupling: because the BOM is a MAP keyed by version (not a single compile-time
@@ -41,9 +41,13 @@ import (
 	semver "github.com/Masterminds/semver/v3"
 )
 
-// DefaultVersion is the newest RELEASED bundle the operator ships — the FRESH-INSTALL
-// fallback, i.e. the version a brand-new Platform with an empty spec.version resolves to
-// (and then pins on status.observedVersion).
+// DefaultVersion is the operator's FRESH-INSTALL fallback — the version a brand-new Platform
+// with an empty spec.version resolves to (and then pins on status.observedVersion). It MUST
+// name a RELEASED bundle (TestDefaultVersionIsReleased), but it is NOT required to be the
+// NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
+// (Bundle.Released), made whenever the operator is ready to change what a version-less
+// fresh install lands on — a newer released bundle can exist, reachable via an explicit
+// spec.version, before DefaultVersion moves to it.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
@@ -166,10 +170,14 @@ type Bundle struct {
 
 	// Released marks a bundle whose platform artifacts are published. Unreleased
 	// (preview) bundles resolve ONLY via an explicit spec.version — they are excluded
-	// from the advertised SupportedVersions(), are not eligible to be DefaultVersion,
-	// and a LIVE platform cannot be upgraded onto one (see the controller's
-	// preview-upgrade guard). The release-day flip PR sets Released and moves
-	// DefaultVersion.
+	// from the advertised SupportedVersions() and are not eligible to be DefaultVersion.
+	// Released is purely an ADVERTISING gate: an explicit spec.version reaches an
+	// unreleased bundle exactly like a released one, whether on a fresh install or as an
+	// upgrade of a live platform — the messaging migration engine (and the downgrade /
+	// unsupported-version guards) govern the move, not this flag. A release-day flip PR
+	// sets Released; moving DefaultVersion to the newly-released bundle is a SEPARATE
+	// decision the same or a later PR makes — releasing a version does not, by itself,
+	// change what a version-less fresh install resolves to.
 	Released bool
 
 	// Managed-infrastructure default versions for this platform version. They are the
@@ -246,20 +254,23 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
 	},
-	// 2.19.0 — PREVIEW until the operator ships it as default: resolvable only via
-	// explicit spec.version, excluded from SupportedVersions, not
-	// DefaultVersion-eligible, and live platforms cannot upgrade onto it
-	// (preview-upgrade guard) until the flip PR sets Released. Image coordinates
-	// verified against the released helm-charts 2.19.0 tag.
+	// 2.19.0 — PREVIEW (Released: false): excluded from SupportedVersions() and never
+	// DefaultVersion-eligible, so it resolves ONLY via an explicit spec.version — on a
+	// fresh install or as an upgrade of a live platform (the messaging migration engine
+	// governs a managed-broker move; an external broker needs
+	// spec.messaging.migrationAcknowledgedForVersion). Image coordinates verified against
+	// the released helm-charts 2.19.0 tag.
 	//
-	// COMPLETENESS: parts of this bundle are carried as version DATA that no builder reads
-	// yet. The wiring's TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and
-	// PlatformInstanceIDEnv (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image
-	// below, are recorded here so the version contract is complete and reviewable — but
-	// nothing renders them. A platform pinned to 2.19.0 today therefore comes up WITHOUT the
-	// time-quality integration, WITHOUT the time-quality-monitor sidecar, and WITHOUT the
-	// instance-id env var. The data stays: consuming it is the remaining work, and removing
-	// it would lose the verified coordinates.
+	// COMPLETENESS: this bundle stays preview because the operator has no Platform CR
+	// fields yet for parts of what it carries as version DATA. The wiring's
+	// TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and PlatformInstanceIDEnv
+	// (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image below, are recorded here
+	// so the version contract is complete and reviewable — but no builder reads them and no
+	// CR field configures them. A platform pinned to 2.19.0 today therefore comes up
+	// WITHOUT the time-quality integration, WITHOUT the time-quality-monitor sidecar, and
+	// WITHOUT the instance-id env var. Adding those CR fields (and the builder wiring that
+	// reads them) is the remaining work; the release-day flip to Released: true happens in
+	// that same PR, once the operator reaches Helm-chart parity.
 	version2190: {
 		Components: map[string]Image{
 			"core":                   {Name: "core", Tag: version2190},
@@ -322,8 +333,9 @@ var bundles = map[string]Bundle{
 }
 
 // BundleFor returns the bundle for a platform version. An empty version selects the
-// DefaultVersion bundle (the operator's newest RELEASED bundle — a preview is reachable
-// only by naming it explicitly). ok is false for an unknown version —
+// DefaultVersion bundle (the operator's fresh-install default — not necessarily the newest
+// RELEASED bundle; a preview, and a released bundle DefaultVersion has not moved to yet, are
+// both reachable only by naming them explicitly). ok is false for an unknown version —
 // the caller (the reconciler) degrades with an actionable supported-versions message
 // rather than rendering against a non-existent bundle. The supported set grows over
 // time, so this is a RUNTIME check, not a frozen CEL enum.
@@ -361,8 +373,10 @@ func AllVersions() []string {
 
 // sortVersions sorts a version list ASCENDING by semver IN PLACE and returns it. It is the
 // single ordering used by SupportedVersions and AllVersions, so the advertised set and the
-// full key set can never disagree on "newest is last" — the invariant the DefaultVersion
-// check and the CLI both rely on. Ordering is semver, never lexicographic (2.9.0 < 2.10.0).
+// full key set can never disagree on "newest is last" — the invariant the CLI relies on to
+// find the newest released version. (DefaultVersion is a separate pointer into this data — see
+// its own doc comment — so it is not required to land on that last entry.) Ordering is semver,
+// never lexicographic (2.9.0 < 2.10.0).
 func sortVersions(out []string) []string {
 	sort.Slice(out, func(i, j int) bool { return semverLess(out[i], out[j]) })
 	return out
@@ -766,11 +780,21 @@ type MessagingUser struct {
 	Read      string
 }
 
+// Exchange types the topologies declare. The platform's direct exchange carries the
+// components' own traffic (one routing key per static queue); the TOPIC exchange is the
+// proxy exchange, the one whose bindings are created at runtime as remote proxies enrol —
+// which is why a consumer of this data identifies the proxy exchange by TYPE rather than by
+// a version-specific name (2.19.0 renamed both).
+const (
+	ExchangeTypeDirect = "direct"
+	ExchangeTypeTopic  = "topic"
+)
+
 // MessagingExchange is one exchange in the topology.
 type MessagingExchange struct {
 	// Name is the exchange name (an app-level name, e.g. "czertainly").
 	Name string
-	// Type is the exchange type ("direct" / "topic").
+	// Type is the exchange type (ExchangeTypeDirect / ExchangeTypeTopic).
 	Type string
 	// Durable marks the exchange durable.
 	Durable bool
@@ -787,6 +811,27 @@ type MessagingQueue struct {
 	// into the Queue CR's spec.arguments only when non-empty. Integer values MUST be int64 (the
 	// unstructured render rejects a plain int).
 	Arguments map[string]interface{}
+}
+
+// Queue x-argument names the topologies declare.
+const (
+	// queueArgMaxLength bounds how many messages the queue retains.
+	queueArgMaxLength = "x-max-length"
+	// queueArgOverflow selects what the broker does once that bound is reached.
+	queueArgOverflow = "x-overflow"
+)
+
+// IsLatestOnlyRetention reports whether the queue is declared as a LATEST-ONLY RETENTION
+// queue: one bounded to a single message, whose publisher keeps refreshing it so consumers
+// can read the current value at any time.
+//
+// Such a queue is DESIGNED to be non-empty in steady state, which makes it the one class a
+// drain must not wait on — a migration that required it to empty would never finish. The
+// answer is derived from the declared arguments rather than from a list of names, so a queue
+// added to a future bundle with the same retention shape inherits the rule automatically.
+func (q MessagingQueue) IsLatestOnlyRetention() bool {
+	limit, declared := q.Arguments[queueArgMaxLength].(int64)
+	return declared && limit == 1
 }
 
 // MessagingBinding is one exchange→queue binding in the topology.
@@ -820,11 +865,33 @@ type MessagingTopology struct {
 	Bindings []MessagingBinding
 }
 
+// HasUserRole reports whether the topology provisions a broker user in the given role. It is
+// the data-level question behind two version-agnostic behaviours: which generated credentials
+// Secret a component may be pointed at, and whether a version's topology carries the dedicated
+// administrator user the management-API paths authenticate as.
+func (t MessagingTopology) HasUserRole(role MessagingUserRole) bool {
+	for _, u := range t.Users {
+		if u.Role == role {
+			return true
+		}
+	}
+	return false
+}
+
+// LegacyUnscopedVirtualHost is the pre-2.19 messaging vhost name, and the ONE vhost whose
+// managed-topology object names are rendered UNSCOPED. Live 2.17.0/2.18.0 platforms carry
+// those unscoped names in their clusters, so the operator must keep composing them
+// byte-identically or every applied rabbitmq.com CR would be re-identified and orphaned
+// (those kinds are deliberately excluded from pruning). Every other vhost — including the
+// 2.19.0 "/" — gets a vhost-derived scope, which is what lets a source and a target
+// topology coexist during a migration.
+const LegacyUnscopedVirtualHost = "czertainly"
+
 // DefaultVirtualHost is the pre-2.19 messaging vhost name.
 //
-// Deprecated: read the per-bundle MessagingTopology.DefaultVirtualHost instead; this
-// const remains only as the 2.17/2.18 data value and for module compatibility.
-const DefaultVirtualHost = "czertainly"
+// Deprecated: use LegacyUnscopedVirtualHost, or read the per-bundle
+// MessagingTopology.DefaultVirtualHost; this alias remains for module compatibility.
+const DefaultVirtualHost = LegacyUnscopedVirtualHost
 
 // Exchange names used by the topology (app-level names, tied to the application naming).
 const (
@@ -876,14 +943,14 @@ const (
 // It returns a FRESH map on every call: MessagingQueue.Arguments is a reference type,
 // and map literals must never be shared between MessagingTopology values.
 func latestOnlyQueueArguments() map[string]interface{} {
-	return map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}
+	return map[string]interface{}{queueArgMaxLength: int64(1), queueArgOverflow: "drop-head"}
 }
 
 // messagingTopology2180 is the platform's RabbitMQ topology for platform version 2.18.0:
 // the user permission regexes, exchange/queue/binding names, and routing keys the platform
 // requires on its messaging vhost.
 var messagingTopology2180 = MessagingTopology{
-	DefaultVirtualHost: DefaultVirtualHost,
+	DefaultVirtualHost: LegacyUnscopedVirtualHost,
 	Users: []MessagingUser{
 		// administrator + provisioner have admin tags and full ".*" permissions.
 		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
@@ -900,8 +967,8 @@ var messagingTopology2180 = MessagingTopology{
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^czertainly$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeCzertainly, Type: "direct", Durable: true},
-		{Name: exchangeCzertainlyProxy, Type: "topic", Durable: true},
+		{Name: exchangeCzertainly, Type: ExchangeTypeDirect, Durable: true},
+		{Name: exchangeCzertainlyProxy, Type: ExchangeTypeTopic, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},
@@ -954,8 +1021,8 @@ var messagingTopology2190 = MessagingTopology{
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeIlm, Type: "direct", Durable: true},
-		{Name: exchangeIlmProxy, Type: "topic", Durable: true},
+		{Name: exchangeIlm, Type: ExchangeTypeDirect, Durable: true},
+		{Name: exchangeIlmProxy, Type: ExchangeTypeTopic, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},
@@ -999,12 +1066,12 @@ var messagingTopology2190 = MessagingTopology{
 // direct exchange plus the core.* queues 2.17.0 Core uses; there is no czertainly-proxy
 // exchange (that is the 2.18.0 proxy/provisioning path).
 var messagingTopology2170 = MessagingTopology{
-	DefaultVirtualHost: DefaultVirtualHost,
+	DefaultVirtualHost: LegacyUnscopedVirtualHost,
 	Users: []MessagingUser{
 		{Role: MessagingUserCore, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
 	},
 	Exchanges: []MessagingExchange{
-		{Name: exchangeCzertainly, Type: "direct", Durable: true},
+		{Name: exchangeCzertainly, Type: ExchangeTypeDirect, Durable: true},
 	},
 	Queues: []MessagingQueue{
 		{Name: "core", Durable: true},

@@ -29,6 +29,7 @@ import (
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -162,9 +163,9 @@ func namesContaining(names []string, sub string) []string {
 }
 
 // TestHandleDeletionRendersTeardownFromRunningVersion is the version-mismatch deletion-safety
-// guard. A platform whose requested spec.version was REFUSED by the version guards (here the
-// 2.19.0 preview, blocked by PreviewVersionUpgradeBlocked) keeps running the version pinned on
-// status.observedVersion — and 2.19.0 RENAMED the messaging topology (exchange czertainly →
+// guard. A platform whose spec.version names a bundle it has not (yet) reconciled onto — e.g. a
+// messaging migration still fencing/draining toward 2.19.0 — keeps running the version pinned on
+// status.observedVersion, and 2.19.0 RENAMED the messaging topology (exchange czertainly →
 // ilm). Teardown must therefore render from the RUNNING version: rendering from the raw
 // spec.version would try to delete 2.19.0-named objects that never existed and ORPHAN the live
 // 2.18.0 topology under deletionPolicy=Delete.
@@ -189,8 +190,8 @@ func TestHandleDeletionRendersTeardownFromRunningVersion(t *testing.T) {
 	require.Empty(t, namesContaining(requestedNames, "exchange-czertainly"),
 		"precondition: the 2.19.0 topology renamed the exchanges (so a spec-version render misses the live CRs)")
 
-	// The CR as the API server holds it while being deleted: an explicit spec.version the
-	// preview guard refused, with status.observedVersion still on the running version.
+	// The CR as the API server holds it while being deleted: spec.version already names the
+	// target bundle while status.observedVersion still reflects the running one.
 	p := managedMQPlatformCR()
 	p.Spec.Version = platformVersion219
 	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyDelete
@@ -310,6 +311,54 @@ func TestHandleDeletionRetainIgnoresTheUnionRender(t *testing.T) {
 		"Retain must leave the observed version's topology intact")
 	assert.Equal(t, len(requestedObjs), countTopologyObjects(t, r, requested),
 		"Retain must leave the partially applied version's topology intact")
+}
+
+// TestHandleDeletionReclaimsLegacyScopedTopologyFor2190 closes the residual teardown hazard
+// left once a user-pinned vhost is unscoped unconditionally (topologyScope): an UNPINNED
+// platform still has one, on the 2.19.0 bundle, whose OWN default vhost ("/") diverges from
+// the legacy one. An operator predating vhost-scoped naming rendered UNSCOPED object names
+// regardless of vhost, but THIS operator renders SCOPED names for an unpinned 2.19.0 platform
+// — so unless teardown ALSO reclaims the legacy-scoped names, the objects it actually created
+// (while still running that older operator) are orphaned: rabbitmq.com kinds are
+// prune-excluded, so nothing else would ever reclaim them.
+func TestHandleDeletionReclaimsLegacyScopedTopologyFor2190(t *testing.T) {
+	s := managedMQScheme(t)
+
+	// What actually EXISTS in the cluster: this platform's topology, rendered before vhost
+	// scoping shipped (i.e. unscoped, as if it had the legacy vhost's empty scope).
+	legacy := managedMQPlatformCR()
+	legacy.Spec.Version = platformVersion219
+	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
+	legacyObjs := platformbuilder.ResolveManagedMessaging(legacy)
+	require.NotEmpty(t, legacyObjs)
+
+	// Precondition that gives this test teeth: the platform's own (unpinned) 2.19.0 default
+	// vhost renders a DIFFERENT (scoped) Vhost CR name than the legacy-scoped one actually
+	// seeded.
+	p := managedMQPlatformCR()
+	p.Spec.Version = platformVersion219
+	p.Status.ObservedVersion = platformVersion219
+	p.Spec.DeletionPolicy = otilmv1alpha1.PlatformDeletionPolicyDelete
+	require.NotEqual(t, platformbuilder.ManagedMessagingVhostName(legacy), platformbuilder.ManagedMessagingVhostName(p),
+		"precondition: the 2.19.0 default vhost scopes the object names differently from the legacy vhost")
+	require.Contains(t, topologyObjectNames(legacyObjs), platformbuilder.ManagedMessagingVhostName(legacy),
+		"precondition: the seeded legacy render actually carries the unscoped Vhost CR name")
+
+	seed := []client.Object{p}
+	for _, obj := range legacyObjs {
+		seed = append(seed, obj.(*unstructured.Unstructured).DeepCopy())
+	}
+	rec := record.NewFakeRecorder(32)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(seed...).Build()
+	r := &Reconciler{Client: c, Scheme: s, Recorder: rec}
+
+	require.NoError(t, r.handleDeletion(context.Background(), p))
+
+	assert.Equal(t, 0, countTopologyObjects(t, r, legacy),
+		"teardown must reclaim the legacy-scoped topology an unpinned 2.19.0 platform actually created")
+
+	e := drainEvent(rec)
+	assert.Contains(t, e, "DeletedMessaging")
 }
 
 func TestHandleDeletionExternalMessagingNoManagedTeardown(t *testing.T) {

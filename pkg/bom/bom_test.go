@@ -163,12 +163,14 @@ func TestMessagingTopology(t *testing.T) {
 	assert.Equal(t, "^czertainly$", monitor.Write)
 	assert.Equal(t, `^time-quality\.config$`, monitor.Read)
 
-	assert.Equal(t, "czertainly", DefaultVirtualHost)
+	assert.Equal(t, "czertainly", LegacyUnscopedVirtualHost)
+	assert.Equal(t, LegacyUnscopedVirtualHost, DefaultVirtualHost,
+		"the deprecated alias must keep resolving to the legacy vhost (external modules import it)")
 	assert.NotEmpty(t, DefaultRabbitMQVersion)
 }
 
 // TestBundleForEmptyResolvesDefault proves an empty version selects the DefaultVersion
-// bundle (the operator's newest) — the out-of-the-box behaviour when spec.version is unset.
+// bundle — the out-of-the-box behaviour when spec.version is unset.
 func TestBundleForEmptyResolvesDefault(t *testing.T) {
 	empty, ok := BundleFor("")
 	assert.True(t, ok, "empty version resolves the default bundle")
@@ -219,28 +221,23 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 	}
 }
 
-// TestSupportedVersionsExplicit pins the advertised (released) version set exactly —
-// adding a preview bundle must NOT change this list until the release-day flip PR
-// marks it Released and updates this expectation.
+// TestSupportedVersionsExplicit pins the advertised (released) version set exactly — a new
+// bundle changes this list only once its own release-day flip PR marks it Released and
+// updates this expectation.
 func TestSupportedVersionsExplicit(t *testing.T) {
 	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
 }
 
-// TestDefaultVersionIsReleased replaces the old "newest key" invariant: DefaultVersion
-// must be a RELEASED bundle (the release-day flip is what makes a preview eligible), and
-// must be the NEWEST released one — SupportedVersions is semver-ascending, so the default
-// is its last entry. That second assertion is the guard against a release-day flip that
-// marks a newer bundle Released but forgets to move DefaultVersion, which would leave fresh
-// installs silently landing on the older release.
+// TestDefaultVersionIsReleased is the ONE invariant DefaultVersion must satisfy: it must name
+// a RELEASED bundle (an empty spec.version can never land a fresh install on a preview). It
+// does NOT need to be the NEWEST released bundle — a release-day flip PR is free to mark a
+// bundle Released without moving DefaultVersion to it, so a released-but-not-default bundle can
+// exist between the two 2.19.0 flips (release-day and default-day); moving DefaultVersion is a
+// separate, deliberate decision either PR is free to leave alone.
 func TestDefaultVersionIsReleased(t *testing.T) {
 	b, ok := BundleFor(DefaultVersion)
 	assert.True(t, ok)
 	assert.True(t, b.Released, "DefaultVersion must point at a released bundle")
-
-	released := SupportedVersions()
-	require.NotEmpty(t, released)
-	assert.Equal(t, released[len(released)-1], DefaultVersion,
-		"DefaultVersion must be the NEWEST released version (the last SupportedVersions entry)")
 }
 
 // TestVersionOrderingIsSemver proves ordering is numeric per segment, not lexicographic
@@ -339,8 +336,56 @@ func TestTopologyCarriesVhost(t *testing.T) {
 	for _, v := range []string{testVersion2170, testVersion2180} {
 		b, ok := BundleFor(v)
 		assert.True(t, ok)
-		assert.Equal(t, "czertainly", b.Messaging.DefaultVirtualHost, "bundle %s", v)
+		assert.Equal(t, "czertainly", b.Messaging.DefaultVirtualHost, testBundleContext, v)
 	}
+}
+
+// TestTopologyHasUserRole pins the per-bundle user-role fact two behaviours key on: which
+// generated credentials Secret the administrator paths may reference, and which SOURCE
+// topologies a messaging migration is supported from. 2.17.0's single-user layout declares no
+// administrator ROLE (its lone user is Core, merely TAGGED administrator); 2.18.0 onwards do.
+func TestTopologyHasUserRole(t *testing.T) {
+	b217, _ := BundleFor(testVersion2170)
+	assert.False(t, b217.Messaging.HasUserRole(MessagingUserAdministrator))
+	assert.True(t, b217.Messaging.HasUserRole(MessagingUserCore))
+
+	for _, v := range []string{testVersion2180, testVersion2190} {
+		b, _ := BundleFor(v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), testBundleContext, v)
+		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), testBundleContext, v)
+	}
+}
+
+// TestLatestOnlyRetentionQueues pins which queues a consumer of this data may treat as DESIGNED
+// to sit non-empty — the exemption a messaging migration's drain must not wait on, derived from
+// the declared arguments so a future bundle's retention queue inherits it. Getting this wrong in
+// either direction is serious: a missed exemption hangs every migration, a spurious one lets a
+// queue holding real messages be reclaimed.
+func TestLatestOnlyRetentionQueues(t *testing.T) {
+	retention := func(version string) []string {
+		b, ok := BundleFor(version)
+		assert.True(t, ok, testBundleContext, version)
+		var names []string
+		for _, q := range b.Messaging.Queues {
+			if q.IsLatestOnlyRetention() {
+				names = append(names, q.Name)
+			}
+		}
+		return names
+	}
+
+	want := []string{testQueueTimeQualityConfig, "time-quality.config-request"}
+	assert.ElementsMatch(t, want, retention(testVersion2180))
+	assert.ElementsMatch(t, want, retention(testVersion2190))
+	assert.Empty(t, retention(testVersion2170), "2.17.0 declares no time-quality queues at all")
+
+	assert.False(t, MessagingQueue{Name: "plain"}.IsLatestOnlyRetention(), "a queue with no arguments retains nothing")
+	assert.False(t, MessagingQueue{
+		Name: "bounded", Arguments: map[string]interface{}{queueArgMaxLength: int64(5000)},
+	}.IsLatestOnlyRetention(), "a merely bounded queue is still expected to empty")
+	assert.False(t, MessagingQueue{
+		Name: "mistyped", Arguments: map[string]interface{}{queueArgMaxLength: 1},
+	}.IsLatestOnlyRetention(), "arguments are int64 by contract; anything else is not a retention queue")
 }
 
 // TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
@@ -349,7 +394,7 @@ func TestTopologyCarriesVhost(t *testing.T) {
 func TestBundle2190(t *testing.T) {
 	b, ok := BundleFor(testVersion2190)
 	assert.True(t, ok, "2.19.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.19.0 stays preview until the release-day flip PR")
+	assert.False(t, b.Released, "2.19.0 stays preview until the operator reaches CR parity with the Helm chart")
 	assert.True(t, b.HasProvisioning)
 
 	// Advertised set must NOT change while 2.19.0 is preview.

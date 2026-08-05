@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
@@ -78,12 +79,12 @@ const (
 func readOnlyRootFS() *bool { b := true; return &b }
 
 // resolveBundle returns the version bundle the render uses for this Platform: the bundle
-// selected by spec.version, or — defensively — the operator's newest (DefaultVersion)
-// bundle when the version is unknown. The controller already REJECTS an unknown
-// spec.version BEFORE rendering (Reconcile resolves bom.BundleFor once and degrades with
-// an actionable supported-versions message), so an unknown version never reaches a
-// builder in practice; the fallback only keeps the pure builders (and the unit tests,
-// which call them directly) total rather than panicking. spec.version=="" →
+// selected by spec.version, or — defensively — the operator's default (DefaultVersion, not
+// necessarily its newest) bundle when the version is unknown. The controller already
+// REJECTS an unknown spec.version BEFORE rendering (Reconcile resolves bom.BundleFor once
+// and degrades with an actionable supported-versions message), so an unknown version never
+// reaches a builder in practice; the fallback only keeps the pure builders (and the unit
+// tests, which call them directly) total rather than panicking. spec.version=="" →
 // the DefaultVersion bundle, so the out-of-the-box render is unchanged.
 //
 // Resolving here (off p.Spec.Version) is what makes spec.version REAL end to end: every
@@ -1072,31 +1073,80 @@ done
 	}
 }
 
+// The operator-owned Services the wait-for-auth init container polls, in the two groups the
+// script polls them in: the ones before the broker loop and the ones after it.
+//
+// THEY ARE A LIST RATHER THAN LITERALS IN THE SCRIPT because they are a CONTRACT, not a detail
+// of one container. Every Service named here is a workload that has to be running before Core's
+// pod can ever become Ready, so anything that stops a platform workload — the messaging
+// migration's fence above all — has to know the set. waitForAuthInitContainer and
+// CoreInitServiceDependencies are both built from these, so the poll and the set can never
+// drift apart.
+var (
+	waitForAuthServicesBeforeBroker = []string{authName, authOPAPoliciesName}
+	waitForAuthServicesAfterBroker  = []string{schedulerName}
+)
+
+// serviceWaitLoops renders one nc-poll loop per Service name, chained with && in the order
+// given. The names are compile-time constants, so they are safe to interpolate — unlike the
+// broker's coordinates, which mqWaitLoop reads from quoted env vars instead.
+func serviceWaitLoops(names []string) string {
+	loops := make([]string, 0, len(names))
+	for _, name := range names {
+		loops = append(loops, fmt.Sprintf("while ! nc -z %s %d; do sleep 1; done", name, depServicePort))
+	}
+	return strings.Join(loops, " &&\n")
+}
+
+// CoreInitServiceDependencies names the platform workloads Core's init containers block on, so
+// Core's pod cannot reach Ready while any of them is stopped: the Services wait-for-auth polls,
+// plus — on the proxy path — the bundled provisioning service the provision-instance-queue init
+// container POSTs to.
+//
+// It exists so a caller that STOPS platform workloads can ask which ones Core starts behind. The
+// messaging migration's cutover is that caller: it fences the platform's message producers, and
+// rolling Core while one of these is held at zero replicas is a deadlock with no deadline behind
+// it.
+//
+// THE BROKER IS DELIBERATELY ABSENT even though wait-for-auth polls it too: it is not a workload
+// this operator scales — managed, it is an upstream operator's cluster; external, it is somebody
+// else's host entirely — so it can never be one of the workloads a caller is holding down.
+// An EXTERNAL provisioning API is absent for the same reason.
+func CoreInitServiceDependencies(p *otilmv1alpha1.Platform) []string {
+	deps := make([]string, 0, len(waitForAuthServicesBeforeBroker)+len(waitForAuthServicesAfterBroker)+1)
+	deps = append(deps, waitForAuthServicesBeforeBroker...)
+	deps = append(deps, waitForAuthServicesAfterBroker...)
+	if p.Spec.Common.Proxy.Enabled && provisioningConfigured(p) && ProvisioningDeploy(p) {
+		deps = append(deps, provisioningName)
+	}
+	return deps
+}
+
 // waitForAuthInitContainer returns the "wait-for-auth" init
 // container: a shell loop that blocks until auth, auth-opa-policies, the
 // message broker, and scheduler are all reachable. The builder SCC-hardens
 // it automatically. (The proxy-path provision-instance-queue init container is
 // rendered separately by coreInitContainers.)
 //
-// Three of the four loops poll operator-owned Service names (compile-time constants); the
-// broker loop is mqWaitLoop, whose coordinates arrive as env values because in external mode
-// the host is CR-supplied (see the mqWaitLoop security note).
+// The Service loops are rendered from waitForAuthServices{Before,After}Broker — the same lists
+// CoreInitServiceDependencies answers from — so a Service added to the poll is a Service every
+// caller that has to keep Core startable learns about. The broker loop is mqWaitLoop, whose
+// coordinates arrive as env values because in external mode the host is CR-supplied (see the
+// mqWaitLoop security note).
 func waitForAuthInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
 	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
 	// Resolve the broker host/port mode-agnostically so a managed broker waits on the
 	// RabbitMQ Service, an external one on the caller's host.
 	mq := ResolveMessagingConnection(p)
-	script := fmt.Sprintf(`while ! nc -z %s %d; do sleep 1; done &&
-while ! nc -z %s %d; do sleep 1; done &&
+	script := fmt.Sprintf(`%s &&
 echo "auth service seems to be started" &&
 %s &&
-while ! nc -z %s %d; do sleep 1; done &&
+%s &&
 echo "messaging and scheduler service seems to be started"
 `,
-		authName, depServicePort,
-		authOPAPoliciesName, depServicePort,
+		serviceWaitLoops(waitForAuthServicesBeforeBroker),
 		mqWaitLoop,
-		schedulerName, depServicePort,
+		serviceWaitLoops(waitForAuthServicesAfterBroker),
 	)
 	return corev1.Container{
 		Name:            "wait-for-auth",

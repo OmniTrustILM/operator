@@ -386,7 +386,7 @@ func TestSetReadinessStatus(t *testing.T) {
 			p := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Generation: 4}}
 			meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 				Type: conditionDegraded, Status: metav1.ConditionTrue,
-				Reason: reasonPreviewVersionUpgradeBlocked, Message: "blocked", ObservedGeneration: 3,
+				Reason: reasonDowngradeForbidden, Message: "blocked", ObservedGeneration: 3,
 			})
 			r.setReadinessStatus(p, ready)
 			// The condition type and reason are stated LITERALLY: they are the published

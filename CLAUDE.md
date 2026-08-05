@@ -140,9 +140,10 @@ internal/
   checksum/            - Configuration checksum utility for drift detection
   controller/
     connector/         - Connector reconciler (+ watches)
-    platform/          - Platform reconciler (capability gates, prune, OIDC wiring, lifecycle, the managed-infra upgrade guard)
+    platform/          - Platform reconciler (capability gates, prune, OIDC wiring, lifecycle, the managed-infra upgrade guard, the messaging-migration phase machine: fence → drain → cutover → cleanup)
     proxy/             - Proxy reconciler — pure consumer of the provisioning-issued config token; no platform calls
   monitoring/          - Prometheus metrics registration + event recorder helpers
+  rabbitmq/            - Minimal RabbitMQ Management API client (drain-criteria reads for the messaging migration; credentials from the managed cluster's Secret, never logged)
   registration/        - ILM platform registration client (connector → platform) + OIDC wiring
   version/             - Build version info (injected via ldflags)
 pkg/                   - Importable packages (the operator's public surface, also consumed by the CLI)
@@ -185,6 +186,7 @@ The operator manages the **ILM platform itself** via the `Platform` CRD, alongsi
 - **Deletion safety.** Add the finalizer first; `spec.deletionPolicy` (default `Retain`) must leave managed (upstream-operator) infrastructure and its data intact. Clean cluster-scoped artifacts (webhook config, ClusterRoles) via finalizer/labels — not owner-reference GC (cross-namespace ownerRefs are invalid).
 - **Stateful infra is delegated** to upstream operators (CloudNativePG; RabbitMQ Cluster + Messaging Topology; Keycloak) when `managed`, or referenced when `external` — never re-templated in Go, never via the Helm SDK.
 - **Upstream-operator dependencies are detected (RESTMapper) and gated, never assumed.** A required upstream CRD that is not served means skip the dependent objects, surface a non-fatal `False` condition with an actionable reason, and requeue to self-heal — not a cryptic apply failure or a whole-Platform `Degraded`. cert-manager is external/prerequisite (cluster-singleton, never installed by the operator) and required only for cert-managed edge modes (`tls.source` `internal`/`letsEncrypt`); Gateway API CRDs only for `type=gatewayAPI`; BYO `tls.source=secret` needs neither. The detector (`pkg/capabilities`) is generic and reused for the managed-infra (CNPG/RabbitMQ/Keycloak) checks.
+- **Managed-broker version moves migrate, never clobber.** When a version change renames the managed vhost/exchanges, the Platform controller runs the messaging-migration phase machine (Fencing → Draining → CuttingOver → CleaningUp, recorded in `status.upgrade`): producers are fenced to zero, the source vhost must drain (bounded by `drainTimeout`, abortable by reverting `spec.version`), and nothing from the target renders before the cutover. Hard-won invariants: a status write must never clobber an in-memory spec re-pin (`writeStatus` preserves `p.Spec`); the cutover must release every fenced workload Core's init containers poll (provisioning AND scheduler) before rolling Core — enforced by the `CoreInitServiceDependencies` class-invariant test; a fenced workload may be released only once its LIVE pod template is the target's (the gate runs before the pass's apply, so releasing early would restart a producer on the source template); and a workload the cutover waits on that resolves to 0 replicas is surfaced as an actionable error, never waited on (the phase has no deadline).
 - **Admission validation.** The CRD's CEL `XValidation` rules are the create-time guard today (e.g. an external DB missing host/credentials, an enabled edge missing host, `provisioning.mode=deploy` on a non-rabbitmq broker); the per-namespace `Platform` singleton is a runtime guard (`AnotherPlatformExists`). A validating webhook that also rejects inline secrets and enforces the singleton at create-time (self-managed serving cert, `failurePolicy: Fail`) is future work — keep CR-level invariants enforced by CEL until then.
 
 ### Released vs preview version bundles
@@ -193,7 +195,7 @@ Each platform version is a bundle in `pkg/bom/bom.go` carrying a `Released` flag
 
 - It resolves **only** via an explicit `spec.version`; `SupportedVersions()` excludes it, so it never appears in advertised or defaulted output.
 - `DefaultVersion` must name a **released** bundle (`TestDefaultVersionIsReleased` enforces this) — an empty `spec.version` can never land on a preview.
-- A **live** platform cannot be upgraded onto a preview: the controller's guard goes `Degraded` with reason `PreviewVersionUpgradeBlocked`, keeps the running version, and does not re-render. A *fresh* platform pinned to a preview is fine.
+- A **live** platform reaches a preview only by the same explicit `spec.version` opt-in, and the move is governed like any other version move — including the messaging migration when the managed topology changes between the two bundles. There is no separate preview-upgrade guard.
 
 Release day is a data-only flip: set `Released: true` on the bundle and move `DefaultVersion` to it. Treat a preview bundle as opt-in, maintainer-facing surface — samples that use one must say so.
 

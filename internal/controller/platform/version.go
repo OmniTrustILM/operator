@@ -33,11 +33,6 @@ import (
 // older than the version already running (status.observedVersion).
 const reasonDowngradeForbidden = "DowngradeForbidden"
 
-// reasonPreviewVersionUpgradeBlocked is the Degraded condition reason when an explicit
-// spec.version resolves to an unreleased (preview) bundle while a different version is
-// already running: a live platform cannot be upgraded onto a preview bundle.
-const reasonPreviewVersionUpgradeBlocked = "PreviewVersionUpgradeBlocked"
-
 // effectivePlatformVersion implements the PIN-ON-CREATE policy: the version the operator
 // reconciles a Platform against, in precedence order, is
 //
@@ -48,8 +43,9 @@ const reasonPreviewVersionUpgradeBlocked = "PreviewVersionUpgradeBlocked"
 //     operator (which changes the built-in DefaultVersion) never silently upgrades a running
 //     platform;
 //  3. otherwise "" — only on the very first reconcile of a version-less platform, which
-//     bom.BundleFor resolves to the operator's newest (DefaultVersion); that resolved version
-//     is then recorded on status.observedVersion, pinning it for every subsequent reconcile.
+//     bom.BundleFor resolves to the operator's default (DefaultVersion, not necessarily its
+//     newest bundle); that resolved version is then recorded on status.observedVersion,
+//     pinning it for every subsequent reconcile.
 //
 // It returns "" only in case 3 (BundleFor maps "" to DefaultVersion). The pin lives in
 // status, never in spec, so the policy does NOT fight a GitOps actor that owns the spec.
@@ -67,9 +63,9 @@ func effectivePlatformVersion(p *otilmv1alpha1.Platform) string {
 // Teardown must reclaim the objects that actually EXIST, and those were rendered from the
 // running version. Two cases make the requested version wrong:
 //
-//   - a blocked upgrade (spec.version names a bundle the version guards refused, e.g. an
-//     unreleased preview) left the platform running the OLD topology, whose object names the
-//     new bundle may have renamed;
+//   - a blocked upgrade (spec.version names a bundle the version guards refused, e.g. a
+//     downgrade or an unsupported version) left the platform running the OLD topology, whose
+//     object names the new bundle may have renamed;
 //   - an empty spec.version on a pinned platform would resolve to the operator's built-in
 //     default, which is not necessarily the running version.
 //
@@ -83,37 +79,48 @@ func teardownPlatformVersion(p *otilmv1alpha1.Platform) string {
 }
 
 // teardownRenderPlatforms returns the platform copies the DELETION teardown renders against —
-// DEEP COPIES with spec.version pinned for rendering only, so the finalizer-removal Update that
-// follows never persists a spec change.
+// DEEP COPIES with spec.version (and, for one, spec.messaging.virtualHost) pinned for
+// rendering only, so the finalizer-removal Update that follows never persists a spec change.
 //
-// The RUNNING version (teardownPlatformVersion) always comes first: it names the objects that
-// certainly exist. A second copy pinned to the REQUESTED spec.version is appended when an
-// upgrade is in flight — spec.version is set, resolves to a known bundle, and differs from the
-// running version — because a released upgrade APPLIES the new version's managed objects BEFORE
-// status.observedVersion is persisted. If reconcile (or that status write) fails in between and
-// the Platform is then deleted with deletionPolicy=Delete, rendering only the running version
-// would ORPHAN the new-version-only upstream CRs, which are prune-excluded by design and so are
-// reclaimed by nothing else.
+// One copy is rendered per bom.AllVersions() — every bundle this operator ships, released and
+// preview. A released upgrade APPLIES the new version's managed objects BEFORE
+// status.observedVersion is persisted, so a reconcile (or that status write) failing in
+// between can leave a platform whose managed objects belong to a DIFFERENT bundle than either
+// spec.version or status.observedVersion names; sweeping every known bundle reclaims that
+// topology regardless of which version the failure happened at, without having to track which
+// bundle was actually applied. Each of these copies keeps the platform's OWN
+// spec.messaging.virtualHost (pinned or not), so a user-pinned vhost — unscoped on every
+// bundle, unconditionally (see topologyScope in the builder package) — is already reclaimed
+// here without any extra help.
 //
-// Rendering the UNION is safe in the other direction too: deleting an object that was never
-// created is a no-op (handleManagedInfraDeletion tolerates NotFound), and an unresolvable or
-// equal requested version falls back to the single effective render.
+// A further LEGACY-SCOPE copy pins the RUNNING version (teardownPlatformVersion) but forces
+// spec.messaging.virtualHost to bom.LegacyUnscopedVirtualHost, reproducing the UNSCOPED
+// managed-messaging object names an operator predating vhost-scoped topology naming rendered
+// for an UNPINNED platform whose bundle default vhost was never the legacy one (so far, only
+// 2.19.0's "/"). It is added ONLY when spec.messaging.virtualHost is unset: a user-pinned
+// vhost already renders unscoped names via the per-version copies above, so forcing the
+// legacy vhost onto it too would only repeat a set mergeManagedObjects already dedupes away.
+//
+// Rendering this whole set is safe: deleting an object that was never created is a no-op
+// (handleManagedInfraDeletion tolerates NotFound), and mergeManagedObjects dedupes the objects
+// the renders have in common.
 func teardownRenderPlatforms(p *otilmv1alpha1.Platform) []*otilmv1alpha1.Platform {
-	running := p.DeepCopy()
-	running.Spec.Version = teardownPlatformVersion(p)
-	out := []*otilmv1alpha1.Platform{running}
+	versions := bom.AllVersions()
+	out := make([]*otilmv1alpha1.Platform, 0, len(versions)+1)
+	for _, v := range versions {
+		render := p.DeepCopy()
+		render.Spec.Version = v
+		out = append(out, render)
+	}
 
-	requested := p.Spec.Version
-	if requested == "" || requested == running.Spec.Version {
+	if p.Spec.Messaging.VirtualHost != "" {
 		return out
 	}
-	if _, ok := bom.BundleFor(requested); !ok {
-		// An unsupported version rendered nothing, so there is nothing extra to reclaim.
-		return out
-	}
-	inFlight := p.DeepCopy()
-	inFlight.Spec.Version = requested
-	return append(out, inFlight)
+
+	legacy := p.DeepCopy()
+	legacy.Spec.Version = teardownPlatformVersion(p)
+	legacy.Spec.Messaging.VirtualHost = bom.LegacyUnscopedVirtualHost
+	return append(out, legacy)
 }
 
 // isPlatformDowngrade reports whether requested is strictly OLDER (by semver) than running.

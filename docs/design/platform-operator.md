@@ -66,7 +66,7 @@ apiVersion: otilm.com/v1alpha1
 kind: Platform
 metadata: { name: ilm, namespace: ilm }
 spec:
-  version: ""                               # selects the platform version bundle; empty = the operator's newest
+  version: ""                               # selects the platform version bundle; empty = the operator's default
 
   # ── cross-component config (applies to EVERY component) ──
   common:
@@ -187,7 +187,7 @@ external → the two blocks with `host`/`name`/`credentials.secretRef`. HA → a
 ```yaml
 status:
   phase: Running                  # Progressing | Running | Degraded  (the enum the code emits)
-  observedVersion: "2.18.0"       # the resolved platform version (spec.version, or the operator's newest when unset)
+  observedVersion: "2.18.0"       # the resolved platform version (spec.version, or the operator's default when unset)
   observedGeneration: 3
   conditions:
     # Core (drive the phase):

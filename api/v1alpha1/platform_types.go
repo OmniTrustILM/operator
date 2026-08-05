@@ -233,6 +233,19 @@ type MessagingSpec struct {
 	// Management controls exposure of the broker's management UI.
 	// +optional
 	Management MessagingManagementSpec `json:"management,omitempty"`
+	// MigrationAcknowledgedForVersion is the external-broker escape hatch for a messaging
+	// version migration: when mode=external the operator does not own the broker and
+	// cannot migrate a foreign topology itself, so a platform upgrade whose target version
+	// changes the messaging topology (e.g. 2.18.0 -> 2.19.0) is REFUSED until this is set
+	// to the target version, attesting that the operator has migrated their own broker
+	// topology to match.
+	//
+	// The value is TARGET-SCOPED: it must equal the version being upgraded TO, so a stale
+	// acknowledgement from a past upgrade can never silently authorize the next one.
+	// Ignored when mode=managed (the operator migrates the managed broker itself).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]+\.[0-9]+\.[0-9]+$`
+	MigrationAcknowledgedForVersion string `json:"migrationAcknowledgedForVersion,omitempty"`
 }
 
 // MessagingManagementSpec controls exposure of the broker's management UI.
@@ -289,6 +302,42 @@ type ManagedMessagingSpec struct {
 	// relies on cannot be broken.
 	// +optional
 	Overrides *runtime.RawExtension `json:"overrides,omitempty"`
+	// DrainTimeout bounds EACH of the migration's waiting phases separately: how long
+	// Fencing waits for the platform's message producers to actually wind down, how long
+	// Draining waits for the source vhost to empty, and how long CleaningUp waits for the
+	// source vhost to fall idle before it can be reclaimed. Each phase gets the full window,
+	// measured from its own start. The migration engine polls the source vhost across the
+	// Draining window for every drainable queue to report empty; if a deadline passes with
+	// producers still running or messages still outstanding the migration stops in that
+	// phase rather than proceeding — see ForceCutoverForVersion to override that stop.
+	// It is constrained to the Go duration charset (digits, an optional fraction, and one
+	// or more unit suffixes — ns, us, ms, s, m or h, e.g. "15m" or "1h30m") via a CEL rule
+	// rather than a Pattern marker: controller-gen cannot apply +kubebuilder:validation:
+	// Pattern directly to a metav1.Duration-typed field (it is a cross-package type
+	// reference, not a plain string, at schema-generation time).
+	// +optional
+	// +kubebuilder:default="15m"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$')",message="drainTimeout must be a Go duration string, e.g. 15m or 1h30m"
+	DrainTimeout *metav1.Duration `json:"drainTimeout,omitempty"`
+	// ForceCutoverForVersion authorizes the migration engine to cut traffic over to the
+	// target version's vhost EVEN THOUGH the source vhost has not drained cleanly within
+	// DrainTimeout, AND to run cleanup that DISCARDS whatever remains in the source vhost —
+	// including force-closing any connections still open on it. This is a deliberately
+	// destructive escape hatch for an operator who has confirmed the remaining messages
+	// are safe to lose.
+	//
+	// The value is scoped to ONE ATTEMPT, in two parts. It must equal the version the
+	// migration is cutting over TO (status.upgrade.toVersion); and it must be set — or
+	// re-set — AFTER that attempt began. A value this field already carried when the
+	// migration started is recorded as carried over (status.upgrade.forceCarriedOver) and
+	// authorizes nothing until it is cleared and set again, so a value left behind by an
+	// aborted attempt can never silently authorize a later migration to the same version.
+	// Once an attempt acts on the authorization it is recorded as consumed
+	// (status.upgrade.forceAuthorized), so the cleanup still honours a force the cutover
+	// used even if this field is cleared in between.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[0-9]+\.[0-9]+\.[0-9]+$`
+	ForceCutoverForVersion string `json:"forceCutoverForVersion,omitempty"`
 }
 
 // KeycloakSpec configures the platform's OIDC identity provider (Keycloak). It supports
@@ -1098,10 +1147,11 @@ const (
 type PlatformSpec struct {
 	// Version selects which platform version bundle the operator reconciles this
 	// Platform against — the tested set of component images, env-var wiring, and managed-
-	// RabbitMQ topology for that version. When empty (the default) the operator uses its
-	// NEWEST shipped version, so an existing CR keeps today's behaviour. One operator build
-	// carries a supported RANGE of versions, so you can run a canary version in one
-	// namespace, or take an operator fix without moving the platform.
+	// RabbitMQ topology for that version. When empty, the operator uses its DEFAULT shipped
+	// version (not necessarily the newest one it carries — a newer released version can
+	// exist and is reachable by naming it explicitly), so an existing CR keeps today's
+	// behaviour. One operator build carries a supported RANGE of versions, so you can run a
+	// canary version in one namespace, or take an operator fix without moving the platform.
 	//
 	// This is intentionally NOT a CEL enum: the supported set grows as the operator ships
 	// new versions, so the value is validated at RUNTIME (and, in a later milestone, by the
@@ -1406,15 +1456,22 @@ type PlatformStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ObservedVersion is the platform version bundle the operator resolved and
 	// reconciled this Platform against — spec.version when set and known, otherwise the
-	// operator's newest (default) version. It lags spec.version only while a reconcile is
-	// in flight; an unknown spec.version leaves it at the last successfully-reconciled
-	// version and surfaces the error on the Degraded condition.
+	// operator's default version (not necessarily the newest one it carries). It lags
+	// spec.version only while a reconcile is in flight; an unknown spec.version leaves it
+	// at the last successfully-reconciled version and surfaces the error on the Degraded
+	// condition.
 	// +optional
 	ObservedVersion string `json:"observedVersion,omitempty"`
 	// Conditions represent the latest available observations of the platform's state.
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// Upgrade is the in-flight messaging-migration state. It is present ONLY while a
+	// migration is running — the engine sets it before the first side effect and clears
+	// it once the migration completes — so its absence means no migration is in progress,
+	// not merely that none has ever run.
+	// +optional
+	Upgrade *UpgradeStatus `json:"upgrade,omitempty"`
 }
 
 // +kubebuilder:object:root=true

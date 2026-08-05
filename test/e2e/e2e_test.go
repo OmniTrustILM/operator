@@ -669,20 +669,26 @@ spec:
 	// containers, plus the runtime DB/messaging wiring the unit/builder tests cannot prove.
 	platformFullManagedSpecs()
 
-	// VERSION-MATRIX specs (defined in platform_test.go), SPLIT into two independent Ordered
-	// blocks so CI can run them in parallel on separate clusters instead of serialising two full
-	// bring-ups (with a node-freeing barrier between them) inside one Context:
+	// VERSION-MATRIX specs (defined in platform_test.go), SPLIT into three independent Ordered
+	// blocks so CI can run them in parallel on separate clusters instead of serialising several
+	// full bring-ups (with node-freeing barriers between them) inside one Context:
 	//   - "matrix-upgrade": a managed Platform pinned to 2.17.0 reaches Available, UPGRADES in
-	//     place to 2.18.0, a downgrade is refused, an upgrade onto the unreleased 2.19.0 preview
-	//     bundle is refused and the restore re-converges, and its deletionPolicy=Delete teardown
-	//     reclaims every managed CR;
-	//   - "matrix-preview": a FRESH platform pinned to 2.19.0 comes up on the 2.19.0 contract.
-	// Together they prove the multi-version / upgrade / preview story end-to-end. Both keep the
-	// umbrella "matrix" label, so `--ginkgo.label-filter=matrix` still runs the whole story; each
-	// installs its own upstream operators and, like the FULL block, runs in the namespace-scoped
-	// Keycloak Operator's namespace, draining it first.
+	//     place to 2.18.0, a downgrade is refused, then 2.19.0 lands as an ORDINARY additive
+	//     upgrade because that CR pins spec.messaging.virtualHost (a pinned vhost never renames,
+	//     so no migration triggers), and its deletionPolicy=Delete teardown reclaims every
+	//     managed CR;
+	//   - "matrix-preview": a FRESH platform pinned to 2.19.0 comes up on the 2.19.0 contract;
+	//   - "matrix-migration": an UNPINNED managed 2.18.0 platform is bumped to 2.19.0 and the
+	//     messaging migration runs end-to-end — producers fenced, the source virtual host drained,
+	//     the staged cutover onto the "/" vhost, the source topology reclaimed, the workloads
+	//     restored — including the deadline exit that returns the platform intact to 2.18.0.
+	// Together they prove the multi-version / upgrade / migration story end-to-end. All three keep
+	// the umbrella "matrix" label, so `--ginkgo.label-filter=matrix` still runs the whole story;
+	// each installs its own upstream operators and, like the FULL block, runs in the
+	// namespace-scoped Keycloak Operator's namespace, draining it first.
 	platformVersionMatrixUpgradeSpecs()
 	platformVersionMatrixPreviewSpecs()
+	platformVersionMatrixMigrationSpecs()
 })
 
 // -------------------------------------------------------------------------

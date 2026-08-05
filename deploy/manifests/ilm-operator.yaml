@@ -5088,6 +5088,47 @@ spec:
                       Operator + Messaging Topology Operator). Required when mode=managed; ignored
                       otherwise.
                     properties:
+                      drainTimeout:
+                        default: 15m
+                        description: |-
+                          DrainTimeout bounds EACH of the migration's waiting phases separately: how long
+                          Fencing waits for the platform's message producers to actually wind down, how long
+                          Draining waits for the source vhost to empty, and how long CleaningUp waits for the
+                          source vhost to fall idle before it can be reclaimed. Each phase gets the full window,
+                          measured from its own start. The migration engine polls the source vhost across the
+                          Draining window for every drainable queue to report empty; if a deadline passes with
+                          producers still running or messages still outstanding the migration stops in that
+                          phase rather than proceeding — see ForceCutoverForVersion to override that stop.
+                          It is constrained to the Go duration charset (digits, an optional fraction, and one
+                          or more unit suffixes — ns, us, ms, s, m or h, e.g. "15m" or "1h30m") via a CEL rule
+                          rather than a Pattern marker: controller-gen cannot apply +kubebuilder:validation:
+                          Pattern directly to a metav1.Duration-typed field (it is a cross-package type
+                          reference, not a plain string, at schema-generation time).
+                        type: string
+                        x-kubernetes-validations:
+                        - message: drainTimeout must be a Go duration string, e.g.
+                            15m or 1h30m
+                          rule: self.matches('^([0-9]+([.][0-9]+)?(ns|us|ms|s|m|h))+$')
+                      forceCutoverForVersion:
+                        description: |-
+                          ForceCutoverForVersion authorizes the migration engine to cut traffic over to the
+                          target version's vhost EVEN THOUGH the source vhost has not drained cleanly within
+                          DrainTimeout, AND to run cleanup that DISCARDS whatever remains in the source vhost —
+                          including force-closing any connections still open on it. This is a deliberately
+                          destructive escape hatch for an operator who has confirmed the remaining messages
+                          are safe to lose.
+
+                          The value is scoped to ONE ATTEMPT, in two parts. It must equal the version the
+                          migration is cutting over TO (status.upgrade.toVersion); and it must be set — or
+                          re-set — AFTER that attempt began. A value this field already carried when the
+                          migration started is recorded as carried over (status.upgrade.forceCarriedOver) and
+                          authorizes nothing until it is cleared and set again, so a value left behind by an
+                          aborted attempt can never silently authorize a later migration to the same version.
+                          Once an attempt acts on the authorization it is recorded as consumed
+                          (status.upgrade.forceAuthorized), so the cleanup still honours a force the cutover
+                          used even if this field is cleared in between.
+                        pattern: ^[0-9]+\.[0-9]+\.[0-9]+$
+                        type: string
                       overrides:
                         description: |-
                           Overrides is a JSON-merge patch (RFC 7396) applied onto the rendered RabbitmqCluster
@@ -5215,6 +5256,20 @@ spec:
                           no /mq route.
                         type: boolean
                     type: object
+                  migrationAcknowledgedForVersion:
+                    description: |-
+                      MigrationAcknowledgedForVersion is the external-broker escape hatch for a messaging
+                      version migration: when mode=external the operator does not own the broker and
+                      cannot migrate a foreign topology itself, so a platform upgrade whose target version
+                      changes the messaging topology (e.g. 2.18.0 -> 2.19.0) is REFUSED until this is set
+                      to the target version, attesting that the operator has migrated their own broker
+                      topology to match.
+
+                      The value is TARGET-SCOPED: it must equal the version being upgraded TO, so a stale
+                      acknowledgement from a past upgrade can never silently authorize the next one.
+                      Ignored when mode=managed (the operator migrates the managed broker itself).
+                    pattern: ^[0-9]+\.[0-9]+\.[0-9]+$
+                    type: string
                   mode:
                     default: external
                     description: |-
@@ -7541,10 +7596,11 @@ spec:
                 description: |-
                   Version selects which platform version bundle the operator reconciles this
                   Platform against — the tested set of component images, env-var wiring, and managed-
-                  RabbitMQ topology for that version. When empty (the default) the operator uses its
-                  NEWEST shipped version, so an existing CR keeps today's behaviour. One operator build
-                  carries a supported RANGE of versions, so you can run a canary version in one
-                  namespace, or take an operator fix without moving the platform.
+                  RabbitMQ topology for that version. When empty, the operator uses its DEFAULT shipped
+                  version (not necessarily the newest one it carries — a newer released version can
+                  exist and is reachable by naming it explicitly), so an existing CR keeps today's
+                  behaviour. One operator build carries a supported RANGE of versions, so you can run a
+                  canary version in one namespace, or take an operator fix without moving the platform.
 
                   This is intentionally NOT a CEL enum: the supported set grows as the operator ships
                   new versions, so the value is validated at RUNTIME (and, in a later milestone, by the
@@ -7643,9 +7699,10 @@ spec:
                 description: |-
                   ObservedVersion is the platform version bundle the operator resolved and
                   reconciled this Platform against — spec.version when set and known, otherwise the
-                  operator's newest (default) version. It lags spec.version only while a reconcile is
-                  in flight; an unknown spec.version leaves it at the last successfully-reconciled
-                  version and surfaces the error on the Degraded condition.
+                  operator's default version (not necessarily the newest one it carries). It lags
+                  spec.version only while a reconcile is in flight; an unknown spec.version leaves it
+                  at the last successfully-reconciled version and surfaces the error on the Degraded
+                  condition.
                 type: string
               phase:
                 description: |-
@@ -7657,6 +7714,122 @@ spec:
                 - Running
                 - Degraded
                 type: string
+              upgrade:
+                description: |-
+                  Upgrade is the in-flight messaging-migration state. It is present ONLY while a
+                  migration is running — the engine sets it before the first side effect and clears
+                  it once the migration completes — so its absence means no migration is in progress,
+                  not merely that none has ever run.
+                properties:
+                  cleanDrainPolls:
+                    description: CleanDrainPolls counts consecutive polls that observed
+                      every drainable queue empty.
+                    format: int32
+                    type: integer
+                  fenced:
+                    description: |-
+                      Fenced lists the workloads the Fencing phase scaled to zero, so Resume can restore
+                      each one's original replica count.
+                    items:
+                      description: |-
+                        FencedWorkload records one workload the fence scaled to zero, so Resume can restore
+                        exactly what was there. Kind distinguishes a Deployment from a StatefulSet gateway.
+                      properties:
+                        absent:
+                          description: |-
+                            Absent records that the workload did not exist when the fence recorded its targets.
+                            The entry is recorded ANYWAY: the fence's list is the complete set of producers the
+                            migration intends to hold down, so a workload the ordinary render creates (or
+                            re-creates) mid-migration is fenced rather than silently allowed to start publishing
+                            outside the fence. It also tells the engine what "stopped" means for this entry —
+                            still absent, rather than observed at zero replicas — and that there is no replica
+                            count to write back when the fence is lifted.
+                          type: boolean
+                        kind:
+                          description: 'Kind is the workload''s Kind: "Deployment"
+                            or "StatefulSet".'
+                          type: string
+                        name:
+                          description: Name is the workload's object name.
+                          type: string
+                        replicas:
+                          description: |-
+                            Replicas is the replica count the workload carried immediately before the fence
+                            scaled it to zero, restored verbatim on Resume.
+                          format: int32
+                          type: integer
+                      required:
+                      - kind
+                      - name
+                      - replicas
+                      type: object
+                    type: array
+                  forceAuthorized:
+                    description: |-
+                      ForceAuthorized records that this attempt has CONSUMED the destructive force-cutover
+                      authorization. It is persisted before the first step the authorization permits, so the
+                      cleanup still honours a force the cutover acted on even if the spec field is cleared in
+                      between.
+                    type: boolean
+                  forceCarriedOver:
+                    description: |-
+                      ForceCarriedOver records that spec.messaging.managed.forceCutoverForVersion ALREADY
+                      named this migration's target version when the attempt began — i.e. it is a value left
+                      behind by an earlier attempt, which cannot authorize this one. It clears the moment the
+                      field is cleared or changed, so re-setting it deliberately for this attempt counts.
+                    type: boolean
+                  fromVersion:
+                    description: FromVersion is the platform version bundle the migration
+                      is moving away from.
+                    type: string
+                  inputsHash:
+                    description: |-
+                      InputsHash is a coordinate-free fingerprint (a hash — never the values themselves) of
+                      the migration-relevant spec inputs as they stood when the migration began: the
+                      messaging mode and wiring, the source and target virtual hosts, and the provisioning
+                      mode. The engine re-computes it every reconcile and refuses to proceed when it has
+                      changed, because those inputs decide which broker is addressed and which topology
+                      objects are the source and which the target — editing them mid-flight could complete a
+                      migration "successfully" while leaving the original topology orphaned.
+                    type: string
+                  nextDrainPollAt:
+                    description: |-
+                      NextDrainPollAt is the earliest time the drain may take its NEXT sample. The
+                      consecutive-clean-poll count is only meaningful if the samples are SPACED: every
+                      status write re-enqueues the Platform through the operator's own watch, so without an
+                      explicit floor three "consecutive" polls could all land inside the same second and
+                      prove nothing about a quiet virtual host. A poll arriving before this time is ignored.
+                    format: date-time
+                    type: string
+                  phase:
+                    description: Phase is the current stage of the migration.
+                    enum:
+                    - Fencing
+                    - Draining
+                    - CuttingOver
+                    - CleaningUp
+                    type: string
+                  phaseStartedAt:
+                    description: PhaseStartedAt bounds the current phase's deadline
+                      independently of the whole run.
+                    format: date-time
+                    type: string
+                  startedAt:
+                    description: StartedAt is when the migration began (the start
+                      of the Fencing phase).
+                    format: date-time
+                    type: string
+                  toVersion:
+                    description: ToVersion is the platform version bundle the migration
+                      is cutting over to.
+                    type: string
+                required:
+                - fromVersion
+                - phase
+                - phaseStartedAt
+                - startedAt
+                - toVersion
+                type: object
             type: object
         type: object
     served: true

@@ -35,12 +35,12 @@ func TestResolveMessagingConnectionExternalUnchanged(t *testing.T) {
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
 			Messaging: otilmv1alpha1.MessagingSpec{
-				Mode: "external", Host: "rabbitmq.example.com", Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
+				Mode: "external", Host: testExternalMQHost, Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
 			},
 		},
 	}
 	conn := ResolveMessagingConnection(p)
-	assert.Equal(t, "rabbitmq.example.com", conn.Host, "external host comes straight from the spec")
+	assert.Equal(t, testExternalMQHost, conn.Host, "external host comes straight from the spec")
 	assert.Equal(t, int32(5673), conn.Port)
 	assert.Equal(t, "ilm", conn.VirtualHost)
 	assert.Equal(t, testILMMQ, conn.CredentialsSecretName)
@@ -163,4 +163,41 @@ func TestResolveMessagingConnectionManagedIgnoresUserKeys(t *testing.T) {
 	conn := ResolveMessagingConnection(p)
 	assert.Equal(t, "username", conn.UsernameKey, "managed keeps the Topology-generated username key")
 	assert.Equal(t, "password", conn.PasswordKey, "managed keeps the Topology-generated password key")
+}
+
+// TestResolveMessagingConnectionManagedAdministratorCredentials proves a managed broker on
+// the default (2.18.0) bundle exposes the Topology-generated administrator-user Secret name
+// and the management API endpoint the queue-depth poll authenticates against.
+func TestResolveMessagingConnectionManagedAdministratorCredentials(t *testing.T) {
+	p := managedMQPlatform(nil)
+	conn := ResolveMessagingConnection(p)
+	assert.Equal(t, "ilm-messaging-administrator-user-credentials", conn.AdministratorCredentialsSecretName,
+		"managed administrator creds come from the Topology-generated administrator-user Secret")
+	assert.Equal(t, "http://ilm-messaging.ns.svc:15672", ManagedMessagingManagementEndpoint(p),
+		"the management endpoint targets the broker client Service's management port")
+}
+
+// TestResolveMessagingConnectionExternalHasNoAdministratorOrEndpoint proves external mode
+// exposes neither an administrator Secret nor a management endpoint — the operator does not
+// manage a foreign broker.
+func TestResolveMessagingConnectionExternalHasNoAdministratorOrEndpoint(t *testing.T) {
+	p := &otilmv1alpha1.Platform{
+		Spec: otilmv1alpha1.PlatformSpec{
+			Messaging: otilmv1alpha1.MessagingSpec{
+				Mode: "external", Host: testExternalMQHost, Port: 5673, VirtualHost: "ilm", Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: testILMMQ},
+			},
+		},
+	}
+	conn := ResolveMessagingConnection(p)
+	assert.Empty(t, conn.AdministratorCredentialsSecretName, "external mode has no managed administrator Secret")
+	assert.Empty(t, ManagedMessagingManagementEndpoint(p), "external mode has no managed management endpoint")
+}
+
+// TestResolveMessagingConnection217HasNoAdministratorCredentials proves the 2.17.0 bundle —
+// whose single-user topology's lone user is Core, merely TAGGED administrator, not a distinct
+// administrator ROLE — resolves an empty administrator Secret name.
+func TestResolveMessagingConnection217HasNoAdministratorCredentials(t *testing.T) {
+	p := managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion217 })
+	conn := ResolveMessagingConnection(p)
+	assert.Empty(t, conn.AdministratorCredentialsSecretName, "2.17.0 has no administrator role in its topology")
 }

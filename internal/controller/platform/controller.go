@@ -125,6 +125,17 @@ const (
 	// Core's Available readiness is gated on it per the design (a functional auth
 	// provider). It mirrors the builder's clean, unscoped component name.
 	authDeploymentName = "auth"
+	// gatewayWorkloadName is the api-gateway's workload/Service name — the door external
+	// traffic enters through, which the messaging migration fences and reopens by name.
+	gatewayWorkloadName = "api-gateway"
+	// provisioningWorkloadName is the bundled provisioning service's workload/Service name.
+	// The staged cutover addresses it by name because Core's provision-instance-queue init
+	// container cannot complete until it answers.
+	provisioningWorkloadName = "provisioning-rabbitmq"
+	// schedulerWorkloadName is the scheduler's workload/Service name. It is a message producer
+	// the migration fences AND one of the Services Core's wait-for-auth init container polls,
+	// which is why the staged cutover has to address it by name too.
+	schedulerWorkloadName = "scheduler"
 )
 
 // The first-admin CERTIFICATE registration is performed IN-POD by Core's postStart hook
@@ -182,6 +193,12 @@ type Reconciler struct {
 	// waiting, missing Secret, singleton loser, prune). It is wired in cmd/main.go;
 	// the event helpers are nil-safe so unit tests that omit it do not panic.
 	Recorder record.EventRecorder
+	// BrokerAdmins builds the RabbitMQ management-API client a messaging migration polls the
+	// source virtual host's queue depths with, from the managed broker's management endpoint
+	// and the administrator credentials the reconciler reads by reference. When nil it
+	// defaults to the real HTTP client; tests inject a factory returning a scripted broker so
+	// the drain is exercised without one.
+	BrokerAdmins brokerAdminFactory
 }
 
 // eventf records a namespaced Event on the Platform, formatting the message from args.
@@ -249,36 +266,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Finalizer + deletion handling FIRST — and BEFORE any spec defaulting: the
-	// finalizer-add path persists the whole object (r.Update), so any in-memory
-	// defaulting done earlier would leak into the stored spec (this exact bug shipped:
-	// the defaulted registry/repository were persisted on every first reconcile).
-	if done, err := r.handleFinalizer(ctx, &platform); done || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Default the effective shared image REGISTRY on this fetched copy (never
-	// persisted — the finalizer Update above already ran on the pristine object).
-	// Repository defaulting is lazy inside ResolveImage (bundle-aware).
-	platformbuilder.DefaultImageRegistry(&platform)
-
-	// Singleton-per-namespace guard: only the oldest Platform in a namespace is
-	// the active one. A newer Platform goes Degraded immediately. An admission
-	// webhook will enforce this at create-time in a later milestone.
-	if handled, res, err := r.checkSingletonGuard(ctx, &platform); handled || err != nil {
-		return res, err
-	}
-
-	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
-	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
-	// downgrade, an unsupported version, and an upgrade onto an unreleased preview bundle
-	// (each a terminal steady state), pins the resolved version onto the in-memory Platform,
-	// and returns the version bundle. A handled=true result means a guard short-circuited
-	// the reconcile.
-	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, &platform)
+	// The guards that decide WHETHER and WHAT this pass renders — deletion, the singleton,
+	// the version, and any in-flight messaging migration. They hand back the render the rest
+	// of the pass must use; handled=true means one of them short-circuited the reconcile.
+	mig, handled, res, err := r.prepareReconcile(ctx, &platform)
 	if handled || err != nil {
 		return res, err
 	}
+	bundle := mig.bundle
 
 	// Desired set: the keys of every object applied this reconcile, used by the
 	// post-apply prune to garbage-collect de-rendered children. Populated as objects
@@ -310,8 +305,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// object the Platform owns (everything except the edge). A composed-Secret or apply
 	// failure routes by transience (requeue vs degrade); a handled=true result short-circuits
 	// the reconcile.
-	if handled, res, err := r.composeAndApplyBase(ctx, &platform, bundle, desired, mgd.dbReady); handled || err != nil {
+	if handled, res, err := r.composeAndApplyBase(ctx, &platform, mig, desired, mgd.dbReady); handled || err != nil {
 		return res, err
+	}
+
+	// Messaging-migration fence: re-claim .spec.replicas=0 on every workload listed in
+	// status.upgrade.fenced, under the fence's own field manager. It sits HERE — immediately
+	// after this pass's Server-Side Apply of the base objects, in the SAME pass — because the
+	// apply is the only actor that can un-fence a producer: it force-owns the fields it sends,
+	// so a fenced workload's zero has to be re-written behind it on EVERY reconcile, for as
+	// long as the workload appears in the list. Membership is the whole condition; a platform
+	// with no migration in flight has an empty list and this is a no-op.
+	if ferr := r.enforceMigrationFence(ctx, &platform); ferr != nil {
+		return r.applyOrDegrade(ctx, &platform, reasonMigrationFenceError, ferr)
 	}
 
 	// Edge / admin-cert / ServiceMonitors: each gated on the upstream CRDs its configured mode
@@ -347,16 +353,68 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Prune de-rendered children, register the password admin, measure readiness, persist
 	// status, and pick the soonest applicable requeue. A prune/readiness/status failure routes
 	// by transience; the adjunct requeue flags collected across this pass decide the cadence.
-	return r.finalizeReconcile(ctx, &platform, desired, resolvedVersion, requeue, oidcRequeue, mgd)
+	return r.finalizeReconcile(ctx, &platform, desired, mig, requeue, oidcRequeue, mgd)
+}
+
+// prepareReconcile runs the guards that stand between a fetched Platform and the render: the
+// finalizer/deletion handling, image-registry defaulting, the per-namespace singleton guard,
+// version resolution and the messaging-migration gate.
+//
+// They are one step because they answer one question — whether this pass renders at all, and if
+// so from WHICH version's bundle — and because their ORDER is load-bearing, each one described
+// at its place below. It returns the migration gate's render for the rest of the pass;
+// handled=true means a guard short-circuited the reconcile and res/err are its answer.
+func (r *Reconciler) prepareReconcile(ctx context.Context, platform *otilmv1alpha1.Platform) (migrationRender, bool, ctrl.Result, error) {
+	// Finalizer + deletion handling FIRST — and BEFORE any spec defaulting: the
+	// finalizer-add path persists the whole object (r.Update), so any in-memory
+	// defaulting done earlier would leak into the stored spec (this exact bug shipped:
+	// the defaulted registry/repository were persisted on every first reconcile).
+	if done, err := r.handleFinalizer(ctx, platform); done || err != nil {
+		return migrationRender{}, true, ctrl.Result{}, err
+	}
+
+	// Default the effective shared image REGISTRY on this fetched copy (never
+	// persisted — the finalizer Update above already ran on the pristine object).
+	// Repository defaulting is lazy inside ResolveImage (bundle-aware).
+	platformbuilder.DefaultImageRegistry(platform)
+
+	// Singleton-per-namespace guard: only the oldest Platform in a namespace is
+	// the active one. A newer Platform goes Degraded immediately. An admission
+	// webhook will enforce this at create-time in a later milestone.
+	if handled, res, err := r.checkSingletonGuard(ctx, platform); handled || err != nil {
+		return migrationRender{}, true, res, err
+	}
+
+	// PIN-ON-CREATE + DOWNGRADE GUARD + bundle resolution. resolvePlatformVersion makes an
+	// empty spec.version follow the pinned status.observedVersion, refuses an explicit
+	// downgrade and an unsupported version (each a terminal steady state), pins the resolved
+	// version onto the in-memory Platform, and returns the version bundle. A handled=true
+	// result means a guard short-circuited the reconcile.
+	resolvedVersion, bundle, handled, res, err := r.resolvePlatformVersion(ctx, platform)
+	if handled || err != nil {
+		return migrationRender{}, true, res, err
+	}
+
+	// MESSAGING-MIGRATION GATE. It sits HERE — immediately after version resolution and
+	// BEFORE any gate that applies something belonging to the requested version — because a
+	// version bump that RENAMES the messaging virtual host must be sequenced (fence the
+	// producers, drain the source vhost, cut over, reclaim) rather than applied: rendering the
+	// target topology beside a source vhost that still holds messages is exactly the outcome
+	// the engine exists to prevent. It returns the version and bundle the REST of this
+	// reconcile must use — the requested ones when no migration is in the way, the SOURCE ones
+	// while a migration holds the platform back (it re-pins the in-memory spec.version to
+	// match, so the builders resolve the same bundle). A handled=true result means the gate
+	// short-circuited the reconcile.
+	return r.gateMessagingMigration(ctx, platform, bundle, resolvedVersion)
 }
 
 // finalizeReconcile completes a successful reconcile pass: it prunes de-rendered children,
 // registers the optional password admin, MEASURES readiness from the required Deployments,
 // persists status, and picks the soonest applicable requeue. A prune / readiness-check / status
 // failure routes by transience (requeue vs degrade); a benign optimistic-lock status conflict
-// requeues quietly. requeue/oidcRequeue and the managed-dependency flags carried in mgd feed the
-// final requeue cadence.
-func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, resolvedVersion string, requeue, oidcRequeue bool, mgd managedDependencyState) (ctrl.Result, error) {
+// requeues quietly. requeue/oidcRequeue, the managed-dependency flags carried in mgd, and the
+// migration gate's own cadence carried in mig feed the final requeue cadence.
+func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, mig migrationRender, requeue, oidcRequeue bool, mgd managedDependencyState) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Prune de-rendered children: after a SUCCESSFUL apply of the full desired set,
@@ -402,10 +460,12 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	r.setReadinessStatus(platform, ready)
 	platform.Status.ObservedGeneration = platform.Generation
 	// Report the version the operator actually reconciled against (spec.version, or the
-	// operator's newest when unset). It is set only on this success path; an unknown
-	// version returned early (steadyState) and left the prior ObservedVersion untouched.
-	platform.Status.ObservedVersion = resolvedVersion
-	if err := r.Status().Update(ctx, platform); err != nil {
+	// operator's default when unset — and, while a messaging migration holds the platform
+	// back, the version it is still RUNNING rather than the one it is moving to). It is set
+	// only on this success path; an unknown version returned early (steadyState) and left the
+	// prior ObservedVersion untouched.
+	platform.Status.ObservedVersion = mig.version
+	if err := r.writeStatus(ctx, platform); err != nil {
 		// A competing write updated the Platform between our cached read and this status write
 		// (common during bring-up: watched child Secrets/Deployments from the upstream operators
 		// fire overlapping reconciles). The status is recomputed every reconcile, so on a benign
@@ -423,6 +483,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	// their own timescale; while Progressing we also lay down a backstop requeue (the
 	// Deployment watch is the primary trigger).
 	return nextRequeueResult(requeueSignals{
+		migration: mig.requeue,
 		adminUser: adminUserRequeue,
 		oidc:      oidcRequeue,
 		database:  mgd.dbRequeue,
@@ -436,6 +497,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 // requeueSignals carries the per-adjunct requeue flags Reconcile collects across a pass, so
 // nextRequeueResult can pick the soonest applicable requeue in one place.
 type requeueSignals struct {
+	migration bool
 	adminUser bool
 	oidc      bool
 	database  bool
@@ -446,11 +508,20 @@ type requeueSignals struct {
 }
 
 // nextRequeueResult picks the soonest applicable requeue for a successfully reconciled
-// Platform, preserving the original priority order: admin-user, OIDC, managed database,
-// managed messaging, managed Keycloak, still-progressing required Deployments, then an edge /
+// Platform: an in-flight messaging migration first, then admin-user, OIDC, managed database,
+// managed messaging, managed Keycloak, still-progressing required Deployments, and an edge /
 // admin-cert dependency. No applicable signal means a steady state (no requeue).
+//
+// The migration comes FIRST because it is the only signal whose cadence drives a sequence
+// forward rather than re-checking a dependency: its phases advance on nothing but the next
+// reconcile, and it is decided ahead of every other gate, so deferring to one of theirs would
+// let an unrelated dependency set the pace of an upgrade.
 func nextRequeueResult(s requeueSignals) ctrl.Result {
 	switch {
+	case s.migration:
+		// A migration phase is waiting on something it must re-check itself (the producers
+		// winding down, the source virtual host emptying): look again shortly.
+		return ctrl.Result{RequeueAfter: migrationRequeueAfter}
 	case s.adminUser:
 		// Keycloak-not-ready / password-Secret-missing / transient realm-user failure: retry
 		// soon (same adjunct timescale as admin registration / OIDC wiring).
@@ -521,16 +592,19 @@ func (r *Reconciler) checkSingletonGuard(ctx context.Context, platform *otilmv1a
 	return false, ctrl.Result{}, nil
 }
 
-// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD + PREVIEW-UPGRADE
-// GUARD and resolves the version bundle for this reconcile. effectivePlatformVersion makes an
-// empty spec.version FOLLOW the pinned status.observedVersion (not the operator's current
-// default), so upgrading the operator — which changes the built-in DefaultVersion — never
-// silently upgrades a running platform; an explicit spec.version is the only upgrade trigger.
+// resolvePlatformVersion implements the PIN-ON-CREATE + DOWNGRADE GUARD and resolves the
+// version bundle for this reconcile. effectivePlatformVersion makes an empty spec.version
+// FOLLOW the pinned status.observedVersion (not the operator's current default), so upgrading
+// the operator — which changes the built-in DefaultVersion — never silently upgrades a
+// running platform; an explicit spec.version is the only upgrade trigger.
 //
-// It refuses an explicit DOWNGRADE, an UNSUPPORTED version, and an UPGRADE onto an unreleased
-// (preview) bundle (each a terminal steady state → handled=true), pins the resolved version onto
-// the IN-MEMORY Platform so the version-specific builders resolve the SAME bundle the reconciler
-// gated on, and returns that bundle.
+// It refuses an explicit DOWNGRADE and an UNSUPPORTED version (each a terminal steady state →
+// handled=true), pins the resolved version onto the IN-MEMORY Platform so the version-specific
+// builders resolve the SAME bundle the reconciler gated on, and returns that bundle. A bundle
+// this operator carries but does not yet ADVERTISE (Bundle.Released=false) resolves and applies
+// exactly like a released one once spec.version names it explicitly, on a fresh install or as
+// an upgrade of a live platform — Released only gates SupportedVersions()/DefaultVersion
+// eligibility, never whether an explicit opt-in is honored.
 func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilmv1alpha1.Platform) (resolvedVersion string, bundle bom.Bundle, handled bool, res ctrl.Result, err error) {
 	effectiveVersion := effectivePlatformVersion(platform)
 
@@ -548,7 +622,7 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	}
 
 	// Resolve the version bundle ONCE per reconcile from the effective version (empty →
-	// the operator's newest). An UNKNOWN version is a deterministic user mistake, NOT a
+	// the operator's default). An UNKNOWN version is a deterministic user mistake, NOT a
 	// crash: like the singleton loser it is a terminal steady state (no error, no busy
 	// requeue) until a spec edit re-enqueues — surfaced as Degraded with an actionable
 	// message listing the versions THIS operator build carries. The supported set grows
@@ -565,19 +639,6 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	resolvedVersion = effectiveVersion
 	if resolvedVersion == "" {
 		resolvedVersion = bom.DefaultVersion
-	}
-
-	// Preview bundles are for fresh installs and explicit testing only: refuse to
-	// UPGRADE a live platform onto an unreleased bundle — the messaging migration
-	// engine that makes such a move safe ships separately, and the release-day flip
-	// (Released=true) is what opens the path. Fresh installs (no observed version)
-	// may pin a preview explicitly.
-	if !resolvedBundle.Released && platform.Status.ObservedVersion != "" && platform.Status.ObservedVersion != resolvedVersion {
-		res, err = r.steadyState(ctx, platform, reasonPreviewVersionUpgradeBlocked,
-			fmt.Sprintf("version %s is a preview (unreleased) bundle; upgrading a running platform onto it is not supported — released versions: %s; "+
-				"keep spec.version at %q, or wait for %s to be released",
-				resolvedVersion, strings.Join(bom.SupportedVersions(), ", "), platform.Status.ObservedVersion, resolvedVersion))
-		return "", bundle, true, res, err
 	}
 
 	// Pin the resolved version onto the IN-MEMORY Platform so the version-specific builders
@@ -693,7 +754,12 @@ func (r *Reconciler) gateManagedDependencies(ctx context.Context, platform *otil
 // composed-Secret write or an SSA apply that fails routes by transience (requeue vs degrade);
 // handled is true when a step short-circuited the reconcile. dbReady gates the auth-DB
 // composition (skipped while a managed database is not yet ready).
-func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, bundle bom.Bundle, desired desiredSet, dbReady bool) (handled bool, res ctrl.Result, err error) {
+//
+// mig carries the migration gate's answer: the bundle every builder here resolves against, and
+// (during a staged messaging cutover) whether Core's workload must be WITHHELD from this pass's
+// apply so Core keeps running the pod template it is already Ready on.
+func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, mig migrationRender, desired desiredSet, dbReady bool) (handled bool, res ctrl.Result, err error) {
+	bundle := mig.bundle
 	// Compose the auth .NET DB connection string into an operator-managed Secret
 	// before applying workloads, so auth's secretKeyRef resolves. Skip it while a
 	// managed database is not yet ready (its generated credentials Secret does not exist
@@ -766,6 +832,16 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 	// deploys Core once with all config up front — this makes the operator match that.
 	coreExists, coreReady, coreFrozenChecksum := r.coreWorkloadStatus(ctx, platform)
 	for _, obj := range platformbuilder.RenderPlatformBase(platform) {
+		// A staged messaging cutover WITHHOLDS Core's workload until the target topology is
+		// declared and the provisioning service is answering again: Core's proxy-path init
+		// container retries against that service until it responds, so rolling Core onto the
+		// target bundle any earlier produces a pod that can never become Ready. Everything else
+		// (including Core's own Service/ServiceAccount/ConfigMaps) is applied normally, and the
+		// withheld workload stays in the desired set so the post-apply prune keeps it.
+		if mig.holdCore && isCoreWorkload(obj) {
+			desired.add(r, obj)
+			continue
+		}
 		// Stamp the per-component config checksums onto their pod templates so a change in config
 		// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
 		// relayed OIDC client Secret + in-pod scripts ConfigMap) and the gateway (kong.yml). Each
@@ -871,12 +947,14 @@ func (r *Reconciler) handleFinalizer(ctx context.Context, p *otilmv1alpha1.Platf
 //     their data intact; Delete reclaims them. These CRs carry no controller owner ref and
 //     are prune-excluded, so this handler is the only thing that deletes them.
 //
-// VERSION: teardown renders against the version the platform is ACTUALLY RUNNING
-// (teardownPlatformVersion — status.observedVersion, else spec.version) and, when an upgrade is
-// in flight, the requested version too — the deduplicated UNION of both renders, so neither a
-// blocked upgrade's live topology nor a partially applied one's new objects is orphaned. Each
-// render is pinned onto a DEEP COPY so the finalizer-removal Update that follows never persists
-// a spec change. See teardownRenderPlatforms and teardownGate.
+// VERSION: teardown renders against every bundle version this operator ships
+// (bom.AllVersions()) PLUS a legacy-scope variant of the version the platform is ACTUALLY
+// RUNNING (teardownPlatformVersion — status.observedVersion, else spec.version) — the
+// deduplicated UNION of all of them, so a partially applied upgrade's new objects, a blocked
+// upgrade's live topology, and a custom-vhost platform's pre-vhost-scoping (legacy-named)
+// topology are never orphaned. Each render is pinned onto a DEEP COPY so the finalizer-removal
+// Update that follows never persists a spec change. See teardownRenderPlatforms and
+// teardownGate.
 //
 // On a teardown failure the handler returns the non-nil error so handleFinalizer keeps the
 // finalizer (requeues) and the teardown is retried, rather than removing the finalizer and
@@ -1069,8 +1147,8 @@ func (r *Reconciler) setReadinessStatus(p *otilmv1alpha1.Platform, ready bool) {
 
 // clearStaleDegraded flips a leftover Degraded=True to False on a SUCCESSFUL reconcile pass,
 // so a platform that was degraded by a deterministic, user-correctable condition (a refused
-// version — PreviewVersionUpgradeBlocked / DowngradeForbidden / UnsupportedVersion — the
-// singleton loser, a render error) stops advertising Degraded once the cause is gone.
+// version — DowngradeForbidden / UnsupportedVersion — the singleton loser, a render error)
+// stops advertising Degraded once the cause is gone.
 //
 // It touches the condition ONLY when it is currently True: a platform that never degraded
 // keeps a Degraded-free condition list rather than gaining a permanent Degraded=False entry.
@@ -1530,15 +1608,20 @@ func (r *Reconciler) apply(ctx context.Context, p *otilmv1alpha1.Platform, obj c
 // transient API error prefer transientRequeue / applyOrDegrade so a retryable failure does
 // not flip the platform to Degraded.
 //
-// SECURITY: the condition Message is the generic reason only; the cause (which may
-// reference a Secret/coordinate by name) is logged but never placed in status/Event.
+// SECURITY: cause.Error() is PUBLISHED verbatim — into the Degraded condition, the Warning
+// Event and the log. Every call site is therefore responsible for a leak-free cause, and a
+// wrapper that merely omits a name is NOT enough: a wrapped Kubernetes StatusError re-adds the
+// object it is about, and a managed-topology object's name encodes the virtual host it is
+// scoped to. Wrap any such cause with safeErrorf (see safe_error.go), whose Error() is the
+// chosen public text and whose Unwrap keeps the API error reachable for isTransient.
 func (r *Reconciler) degraded(ctx context.Context, p *otilmv1alpha1.Platform, reason string, cause error) (ctrl.Result, error) {
 	// Surface the ACTUAL cause in the Degraded condition + Warning event, not just the reason
 	// code: an opaque "Message: ManagedMessagingError" tells the operator nothing about what
 	// failed (e.g. which managed object the apply rejected, or that an upstream CRD/webhook is
-	// not ready). Every caller crafts a LEAK-FREE cause (object kind/name + field path + the API
-	// error — never a secret value or a connection coordinate), so it is safe to expose, and it
-	// is what makes the condition actionable.
+	// not ready). Every caller crafts a LEAK-FREE cause (object kind + field path + the API
+	// failure reason — never a secret value, an object name that is a coordinate, or the
+	// apiserver's own text), so it is safe to expose, and it is what makes the condition
+	// actionable.
 	msg := cause.Error()
 	r.setDegradedMessage(ctx, p, reason, msg)
 	r.event(p, corev1.EventTypeWarning, reason, msg)
@@ -1570,7 +1653,10 @@ func (r *Reconciler) applyOrDegrade(ctx context.Context, p *otilmv1alpha1.Platfo
 // of benign conflicts neither spams error logs nor pages on a Degraded transition. The
 // platform keeps whatever phase the prior successful reconcile set (Available / Progressing).
 //
-// SECURITY: the cause (which may name a Secret/coordinate) is logged only — never surfaced.
+// SECURITY: cause.Error() reaches the LOG, which is as much a leak as a condition would be
+// for a coordinate — so the same rule as degraded applies: a cause whose text could name a
+// managed-topology object (or quote an apiserver error that does) must arrive here already
+// wrapped by safeErrorf.
 func (r *Reconciler) transientRequeue(ctx context.Context, p *otilmv1alpha1.Platform, reason string, cause error) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("transient reconcile error; requeueing with backoff (platform not degraded)",
 		"reason", reason, "name", p.Name, "err", cause.Error())
@@ -1640,6 +1726,33 @@ func isWebhookNotReady(err error) bool {
 		strings.Contains(msg, "no endpoints available for service")
 }
 
+// writeStatus persists status WITHOUT letting the write revise the spec this pass is rendering
+// against. Every status write in this package goes through it.
+//
+// client.Status().Update DECODES THE APISERVER'S REPLY BACK INTO THE OBJECT, and that reply is
+// the whole Platform — SPEC INCLUDED, exactly as stored. The copy a reconcile holds is
+// deliberately not that spec: resolvePlatformVersion pins the version it resolved onto
+// spec.version, the messaging migration RE-PINS it back to the version it is holding the
+// platform on, and DefaultImageRegistry defaults the shared registry — all in memory, all
+// decisions this pass has already acted on. Every builder reads spec.version (resolveBundle), so
+// a status write taken in the MIDDLE of a pass silently restores the REQUESTED version and hands
+// every apply that follows it the target bundle.
+//
+// That is not theoretical: it is how a drain, which persists its clean-poll progress and then
+// goes on reconciling the source version, came to apply the TARGET messaging topology beside a
+// source virtual host that had not emptied — and rabbitmq.com objects are deliberately never
+// pruned, so nothing reclaimed them afterwards.
+//
+// The spec is restored whether the write succeeded or failed: it is this pass's rendering
+// decision, and a status write is not entitled to change it. A genuine spec edit re-enqueues the
+// Platform through its own watch and is picked up by the NEXT pass, whole.
+func (r *Reconciler) writeStatus(ctx context.Context, p *otilmv1alpha1.Platform) error {
+	rendering := p.Spec
+	err := r.Status().Update(ctx, p)
+	p.Spec = rendering
+	return err
+}
+
 // steadyState marks the Platform Degraded for a DETERMINISTIC won't-proceed condition
 // and returns NO error and NO requeue: the condition is terminal until an external
 // change (a watch / a spec edit) re-enqueues the Platform. Used for the singleton
@@ -1673,7 +1786,7 @@ func (r *Reconciler) setDegradedMessage(ctx context.Context, p *otilmv1alpha1.Pl
 		Type: conditionDegraded, Status: metav1.ConditionTrue, Reason: reason,
 		Message: message, ObservedGeneration: p.Generation, // message must not leak secret values/coordinates
 	})
-	if err := r.Status().Update(ctx, p); err != nil {
+	if err := r.writeStatus(ctx, p); err != nil {
 		log.FromContext(ctx).Error(err, "failed to update Platform status", "phase", "Degraded")
 	}
 }

@@ -521,7 +521,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-08-03T13:52:37Z"
+    createdAt: "2026-08-04T16:32:34Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1

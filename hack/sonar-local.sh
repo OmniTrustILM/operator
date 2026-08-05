@@ -107,7 +107,7 @@ curl -sf -u "${SONAR_CREDS}" \
 import sys, json
 d = json.load(sys.stdin)
 print(f'  Total: {d[\"total\"]}')
-for i in d['issues'][:30]:
+for i in d['issues']:
     comp = i['component'].split(':')[-1]
     line = i.get('line', '?')
     print(f'  [{i[\"severity\"]}] {comp}:{line} - {i[\"message\"]}')

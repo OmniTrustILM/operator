@@ -22,11 +22,39 @@ SOFTWARE.
 
 package platform
 
+import otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+
 // Shared string constants for the platform controller test suite. These deduplicate literals
 // that recur across the package's tests (upstream-operator API groups, well-known object
 // names/keys, fixture versions, and repeated Ginkgo step descriptions) so a single source of
 // truth stays in sync with the production code under test.
+//
+// Workload NAMES are not repeated here: the production constants (coreDeploymentName,
+// gatewayWorkloadName, schedulerWorkloadName, provisioningWorkloadName) are what the reconciler
+// addresses, so the tests address them through the same names.
 const (
+	// Workload kinds, exactly as the migration fence records them on status.upgrade.fenced and
+	// as the render produces them.
+	kindDeployment  = string(otilmv1alpha1.WorkloadKindDeployment)
+	kindStatefulSet = string(otilmv1alpha1.WorkloadKindStatefulSet)
+
+	// errStatusWriteRejected is the refusal the migration suites inject to prove a state write
+	// that does not land stops the pass.
+	errStatusWriteRejected = "status write rejected"
+	// errNoBrokerReachable is what every call on an unreachable broker answers, so a drain
+	// pointed at one can only fail closed.
+	errNoBrokerReachable = "no broker is reachable"
+
+	// Source-topology queue names the drain fixtures use: one Core queue, one time-quality
+	// queue (retained across the migration, so never drainable) and two proxy instance queues.
+	testQueueCoreEvents  = "core.events"
+	testQueueTQConfig    = "time-quality.config"
+	testQueueInstanceOne = "instance-1"
+	testQueueInstanceHex = "instance-7a3f"
+
+	// forceCutoverField is the spec field a blocked migration's message must offer as an exit.
+	forceCutoverField = "spec.messaging.managed.forceCutoverForVersion"
+
 	// Upstream-operator API groups gated by the managed-infra detector.
 	cnpgGroup        = "postgresql.cnpg.io"
 	rabbitmqGroup    = "rabbitmq.com"
@@ -69,9 +97,10 @@ const (
 	keycloakVersion    = "26.4.0"
 	platformVersion217 = "2.17.0"
 	platformVersion218 = "2.18.0"
-	// platformVersion219 is the 2.19.0 fixture version: the UNRELEASED preview bundle this
-	// operator build carries, used to exercise the preview-upgrade guard and the
-	// running-vs-requested version split on deletion.
+	// platformVersion219 is the 2.19.0 fixture version: the PREVIEW (unreleased) bundle this
+	// operator build carries — resolvable only via an explicit spec.version, never advertised
+	// or DefaultVersion-eligible (see bom.go) — used to exercise the messaging migration
+	// engine and the running-vs-requested version split on deletion.
 	platformVersion219 = "2.19.0"
 
 	// Repeated Ginkgo step descriptions.

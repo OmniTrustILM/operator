@@ -285,7 +285,7 @@ Every field of `spec`, with where to read more. Defaults are the apiserver defau
 
 | Field | Default | Purpose |
 |---|---|---|
-| `version` | newest bundle | Platform version bundle ([versions.md](./versions.md)). |
+| `version` | operator's default bundle | Platform version bundle ([versions.md](./versions.md)). |
 | `common` | — | Fleet-wide config (see below). |
 | `database` | *required* | DB connection — `external`/`managed` (+ `pgBouncer`). |
 | `messaging` | *required* | AMQP broker — `external`/`managed` (+ `management.expose`). |

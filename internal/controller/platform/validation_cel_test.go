@@ -31,6 +31,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
@@ -630,7 +632,8 @@ var _ = Describe("Platform CEL validation", func() {
 			field := f
 			for vi, bad := range badValues {
 				value := bad
-				It("rejects a shell metacharacter in "+field.name+": "+value, func() {
+				// %q keeps the spec name single-line: badValues includes a literal newline.
+				It(fmt.Sprintf("rejects a shell metacharacter in %s: %q", field.name, value), func() {
 					ns := freshNS(fmt.Sprintf("cel-charset-%d-%d", fi, vi))
 					p := platformIn(ns)
 					field.set(p, value)
@@ -681,6 +684,121 @@ var _ = Describe("Platform CEL validation", func() {
 				Email:    "seamus.o'brien@example.com",
 			}
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	// managedMessaging satisfies messaging.mode=managed's required managed block, used by
+	// the migration-control field cases below (drainTimeout and forceCutoverForVersion both
+	// live under messaging.managed).
+	managedMessaging := func() otilmv1alpha1.MessagingSpec {
+		return otilmv1alpha1.MessagingSpec{
+			Mode: "managed", BrokerType: "rabbitmq",
+			Managed: &otilmv1alpha1.ManagedMessagingSpec{
+				Replicas: 1, Version: "4.0", Storage: otilmv1alpha1.StorageSpec{Size: "20Gi"},
+			},
+		}
+	}
+
+	// messaging.managed.drainTimeout is a *metav1.Duration: the typed Go client can never
+	// construct an invalid raw value for it (metav1.Duration only ever holds an
+	// already-parsed time.Duration), so its charset is exercised at the unstructured/raw
+	// level — exactly what the apiserver sees on the wire — by converting a valid typed
+	// Platform and overwriting the field with a raw string.
+	Context("messaging managed drainTimeout duration charset", func() {
+		withDrainTimeout := func(ns, drainTimeout string) *unstructured.Unstructured {
+			p := platformIn(ns)
+			p.Spec.Messaging = managedMessaging()
+			m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(p)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(m, drainTimeout, "spec", "messaging", "managed", "drainTimeout")).To(Succeed())
+			u := &unstructured.Unstructured{Object: m}
+			u.SetGroupVersionKind(otilmv1alpha1.GroupVersion.WithKind("Platform"))
+			return u
+		}
+		It("accepts a conventional Go duration string", func() {
+			ns := freshNS("cel-drain-good")
+			Expect(k8sClient.Create(ctx, withDrainTimeout(ns, "15m"))).To(Succeed())
+		})
+		It("rejects a non-duration string", func() {
+			ns := freshNS("cel-drain-bad")
+			err := k8sClient.Create(ctx, withDrainTimeout(ns, "abc"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("drainTimeout must be a Go duration string"))
+		})
+	})
+
+	// forceCutoverForVersion and migrationAcknowledgedForVersion are both target-scoped
+	// version strings rendered into migration bookkeeping, so they carry the same charset
+	// discipline as the exchange/routingKey fields above: a shell metacharacter can never
+	// be STORED.
+	Context("messaging migration version-shaped fields charset", func() {
+		fields := []struct {
+			name string
+			set  func(*otilmv1alpha1.Platform, string)
+		}{
+			{
+				name: "messaging.migrationAcknowledgedForVersion",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Messaging.MigrationAcknowledgedForVersion = v
+				},
+			},
+			{
+				name: "messaging.managed.forceCutoverForVersion",
+				set: func(p *otilmv1alpha1.Platform, v string) {
+					p.Spec.Messaging = managedMessaging()
+					p.Spec.Messaging.Managed.ForceCutoverForVersion = v
+				},
+			},
+		}
+		badValues := []string{"$(id)", "`id`", `a"b`, "a\nb", "a$VAR", "a;b", "a|b", "a b"}
+		for fi, f := range fields {
+			field := f
+			for vi, bad := range badValues {
+				value := bad
+				// %q keeps the spec name single-line: badValues includes a literal newline.
+				It(fmt.Sprintf("rejects a shell metacharacter in %s: %q", field.name, value), func() {
+					ns := freshNS(fmt.Sprintf("cel-migver-bad-%d-%d", fi, vi))
+					p := platformIn(ns)
+					field.set(p, value)
+					err := k8sClient.Create(ctx, p)
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(ContainSubstring(testPatternRejection))
+				})
+			}
+			It("accepts a conventional version value for "+field.name, func() {
+				ns := freshNS(fmt.Sprintf("cel-migver-good-%d", fi))
+				p := platformIn(ns)
+				field.set(p, "2.19.0")
+				Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			})
+		}
+	})
+
+	// status.upgrade.phase is a status-subresource field, so it is only reachable through
+	// the /status subresource — a plain Create ignores status content entirely.
+	Context("status.upgrade phase enum", func() {
+		newUpgrade := func(phase otilmv1alpha1.MigrationPhase) *otilmv1alpha1.UpgradeStatus {
+			now := metav1.Now()
+			return &otilmv1alpha1.UpgradeStatus{
+				FromVersion: "2.18.0", ToVersion: "2.19.0",
+				Phase: phase, StartedAt: now, PhaseStartedAt: now,
+			}
+		}
+		It("rejects a bogus migration phase on the status subresource", func() {
+			ns := freshNS("cel-upgrade-phase-bad")
+			p := platformIn(ns)
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			p.Status.Upgrade = newUpgrade("Bogus")
+			err := k8sClient.Status().Update(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Unsupported value"))
+		})
+		It("accepts a valid migration phase on the status subresource", func() {
+			ns := freshNS("cel-upgrade-phase-good")
+			p := platformIn(ns)
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			p.Status.Upgrade = newUpgrade(otilmv1alpha1.MigrationPhaseFencing)
+			Expect(k8sClient.Status().Update(ctx, p)).To(Succeed())
 		})
 	})
 })

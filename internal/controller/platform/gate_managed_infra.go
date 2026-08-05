@@ -271,7 +271,13 @@ func (r *Reconciler) applyManagedPhase(ctx context.Context, p *otilmv1alpha1.Pla
 			continue
 		}
 		if aerr := r.applyManaged(ctx, p, obj, desired); aerr != nil {
-			return fmt.Errorf("applying managed %s %s %q: %w", g.kind, obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), aerr)
+			// KIND AND API REASON ONLY. A managed object's NAME is a coordinate (the messaging
+			// topology's names encode the virtual host they are scoped to), and so is the
+			// apiserver's own error text, which quotes the object it refused. safeErrorf
+			// publishes neither while keeping the API error reachable for the transience
+			// classification applyOrDegrade makes.
+			return safeErrorf(aerr, "applying a managed %s %s failed (%s)",
+				g.kind, obj.GetObjectKind().GroupVersionKind().Kind, apiFailureReason(aerr))
 		}
 	}
 	return nil
@@ -301,14 +307,16 @@ func (r *Reconciler) prereqNotReady(ctx context.Context, p *otilmv1alpha1.Platfo
 
 // teardownGate builds the managed-infra gate the DELETION path acts on: build is the
 // per-component gate constructor (databaseGate / messagingGate / keycloakDeletionGate), and it
-// is called once per teardown-render version (teardownRenderPlatforms) with the object sets
+// is called once per teardown-render platform (teardownRenderPlatforms) with the object sets
 // merged into their DEDUPLICATED UNION.
 //
-// The union is what makes a partially applied upgrade safe to delete: the new version's managed
-// objects are applied BEFORE status.observedVersion is persisted, so a failure in between leaves
-// objects from BOTH topologies live, and a single-version render would orphan one set. Every
-// non-object field (managed, kind, name, the Event labels) comes from the RUNNING version's
-// gate, which is the reality the deletion Events describe.
+// The union is what makes a partially applied upgrade — or a legacy-scoped custom vhost —
+// safe to delete: sweeping every bundle version (plus the legacy-scope variant) leaves objects
+// from every rendered topology live, and a single render would orphan the rest. Every
+// non-object field (managed, kind, name, the Event labels) comes from renders[0]'s gate; none
+// of them vary with the pinned spec.version or spec.messaging.virtualHost (they are a fixed
+// function of the Platform name and its managed/mode spec), so which render is first does not
+// matter.
 func (r *Reconciler) teardownGate(p *otilmv1alpha1.Platform, build func(*otilmv1alpha1.Platform) managedInfraGate) managedInfraGate {
 	renders := teardownRenderPlatforms(p)
 	g := build(renders[0])
