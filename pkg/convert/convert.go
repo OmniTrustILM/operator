@@ -149,6 +149,7 @@ func Convert(values vals, name, namespace string) *Result {
 	r.mapRegisterAdmin(values, spec)
 	r.mapProvisioning(global, spec)
 	r.mapComponents(values, spec)
+	r.mapCoreFeatures(values, global, spec)
 	r.mapJavaOpts(values, spec)
 	r.flagConnectors(values)
 	r.flagGlobalCustomization(global)
@@ -688,16 +689,11 @@ func (r *Result) mapComponentEnv(block vals, comp *otilmv1alpha1.ComponentSpec) 
 	}
 }
 
-// mapComponentResources copies a component's resources block verbatim (requests/limits)
-// into comp.Resources via a YAML round-trip onto the typed ResourceRequirements.
+// mapComponentResources copies a component's resources block verbatim (requests/limits) into
+// comp.Resources.
 func (r *Result) mapComponentResources(block vals, comp *otilmv1alpha1.ComponentSpec) {
-	res := mapOf(block["resources"])
-	if len(res) == 0 {
-		return
-	}
-	var rr resourceRequirements
-	if roundTrip(res, &rr) == nil && (len(rr.Requests) > 0 || len(rr.Limits) > 0) {
-		comp.Resources = rr.toCore()
+	if rr := resourcesFrom(block); rr != nil {
+		comp.Resources = rr
 	}
 }
 
@@ -707,6 +703,147 @@ func (r *Result) mapComponentReplicas(block vals, comp *otilmv1alpha1.ComponentS
 		if n, ok := intOf(block[k]); ok {
 			comp.Replicas = ptrTo(n)
 			return
+		}
+	}
+}
+
+// timeQualityMonitorSecretName is the Secret the converter references for the monitor's broker
+// credentials in external mode (the values are never transcribed — see mapTimeQualityMonitor).
+const timeQualityMonitorSecretName = "time-quality-monitor-credentials"
+
+// mapCoreFeatures maps the chart's Core-shape values onto the CR: the workload kind, the
+// explicit platform instance id, Core's time-quality messaging toggle and the
+// time-quality-monitor sidecar. Without these the values would land in the UNMAPPED footer and
+// a migrated platform would quietly lose them.
+//
+// The time-quality toggle is read from BOTH the chart-local messaging block and
+// global.messaging, and EITHER being true enables it — the chart composes them with `or`, so
+// neither wins over the other.
+//
+// The chart-local "messaging" block is PARTLY mapped (timeQuality here; the broker coordinates
+// come from global.messaging, via mapMessaging), and flagUnmappedTopLevel inspects TOP-LEVEL
+// keys only — so the block is all-or-nothing there. It is registered in knownTopLevel and
+// accounted for sub-key by sub-key instead: without the registration an input whose only
+// messaging key was timeQuality would still print "# UNMAPPED: messaging"; without the
+// accounting the coordinates would vanish silently. Same contract as timeQualityMonitor.
+func (r *Result) mapCoreFeatures(values, global vals, spec *otilmv1alpha1.PlatformSpec) {
+	if wt := str(values["workloadType"]); wt != "" {
+		spec.Core.WorkloadType = otilmv1alpha1.WorkloadKind(wt)
+	}
+	if id, ok := intOf(values["platformInstanceId"]); ok {
+		spec.Core.InstanceID = ptrTo(id)
+	}
+	for _, block := range []vals{mapOf(global["messaging"]), mapOf(values["messaging"])} {
+		if enabled, ok := boolOf(mapOf(block["timeQuality"])["enabled"]); ok && enabled {
+			spec.Messaging.TimeQuality.Enabled = true
+		}
+	}
+	r.flagUnmappedMessagingKeys(mapOf(values["messaging"]))
+	r.mapTimeQualityMonitor(mapOf(values["timeQualityMonitor"]), spec)
+}
+
+// flagUnmappedMessagingKeys reports every CHART-LOCAL messaging sub-key the converter does not
+// consume, by its exact values path.
+//
+// Only messaging.timeQuality maps (in mapCoreFeatures); the broker coordinates are read from
+// global.messaging by mapMessaging, so a chart-local host/port/user block is genuinely dropped
+// and the user has to be told which keys those were. Keys are reported in sorted order so the
+// rendered footer is deterministic.
+func (r *Result) flagUnmappedMessagingKeys(msg vals) {
+	keys := make([]string, 0, len(msg))
+	for key, v := range msg {
+		if key == "timeQuality" || isEmpty(v) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		r.unmapped = append(r.unmapped, "messaging."+key+
+			" (the operator reads the broker coordinates from global.messaging -> spec.messaging; this chart-local key is not consumed)")
+	}
+}
+
+// mapTimeQualityMonitor maps the chart's timeQualityMonitor block onto
+// spec.core.timeQualityMonitor, and reports by name every sub-key that has no CR field.
+//
+// The chart nests the sidecar's probes AND resources UNDER image (its own convention), so the
+// resources are read from there and converted by resourcesFrom — the same round-trip component
+// resources use, never a second implementation.
+//
+// The monitor's CREDENTIALS are deliberately not mapped: the chart carries them as inline
+// plaintext (global.messaging.timeQualityMonitorUsername/Password) and this converter never
+// transcribes a secret — it records the Secret to create instead, and points the CR at it.
+func (r *Result) mapTimeQualityMonitor(tqm vals, spec *otilmv1alpha1.PlatformSpec) {
+	if len(tqm) == 0 {
+		return
+	}
+	defer r.flagUnmappedMonitorKeys(tqm)
+
+	enabled, ok := boolOf(tqm["enabled"])
+	if !ok || !enabled {
+		// A disabled monitor maps to nothing (the CR's own default is disabled). Its customised
+		// sub-keys are still reported by the deferred call above, so nothing disappears silently.
+		return
+	}
+
+	img := mapOf(tqm["image"])
+	m := &otilmv1alpha1.TimeQualityMonitorSpec{
+		Enabled: true,
+		Image: otilmv1alpha1.ImageSpec{
+			Registry:    str(img["registry"]),
+			Repository:  str(img["repository"]),
+			Name:        str(img["name"]),
+			Tag:         str(img["tag"]),
+			Digest:      str(img["digest"]),
+			PullPolicy:  str(img["pullPolicy"]),
+			PullSecrets: stringSlice(img["pullSecrets"]),
+		},
+		Resources: resourcesFrom(img),
+	}
+	if spec.Messaging.Mode == modeExternal {
+		r.addSecretTODO(secretTODO{
+			name: timeQualityMonitorSecretName,
+			keys: []string{defaultUsernameKey, defaultPasswordKey},
+			reason: "the time-quality-monitor sidecar's broker credentials " +
+				"(was global.messaging.timeQualityMonitorUsername/Password, never copied from values.yaml)",
+			kubectl: fmt.Sprintf(
+				"kubectl create secret generic %s -n %s --from-literal=username='<MONITOR_USER>' --from-literal=password='<MONITOR_PASSWORD>'",
+				timeQualityMonitorSecretName, r.Namespace),
+		})
+		m.Credentials = &otilmv1alpha1.CredentialsRef{SecretRef: timeQualityMonitorSecretName}
+	}
+	spec.Core.TimeQualityMonitor = m
+}
+
+// flagUnmappedMonitorKeys reports every timeQualityMonitor sub-key the CR cannot express, by
+// its exact values path and with the reason.
+//
+// It exists because mapCoreFeatures marks the whole block KNOWN, and flagUnmappedTopLevel
+// inspects top-level keys only — so without this, a monitor's custom entrypoint, probe timings
+// or log level would vanish with no note anywhere. Nested reporting through r.unmapped is the
+// converter's established idiom (see the logging.audit and apiGateway.* entries).
+func (r *Result) flagUnmappedMonitorKeys(tqm vals) {
+	img := mapOf(tqm["image"])
+	unmappable := []struct {
+		block     vals
+		key, path string
+		note      string
+	}{
+		{img, "command", "timeQualityMonitor.image.command",
+			"the sidecar runs the monitor image's own entrypoint; there is no per-sidecar command field"},
+		{img, "args", "timeQualityMonitor.image.args",
+			"the sidecar runs the monitor image's own args; there is no per-sidecar args field"},
+		{img, "securityContext", "timeQualityMonitor.image.securityContext",
+			"the operator SCC-hardens every container it renders (runAsNonRoot, all capabilities dropped, seccomp RuntimeDefault, no hard-coded runAsUser)"},
+		{img, "probes", "timeQualityMonitor.image.probes",
+			"the monitor's /health liveness+readiness probes are operator-rendered and not configurable per field"},
+		{tqm, "logging", "timeQualityMonitor.logging",
+			"the sidecar's log level follows spec.common.logging.level, like every other component"},
+	}
+	for _, u := range unmappable {
+		if v, ok := u.block[u.key]; ok && !isEmpty(v) {
+			r.unmapped = append(r.unmapped, u.path+" ("+u.note+")")
 		}
 	}
 }
@@ -768,6 +905,12 @@ var knownTopLevel = func() map[string]bool {
 		"global", "image", "additionalEnv", "logging", "ingress", "letsEncrypt",
 		"apiGateway", "registerAdmin", "authService", "authOpaPolicies",
 		"schedulerService", "feAdministrator", "utilsService",
+		// Core-shape values handled by mapCoreFeatures. "messaging" is registered even though it
+		// is only PARTLY mapped (timeQuality maps; the broker coordinates come from
+		// global.messaging): flagUnmappedTopLevel is top-level-only, so leaving it out would
+		// report the whole block even when every key in it was consumed. The difference is owed
+		// back key by key — flagUnmappedMessagingKeys, like flagUnmappedMonitorKeys.
+		"workloadType", "platformInstanceId", "timeQualityMonitor", "messaging",
 		// bundled infra / sidecars handled with notes:
 		"keycloakInternal", "messagingService", "pgBouncer", "opa", "utilsService",
 	}

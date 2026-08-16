@@ -64,18 +64,89 @@ var _ = Describe("Connector samples", func() {
 				"apiserver REJECTED sample %s — fix the sample to match the shipped CRD schema", path)
 		}
 	})
+
+	It("the OT PKI and timestamp-formatting samples carry the coordinates they document", func() {
+		// These two ship PRIVATE-registry images and, for OT PKI, a secret-backed pod env. The
+		// schema check above cannot see any of that: a sample that dropped its pullSecrets, or
+		// named the wrong probe path, or wired the login password key as an inline value, is
+		// still a valid Connector. So assert the SEMANTICS that make each sample usable.
+		root := samplesDir()
+
+		otpki, err := decodeConnectorSample(filepath.Join(root, "connector_otpki.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nestedString(otpki, "spec", "image", "repository")).
+			To(Equal("hub.omnitrustregistry.com/ilm-private/otpki-connector"))
+		Expect(nestedString(otpki, "spec", "image", "tag")).To(Equal("1.0.0"))
+		Expect(nestedStringSlice(otpki, "spec", "image", "pullSecrets")).
+			To(ConsistOf("registry-credentials"), "a private image is unpullable without its secret")
+		Expect(nestedString(otpki, "spec", "probes", "readiness", "path")).To(Equal("/v2/health/readiness"))
+		Expect(nestedString(otpki, "spec", "probes", "startup", "path")).To(Equal("/v2/health/liveness"))
+		Expect(nestedString(otpki, "spec", "registration", "platformUrl")).
+			To(Equal("http://core.ilm.svc.cluster.local:8080/api"),
+				"platformUrl is the platform's BASE API URL, /api included — the operator appends only /v2/connector/register")
+
+		// The login password key travels as a POD ENV via secretKeyRef, never inline (this is
+		// what closes the spec's open question about a new CRD capability: there is no gap).
+		refs, found, err := unstructured.NestedSlice(otpki.Object, "spec", "secretRefs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue(), "OT PKI must reference its Secret")
+		Expect(refs).To(HaveLen(1))
+		ref := refs[0].(map[string]interface{})
+		Expect(ref["name"]).To(Equal("otpki-connector-secret"))
+		Expect(ref["type"]).To(Equal("env"))
+		keys := ref["keys"].([]interface{})
+		Expect(keys).To(HaveLen(1))
+		key := keys[0].(map[string]interface{})
+		Expect(key["secretKey"]).To(Equal("login_password_key"))
+		Expect(key["envVar"]).To(Equal("OTPKI_LOGIN_PASSWORD_KEY"))
+
+		tsf, err := decodeConnectorSample(filepath.Join(root, "connector_timestamp_formatting.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nestedString(tsf, "spec", "image", "repository")).
+			To(Equal("hub.omnitrustregistry.com/ilm-private/timestamp-formatting-connector"))
+		Expect(nestedString(tsf, "spec", "image", "tag")).To(Equal("1.0.0"))
+		Expect(nestedStringSlice(tsf, "spec", "image", "pullSecrets")).To(ConsistOf("registry-credentials"))
+		Expect(nestedString(tsf, "spec", "probes", "readiness", "path")).To(Equal("/v2/health/readiness"))
+		_, found, err = unstructured.NestedSlice(tsf.Object, "spec", "secretRefs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeFalse(), "this connector needs no Secret of its own")
+	})
 })
+
+// samplesDir returns the absolute path of config/samples, derived from this file's own
+// location so the spec is independent of the working directory.
+func samplesDir() string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	Expect(ok).To(BeTrue())
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "config", "samples")
+}
 
 // connectorSampleFiles returns the sorted absolute paths of every curated Connector
 // sample under config/samples (the connector_ filename prefix).
 func connectorSampleFiles() []string {
-	_, thisFile, _, ok := runtime.Caller(0)
-	Expect(ok).To(BeTrue())
-	root := filepath.Join(filepath.Dir(thisFile), "..", "..", "..")
-	matches, err := filepath.Glob(filepath.Join(root, "config", "samples", "connector_*.yaml"))
+	root := samplesDir()
+	matches, err := filepath.Glob(filepath.Join(root, "connector_*.yaml"))
 	Expect(err).NotTo(HaveOccurred())
 	sort.Strings(matches)
 	return matches
+}
+
+// nestedString reads a string at a path in a decoded sample, failing the spec when it is
+// absent — an absent field is exactly the regression these assertions exist to catch.
+func nestedString(obj *unstructured.Unstructured, fields ...string) string {
+	v, found, err := unstructured.NestedString(obj.Object, fields...)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, found).To(BeTrue(), "missing field %v", fields)
+	return v
+}
+
+// nestedStringSlice reads a []string at a path in a decoded sample, failing the spec when it
+// is absent.
+func nestedStringSlice(obj *unstructured.Unstructured, fields ...string) []string {
+	v, found, err := unstructured.NestedStringSlice(obj.Object, fields...)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	ExpectWithOffset(1, found).To(BeTrue(), "missing field %v", fields)
+	return v
 }
 
 // decodeConnectorSample reads a sample file and decodes its YAML into an unstructured

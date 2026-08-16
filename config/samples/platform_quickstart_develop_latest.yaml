@@ -27,7 +27,7 @@ spec:
     brokerType: rabbitmq
     managed:
       replicas: 1
-      version: "4.3.1"   # the 2.18.0 bundle's matched default; pinned here for clarity (omit to use the same default)
+      version: "4.3.1"   # the default bundle's matched RabbitMQ version; pinned here for clarity (omit to use the same default)
       storage: { size: 10Gi }
   keycloak:
     mode: managed

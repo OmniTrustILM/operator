@@ -13,8 +13,8 @@
 #   OMIT a `version` to let the operator use the DEFAULT pinned by the selected platform
 #   version bundle (spec.version) — that default is the latest version VALIDATED with this
 #   platform release. Pinning here lets you choose a different supported version, or simply
-#   record the exact one you run. The values below match the 2.18.0 bundle's validated
-#   defaults; see docs/versions.md for the supported matrix and docs/configuration.md
+#   record the exact one you run. The values below match the default bundle's validated
+#   set; see docs/versions.md for the supported matrix and docs/configuration.md
 #   (Managed engine versions) for the full explanation.
 #
 # MAJOR-VERSION UPGRADES ARE GUARDED

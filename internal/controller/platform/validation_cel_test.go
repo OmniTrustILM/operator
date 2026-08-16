@@ -801,4 +801,103 @@ var _ = Describe("Platform CEL validation", func() {
 			Expect(k8sClient.Status().Update(ctx, p)).To(Succeed())
 		})
 	})
+
+	Context("core instanceId guards", func() {
+		It("rejects instanceId together with multi-replica core", func() {
+			ns := freshNS("cel-instanceid-replicas")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(7))
+			p.Spec.Core.Replicas = ptr(int32(2))
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("core.instanceId requires a single-replica core"))
+		})
+		It("rejects instanceId together with core autoscaling", func() {
+			ns := freshNS("cel-instanceid-hpa")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(7))
+			p.Spec.Core.Autoscaling = &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 3}
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("core.instanceId cannot be combined with core.autoscaling"))
+		})
+		It("rejects instanceId under the HA profile without an explicit single replica", func() {
+			ns := freshNS("cel-instanceid-ha")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(7))
+			p.Spec.HighAvailability = &otilmv1alpha1.HighAvailabilitySpec{Enabled: true}
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("core.instanceId with highAvailability.enabled"))
+		})
+		It("accepts instanceId under the HA profile when core is pinned to one replica", func() {
+			ns := freshNS("cel-instanceid-ha-pinned")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(7))
+			p.Spec.Core.Replicas = ptr(int32(1))
+			p.Spec.HighAvailability = &otilmv1alpha1.HighAvailabilitySpec{Enabled: true}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts a single-replica core with an instanceId", func() {
+			ns := freshNS("cel-instanceid-good")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(65535))
+			p.Spec.Core.Replicas = ptr(int32(1))
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("rejects an instanceId outside 0-65535", func() {
+			ns := freshNS("cel-instanceid-range")
+			p := platformIn(ns)
+			p.Spec.Core.InstanceID = ptr(int32(65536))
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("should be less than or equal to 65535"))
+		})
+		It("accepts a CR that sets no instanceId at all (existing CRs are never wedged)", func() {
+			ns := freshNS("cel-instanceid-absent")
+			p := platformIn(ns)
+			p.Spec.Core.Replicas = ptr(int32(3))
+			p.Spec.Core.Autoscaling = &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 5}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	Context("time-quality monitor credentials", func() {
+		It("rejects an enabled monitor on an external broker without a credentials secretRef", func() {
+			ns := freshNS("cel-tqm-external-bad")
+			p := platformIn(ns)
+			p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: true}
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("core.timeQualityMonitor.credentials.secretRef is required"))
+		})
+		It("accepts an enabled monitor on an external broker with a credentials secretRef", func() {
+			ns := freshNS("cel-tqm-external-good")
+			p := platformIn(ns)
+			p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{
+				Enabled:     true,
+				Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "tq-monitor"},
+			}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts an enabled monitor on a managed broker with no secretRef", func() {
+			ns := freshNS("cel-tqm-managed")
+			p := platformIn(ns)
+			p.Spec.Messaging = otilmv1alpha1.MessagingSpec{
+				Mode: "managed", BrokerType: "rabbitmq",
+				Managed: &otilmv1alpha1.ManagedMessagingSpec{
+					Replicas: 1,
+					Storage:  otilmv1alpha1.StorageSpec{Size: "1Gi"},
+				},
+			}
+			p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: true}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts a DISABLED monitor on an external broker with no secretRef", func() {
+			ns := freshNS("cel-tqm-off")
+			p := platformIn(ns)
+			p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: false}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
 })

@@ -117,11 +117,18 @@ func TestAuthDBConnectionStringFormat(t *testing.T) {
 		got)
 }
 
-// TestMessagingTopology locks the managed-RabbitMQ topology DATA: the cardinality (5 users /
-// 2 exchanges / 10 queues / 9 bindings), the load-bearing permission regexes for the
-// proxy/core/monitor users, and the defaults (vhost, version).
+// TestMessagingTopology locks the 2.18.0 managed-RabbitMQ topology DATA: the cardinality
+// (5 users / 2 exchanges / 10 queues / 9 bindings), the load-bearing permission regexes for
+// the proxy/core/monitor users, and the defaults (vhost, version).
+//
+// PINNED on purpose — the czertainly exchanges, the 10/9 queue/binding cardinality and the
+// pre-rename permission regexes are 2.18.0 facts that live platforms still run on.
+// TestBundle2190 locks the 2.19.0 topology in full, and TestPackageWrappersResolveDefaultBundle
+// proves Messaging() resolves the default, so nothing is lost by pinning here.
 func TestMessagingTopology(t *testing.T) {
-	topo := Messaging()
+	b, ok := BundleFor(testVersion2180)
+	require.True(t, ok, "the 2.18.0 bundle must resolve")
+	topo := b.Messaging
 	assert.Len(t, topo.Users, 5, "five users: administrator/provisioner/proxy/core/monitor")
 	assert.Len(t, topo.Exchanges, 2, "two exchanges: czertainly + czertainly-proxy")
 	assert.Len(t, topo.Queues, 10, "ten queues (core.* + time-quality.*)")
@@ -225,15 +232,41 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 // bundle changes this list only once its own release-day flip PR marks it Released and
 // updates this expectation.
 func TestSupportedVersionsExplicit(t *testing.T) {
-	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
+}
+
+// TestSupportedVersionsExcludesPreviewBundle pins the Released filter with a SYNTHETIC preview
+// bundle, because the production data alone cannot: all three shipped bundles are Released
+// today, so a mutation that deletes the `if b.Released` guard in SupportedVersions leaves
+// TestSupportedVersionsExplicit and TestSupportedVersionsIncludesDefault equally green either
+// way. Inserting an unreleased bundle directly into the package-level bundles map — the seam
+// this internal test package has — makes the filter's absence observable again: SupportedVersions
+// must drop the synthetic key while AllVersions and BundleFor still reach it, exactly as a real
+// (not-yet-released) bundle would behave. The key is a version string no production bundle will
+// ever use, and t.Cleanup removes it before any other test in this package runs.
+func TestSupportedVersionsExcludesPreviewBundle(t *testing.T) {
+	const previewVersion = "9.9.9-preview-synthetic"
+	require.NotContains(t, bundles, previewVersion, "the synthetic key must not collide with real bundle data")
+	bundles[previewVersion] = Bundle{Released: false}
+	t.Cleanup(func() { delete(bundles, previewVersion) })
+
+	assert.NotContains(t, SupportedVersions(), previewVersion,
+		"a preview (Released=false) bundle must never appear in the advertised set")
+	assert.Contains(t, AllVersions(), previewVersion,
+		"AllVersions is the full key set — released and preview both")
+
+	b, ok := BundleFor(previewVersion)
+	assert.True(t, ok, "an explicit spec.version reaches a preview bundle exactly like a released one")
+	assert.False(t, b.Released)
 }
 
 // TestDefaultVersionIsReleased is the ONE invariant DefaultVersion must satisfy: it must name
 // a RELEASED bundle (an empty spec.version can never land a fresh install on a preview). It
 // does NOT need to be the NEWEST released bundle — a release-day flip PR is free to mark a
 // bundle Released without moving DefaultVersion to it, so a released-but-not-default bundle can
-// exist between the two 2.19.0 flips (release-day and default-day); moving DefaultVersion is a
-// separate, deliberate decision either PR is free to leave alone.
+// exist between a bundle's release and the day DefaultVersion moves to it (2.19.0's flip did
+// both at once); moving DefaultVersion is a separate, deliberate decision either PR is free to
+// leave alone.
 func TestDefaultVersionIsReleased(t *testing.T) {
 	b, ok := BundleFor(DefaultVersion)
 	assert.True(t, ok)
@@ -283,7 +316,9 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
 	assert.Equal(t, testVersion2190, AllVersions()[len(AllVersions())-1],
-		"the preview bundle is the newest key, and only AllVersions carries it")
+		"the newest bundle is last in both lists")
+	assert.Equal(t, testVersion2190, SupportedVersions()[len(SupportedVersions())-1],
+		"2.19.0 is released, so it is advertised too")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -388,18 +423,19 @@ func TestLatestOnlyRetentionQueues(t *testing.T) {
 	}.IsLatestOnlyRetention(), "arguments are int64 by contract; anything else is not a retention queue")
 }
 
-// TestBundle2190 pins the ENTIRE 2.19.0 preview contract, extracted from the
+// TestBundle2190 pins the ENTIRE 2.19.0 contract, extracted from the
 // helm-charts 2.18.0..HEAD diff. Full-matrix on purpose: partial assertions let a
 // provisioning-exchange bug through review once already.
 func TestBundle2190(t *testing.T) {
 	b, ok := BundleFor(testVersion2190)
 	assert.True(t, ok, "2.19.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.19.0 stays preview until the operator reaches CR parity with the Helm chart")
+	assert.True(t, b.Released, "2.19.0 is released: the operator reached CR parity with the Helm chart")
 	assert.True(t, b.HasProvisioning)
 
-	// Advertised set must NOT change while 2.19.0 is preview.
-	assert.Equal(t, []string{testVersion2170, testVersion2180}, SupportedVersions())
+	// Advertised set now carries 2.19.0, and it is the fresh-install default.
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
 	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, AllVersions())
+	assert.Equal(t, testVersion2190, DefaultVersion)
 
 	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag
 	// (2026-08-03): auth bumped to 1.7.0 and scheduler to 1.1.1 in the release cut.

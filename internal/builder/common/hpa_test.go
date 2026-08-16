@@ -53,7 +53,7 @@ func TestBuildHorizontalPodAutoscalerScaleTargetAndBounds(t *testing.T) {
 	assert.Equal(t, "core", hpa.Labels[ComponentLabel])
 
 	// scaleTargetRef points at the component's apps/v1 Deployment.
-	assert.Equal(t, "apps/v1", hpa.Spec.ScaleTargetRef.APIVersion)
+	assert.Equal(t, testAppsV1APIVersion, hpa.Spec.ScaleTargetRef.APIVersion)
 	assert.Equal(t, "Deployment", hpa.Spec.ScaleTargetRef.Kind)
 	assert.Equal(t, "core", hpa.Spec.ScaleTargetRef.Name)
 
@@ -99,4 +99,25 @@ func TestBuildHorizontalPodAutoscalerNoMetricsWhenNoTargets(t *testing.T) {
 	hpa := BuildHorizontalPodAutoscaler(c, &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 3})
 	require.NotNil(t, hpa)
 	assert.Empty(t, hpa.Spec.Metrics, "no target utilization => no metrics")
+}
+
+// TestBuildHPAScaleTargetFollowsWorkloadType pins the scale target to the kind the component
+// is actually rendered as. An HPA aimed at a Deployment that does not exist (because the
+// component renders as a StatefulSet) never scales and reports FailedGetScale — silently.
+func TestBuildHPAScaleTargetFollowsWorkloadType(t *testing.T) {
+	spec := &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 5}
+
+	dep := BuildHorizontalPodAutoscaler(Component{Name: "core", Namespace: "ilm"}, spec)
+	require.NotNil(t, dep)
+	assert.Equal(t, "Deployment", dep.Spec.ScaleTargetRef.Kind)
+	assert.Equal(t, testAppsV1APIVersion, dep.Spec.ScaleTargetRef.APIVersion)
+	assert.Equal(t, "core", dep.Spec.ScaleTargetRef.Name)
+
+	sts := BuildHorizontalPodAutoscaler(Component{
+		Name: "core", Namespace: "ilm", WorkloadType: otilmv1alpha1.WorkloadKindStatefulSet,
+	}, spec)
+	require.NotNil(t, sts)
+	assert.Equal(t, "StatefulSet", sts.Spec.ScaleTargetRef.Kind)
+	assert.Equal(t, testAppsV1APIVersion, sts.Spec.ScaleTargetRef.APIVersion)
+	assert.Equal(t, "core", sts.Spec.ScaleTargetRef.Name)
 }

@@ -305,8 +305,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// object the Platform owns (everything except the edge). A composed-Secret or apply
 	// failure routes by transience (requeue vs degrade); a handled=true result short-circuits
 	// the reconcile.
-	if handled, res, err := r.composeAndApplyBase(ctx, &platform, mig, desired, mgd.dbReady); handled || err != nil {
-		return res, err
+	switching, handledApply, resApply, errApply := r.composeAndApplyBase(ctx, &platform, mig, desired, mgd.dbReady)
+	if handledApply || errApply != nil {
+		return resApply, errApply
 	}
 
 	// Messaging-migration fence: re-claim .spec.replicas=0 on every workload listed in
@@ -353,7 +354,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Prune de-rendered children, register the password admin, measure readiness, persist
 	// status, and pick the soonest applicable requeue. A prune/readiness/status failure routes
 	// by transience; the adjunct requeue flags collected across this pass decide the cadence.
-	return r.finalizeReconcile(ctx, &platform, desired, mig, requeue, oidcRequeue, mgd)
+	return r.finalizeReconcile(ctx, &platform, desired, mig, mgd, finalizeRequeueInputs{
+		edge: requeue, oidc: oidcRequeue, workloadSwitch: switching,
+	})
 }
 
 // prepareReconcile runs the guards that stand between a fetched Platform and the render: the
@@ -408,13 +411,26 @@ func (r *Reconciler) prepareReconcile(ctx context.Context, platform *otilmv1alph
 	return r.gateMessagingMigration(ctx, platform, bundle, resolvedVersion)
 }
 
+// finalizeRequeueInputs carries the per-adjunct requeue/switch flags Reconcile collects across
+// the pass, BEFORE finalizeReconcile runs — kept as its own small struct rather than folded into
+// requeueSignals because two of that type's fields (adminUser, ready) are not known until
+// finalizeReconcile measures them itself.
+type finalizeRequeueInputs struct {
+	// edge is gateEdgeAdminAndMonitors' combined requeue flag.
+	edge bool
+	// oidc is reconcileOIDCProvider's requeue flag.
+	oidc bool
+	// workloadSwitch is composeAndApplyBase's "a superseded workload is still terminating" flag.
+	workloadSwitch bool
+}
+
 // finalizeReconcile completes a successful reconcile pass: it prunes de-rendered children,
 // registers the optional password admin, MEASURES readiness from the required Deployments,
 // persists status, and picks the soonest applicable requeue. A prune / readiness-check / status
 // failure routes by transience (requeue vs degrade); a benign optimistic-lock status conflict
-// requeues quietly. requeue/oidcRequeue, the managed-dependency flags carried in mgd, and the
-// migration gate's own cadence carried in mig feed the final requeue cadence.
-func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, mig migrationRender, requeue, oidcRequeue bool, mgd managedDependencyState) (ctrl.Result, error) {
+// requeues quietly. in's flags, the managed-dependency flags carried in mgd, and the migration
+// gate's own cadence carried in mig feed the final requeue cadence.
+func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, mig migrationRender, mgd managedDependencyState, in finalizeRequeueInputs) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Prune de-rendered children: after a SUCCESSFUL apply of the full desired set,
@@ -483,28 +499,30 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 	// their own timescale; while Progressing we also lay down a backstop requeue (the
 	// Deployment watch is the primary trigger).
 	return nextRequeueResult(requeueSignals{
-		migration: mig.requeue,
-		adminUser: adminUserRequeue,
-		oidc:      oidcRequeue,
-		database:  mgd.dbRequeue,
-		messaging: mgd.mqRequeue,
-		keycloak:  mgd.kcRequeue,
-		ready:     ready,
-		edge:      requeue,
+		migration:      mig.requeue,
+		workloadSwitch: in.workloadSwitch,
+		adminUser:      adminUserRequeue,
+		oidc:           in.oidc,
+		database:       mgd.dbRequeue,
+		messaging:      mgd.mqRequeue,
+		keycloak:       mgd.kcRequeue,
+		ready:          ready,
+		edge:           in.edge,
 	}), nil
 }
 
 // requeueSignals carries the per-adjunct requeue flags Reconcile collects across a pass, so
 // nextRequeueResult can pick the soonest applicable requeue in one place.
 type requeueSignals struct {
-	migration bool
-	adminUser bool
-	oidc      bool
-	database  bool
-	messaging bool
-	keycloak  bool
-	ready     bool
-	edge      bool
+	migration      bool
+	workloadSwitch bool
+	adminUser      bool
+	oidc           bool
+	database       bool
+	messaging      bool
+	keycloak       bool
+	ready          bool
+	edge           bool
 }
 
 // nextRequeueResult picks the soonest applicable requeue for a successfully reconciled
@@ -522,6 +540,12 @@ func nextRequeueResult(s requeueSignals) ctrl.Result {
 		// A migration phase is waiting on something it must re-check itself (the producers
 		// winding down, the source virtual host emptying): look again shortly.
 		return ctrl.Result{RequeueAfter: migrationRequeueAfter}
+	case s.workloadSwitch:
+		// A component's workloadType changed and its superseded workload is still terminating:
+		// look again shortly and apply the new kind once the old one is gone. Only reached on a
+		// pass that runs the full route to here — see workloadSwitchRequeueAfter's doc for why an
+		// earlier short-circuit is still covered, just on that other step's own cadence.
+		return ctrl.Result{RequeueAfter: workloadSwitchRequeueAfter}
 	case s.adminUser:
 		// Keycloak-not-ready / password-Secret-missing / transient realm-user failure: retry
 		// soon (same adjunct timescale as admin registration / OIDC wiring).
@@ -746,6 +770,115 @@ func (r *Reconciler) gateManagedDependencies(ctx context.Context, platform *otil
 	}, false, ctrl.Result{}, nil
 }
 
+// composeBaseSecrets composes the operator-managed auth-DB and trusted-certs Secrets that the
+// base objects below reference, before any of them are rendered. handled is true when a
+// composed-Secret write short-circuits the reconcile; a transient SSA/update conflict routes to
+// a requeue (no degrade), a credentials/Secret-read failure is otherwise deterministic — neither
+// embeds the composed value/credentials/cert material.
+//
+// dbReady gates the auth-DB composition: skipped while a managed database is not yet ready (its
+// generated credentials Secret does not exist yet — gateDatabase already requested a requeue,
+// and auth waits on the composed Secret via its secretKeyRef in the meantime, no Degraded).
+// While skipping, PRESERVE any already-composed auth-db Secret in the desired set so a transient
+// DatabaseReady flap (e.g. the CNPG Cluster briefly not-Ready) never prunes a healthy composed
+// Secret out from under auth.
+func (r *Reconciler) composeBaseSecrets(ctx context.Context, platform *otilmv1alpha1.Platform, bundle bom.Bundle, desired desiredSet, dbReady bool) (trustedCertsChecksum string, handled bool, res ctrl.Result, err error) {
+	if dbReady {
+		if aerr := r.reconcileAuthDBSecret(ctx, platform, bundle, desired); aerr != nil {
+			res, err = r.applyOrDegrade(ctx, platform, "AuthDBSecretError", aerr)
+			return "", true, res, err
+		}
+	} else {
+		desired.add(r, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: bundle.Wiring.AuthDBSecretName, Namespace: platform.Namespace}})
+	}
+
+	// Compose the trusted-certificates bundle (user CA + generated admin CA) into an
+	// operator-managed Secret when the admin bootstrap requires it, and obtain its
+	// checksum so a bundle change rolls Core. When no composition is needed (no admin CA
+	// to fold in) the Secret is not rendered and the checksum is empty (Core references the
+	// user's Secret verbatim, unchanged).
+	trustedCertsChecksum, tcerr := r.reconcileTrustedCerts(ctx, platform, desired)
+	if tcerr != nil {
+		res, err = r.applyOrDegrade(ctx, platform, "TrustedCertsError", tcerr)
+		return "", true, res, err
+	}
+	return trustedCertsChecksum, false, ctrl.Result{}, nil
+}
+
+// coreRollChecksums carries the per-pass config-checksum inputs composeAndApplyBase computes
+// once — Core's combined checksum (trusted-certs + relayed OIDC client Secret + in-pod scripts),
+// the gateway's kong.yml checksum, and whether Core's checksum is currently FROZEN behind its
+// first migration — so applyBaseObject can stamp every rendered object without recomputing them.
+type coreRollChecksums struct {
+	core       string
+	gateway    string
+	frozen     string
+	coreExists bool
+	coreReady  bool
+}
+
+// applyBaseObject stamps and server-side-applies one object RenderPlatformBase produced, after
+// enforcing STOP-BEFORE-START and the staged-cutover Core withhold.
+//
+// handled=true means a failure short-circuits the pass (res/err are composeAndApplyBase's
+// answer); switching reports whether the caller must remember a workload-kind switch is still
+// draining. Neither the withheld-pending-delete nor the held-back-for-cutover case falls
+// through to the stamp/apply below — each returns as soon as it decides not to apply this pass.
+func (r *Reconciler) applyBaseObject(ctx context.Context, platform *otilmv1alpha1.Platform, desired desiredSet, mig migrationRender, sums coreRollChecksums, obj client.Object) (switching, handled bool, res ctrl.Result, err error) {
+	// STOP-BEFORE-START, ahead of every other per-object rule. A component whose
+	// workloadType changed still has its previous kind in the cluster; applying the new
+	// kind now would run both at once.
+	//
+	// It must come before the mig.holdCore branch: a held Core is added to `desired` and
+	// skipped, so a check placed after it would never see Core at all — while the
+	// post-apply prune, which keys on the NEW GVK only, would still reclaim the old one.
+	//
+	// NEVER while a messaging migration is recorded: the migration gate refuses that
+	// combination outright (guardMigrationWorkloadKind), so reaching here with one in
+	// flight would mean the refusal was skipped. Deleting a workload the fence is tracking
+	// is the one thing that must not happen by accident, so the condition is re-stated here
+	// rather than assumed.
+	if !migrationInFlight(platform) {
+		withhold, serr := r.stopSupersededWorkload(ctx, platform, desired, obj)
+		if serr != nil {
+			res, err = r.applyOrDegrade(ctx, platform, reasonWorkloadKindSwitchError, serr)
+			return true, true, res, err
+		}
+		if withhold {
+			return true, false, ctrl.Result{}, nil
+		}
+	}
+	// A staged messaging cutover WITHHOLDS Core's workload until the target topology is
+	// declared and the provisioning service is answering again: Core's proxy-path init
+	// container retries against that service until it responds, so rolling Core onto the
+	// target bundle any earlier produces a pod that can never become Ready. Everything else
+	// (including Core's own Service/ServiceAccount/ConfigMaps) is applied normally, and the
+	// withheld workload stays in the desired set so the post-apply prune keeps it.
+	if mig.holdCore && isCoreWorkload(obj) {
+		desired.add(r, obj)
+		return false, false, ctrl.Result{}, nil
+	}
+	// Stamp the per-component config checksums onto their pod templates so a change in config
+	// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
+	// relayed OIDC client Secret + in-pod scripts ConfigMap) and the gateway (kong.yml). Each
+	// stamp is a no-op for non-matching objects / an empty checksum.
+	coreStamp := sums.core
+	if isCoreWorkload(obj) && sums.coreExists && !sums.coreReady && sums.frozen != "" {
+		coreStamp = sums.frozen // freeze during the first migration; unfreeze once Core is Ready
+	}
+	platformbuilder.StampConfigChecksum(obj, coreStamp)
+	platformbuilder.StampGatewayConfigChecksum(obj, sums.gateway)
+	if aerr := r.apply(ctx, platform, obj, desired); aerr != nil {
+		// An SSA apply can fail transiently (a Conflict from a competing field manager, an
+		// API timeout) — requeue with backoff WITHOUT degrading; only a deterministic apply
+		// failure degrades. applyOrDegrade routes by transience.
+		res, err = r.applyOrDegrade(ctx, platform, "ApplyError",
+			fmt.Errorf("applying %T %q: %w", obj, obj.GetName(), aerr))
+		return false, true, res, err
+	}
+	return false, false, ctrl.Result{}, nil
+}
+
 // composeAndApplyBase composes the operator-managed auth-DB and trusted-certs Secrets, then
 // renders and server-side-applies every base object the Platform owns (everything except the
 // edge). RenderPlatformBase is the single source of truth for the rendered output; the
@@ -758,40 +891,11 @@ func (r *Reconciler) gateManagedDependencies(ctx context.Context, platform *otil
 // mig carries the migration gate's answer: the bundle every builder here resolves against, and
 // (during a staged messaging cutover) whether Core's workload must be WITHHELD from this pass's
 // apply so Core keeps running the pod template it is already Ready on.
-func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, mig migrationRender, desired desiredSet, dbReady bool) (handled bool, res ctrl.Result, err error) {
+func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1alpha1.Platform, mig migrationRender, desired desiredSet, dbReady bool) (switching bool, handled bool, res ctrl.Result, err error) {
 	bundle := mig.bundle
-	// Compose the auth .NET DB connection string into an operator-managed Secret
-	// before applying workloads, so auth's secretKeyRef resolves. Skip it while a
-	// managed database is not yet ready (its generated credentials Secret does not exist
-	// yet) — gateDatabase already requested a requeue, and auth waits on the
-	// composed Secret via its secretKeyRef in the meantime (no Degraded). While skipping,
-	// PRESERVE any already-composed auth-db Secret in the desired set so a transient
-	// DatabaseReady flap (e.g. the CNPG Cluster briefly not-Ready) never prunes a healthy
-	// composed Secret out from under auth.
-	if dbReady {
-		if aerr := r.reconcileAuthDBSecret(ctx, platform, bundle, desired); aerr != nil {
-			// A composed-Secret write can hit a transient SSA/update conflict (requeue, no
-			// degrade); a credentials-Secret read failure is otherwise deterministic. Never
-			// embeds the composed value/credentials.
-			res, err = r.applyOrDegrade(ctx, platform, "AuthDBSecretError", aerr)
-			return true, res, err
-		}
-	} else {
-		desired.add(r, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: bundle.Wiring.AuthDBSecretName, Namespace: platform.Namespace}})
-	}
-
-	// Compose the trusted-certificates bundle (user CA + generated admin CA) into an
-	// operator-managed Secret when the admin bootstrap requires it, and obtain its
-	// checksum so a bundle change rolls Core. When no composition is needed (no admin CA
-	// to fold in) the
-	// Secret is not rendered and the checksum is empty (Core references the user's
-	// Secret verbatim, unchanged).
-	trustedCertsChecksum, tcerr := r.reconcileTrustedCerts(ctx, platform, desired)
-	if tcerr != nil {
-		// A transient SSA conflict applying the composed bundle requeues without degrading; a
-		// Secret-read failure is otherwise deterministic. Never embeds cert material.
-		res, err = r.applyOrDegrade(ctx, platform, "TrustedCertsError", tcerr)
-		return true, res, err
+	trustedCertsChecksum, handled, res, err := r.composeBaseSecrets(ctx, platform, bundle, desired, dbReady)
+	if handled {
+		return false, true, res, err
 	}
 
 	// Fold the relayed OIDC client Secret AND Core's in-pod scripts ConfigMap into Core's
@@ -831,37 +935,38 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 	// the config-roll is held back. The Helm chart never hits the mid-migration roll because Helm
 	// deploys Core once with all config up front — this makes the operator match that.
 	coreExists, coreReady, coreFrozenChecksum := r.coreWorkloadStatus(ctx, platform)
+	sums := coreRollChecksums{
+		core: coreChecksum, gateway: gatewayChecksum, frozen: coreFrozenChecksum,
+		coreExists: coreExists, coreReady: coreReady,
+	}
 	for _, obj := range platformbuilder.RenderPlatformBase(platform) {
-		// A staged messaging cutover WITHHOLDS Core's workload until the target topology is
-		// declared and the provisioning service is answering again: Core's proxy-path init
-		// container retries against that service until it responds, so rolling Core onto the
-		// target bundle any earlier produces a pod that can never become Ready. Everything else
-		// (including Core's own Service/ServiceAccount/ConfigMaps) is applied normally, and the
-		// withheld workload stays in the desired set so the post-apply prune keeps it.
-		if mig.holdCore && isCoreWorkload(obj) {
-			desired.add(r, obj)
-			continue
+		objSwitching, objHandled, objRes, objErr := r.applyBaseObject(ctx, platform, desired, mig, sums, obj)
+		if objHandled {
+			return objSwitching, true, objRes, objErr
 		}
-		// Stamp the per-component config checksums onto their pod templates so a change in config
-		// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
-		// relayed OIDC client Secret + in-pod scripts ConfigMap) and the gateway (kong.yml). Each
-		// stamp is a no-op for non-matching objects / an empty checksum.
-		coreStamp := coreChecksum
-		if isCoreWorkload(obj) && coreExists && !coreReady && coreFrozenChecksum != "" {
-			coreStamp = coreFrozenChecksum // freeze during the first migration; unfreeze once Core is Ready
-		}
-		platformbuilder.StampConfigChecksum(obj, coreStamp)
-		platformbuilder.StampGatewayConfigChecksum(obj, gatewayChecksum)
-		if aerr := r.apply(ctx, platform, obj, desired); aerr != nil {
-			// An SSA apply can fail transiently (a Conflict from a competing field manager, an
-			// API timeout) — requeue with backoff WITHOUT degrading; only a deterministic apply
-			// failure degrades. applyOrDegrade routes by transience.
-			res, err = r.applyOrDegrade(ctx, platform, "ApplyError",
-				fmt.Errorf("applying %T %q: %w", obj, obj.GetName(), aerr))
-			return true, res, err
+		if objSwitching {
+			switching = true
 		}
 	}
-	return false, ctrl.Result{}, nil
+
+	// Retire the durable kind-switch marker once the cluster actually carries the rendered kinds
+	// — present AND not terminating. It runs AFTER this pass's applies, so the object the loop
+	// has just created counts; while it survives, the pass keeps requeueing on the switch cadence
+	// AND the migration engine keeps refusing to start, which is exactly the window it exists to
+	// cover (including a revert to the original kind whose own delete is still draining).
+	//
+	// Skipped while a migration is recorded: the migration gate refuses that combination before
+	// this function is ever reached, so evaluating it here would only be able to act on a state
+	// the gate has already ruled out.
+	if !migrationInFlight(platform) {
+		stillSwitching, cerr := r.clearWorkloadKindSwitchIfSettled(ctx, platform)
+		if cerr != nil {
+			res, err = r.applyOrDegrade(ctx, platform, reasonWorkloadKindSwitchError, cerr)
+			return true, true, res, err
+		}
+		switching = switching || stillSwitching
+	}
+	return switching, false, ctrl.Result{}, nil
 }
 
 // gateEdgeAdminAndMonitors runs the three CRD-gated adjuncts that follow the base apply — the

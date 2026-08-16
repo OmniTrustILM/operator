@@ -66,6 +66,15 @@ const (
 	// the recorded state cleared) because the user reverted to the version it started from
 	// while that was still reversible.
 	migrationActionAbort migrationAction = "abort"
+	// migrationActionVerifyPin means the requested move WOULD rename the managed virtual host,
+	// and the only thing suppressing that rename is spec.messaging.virtualHost — a pin that
+	// resolves identically under both bundles. Whether that is safe depends on a fact this
+	// layer cannot see: whether the platform's LIVE topology is already on the pinned vhost.
+	// A pin that predates the move means it is (no migration, the documented path); a pin made
+	// in the SAME update as the move means it is not, and skipping the migration would strand
+	// the source topology. So the decision is handed to the gate, which asks the cluster — see
+	// Reconciler.guardMigrationVirtualHostPin.
+	migrationActionVerifyPin migrationAction = "verifyPin"
 )
 
 // Condition/Event reasons the trigger layer produces. They are identity-free labels.
@@ -182,6 +191,9 @@ func decideMigrationStart(p *otilmv1alpha1.Platform, from, to bom.Bundle) migrat
 	// The effective vhost is the trigger: unchanged means the source and target topologies
 	// share their object identities and an ordinary apply converges them additively.
 	if platformbuilder.ManagedVirtualHostFor(p, from) == platformbuilder.ManagedVirtualHostFor(p, to) {
+		if virtualHostPinSuppressesRename(p, from, to) {
+			return migrationDecision{Action: migrationActionVerifyPin}
+		}
 		return migrationDecision{Action: migrationActionNone}
 	}
 
@@ -199,6 +211,21 @@ func decideMigrationStart(p *otilmv1alpha1.Platform, from, to bom.Bundle) migrat
 	}
 
 	return migrationDecision{Action: migrationActionStart}
+}
+
+// virtualHostPinSuppressesRename reports whether the ONLY reason the effective virtual hosts
+// match across a version move is the platform's own spec.messaging.virtualHost: the two
+// bundles default to DIFFERENT vhosts, and the pin overrides both.
+//
+// It is the precondition of migrationActionVerifyPin and nothing more — it says a pin is
+// standing between this move and a migration, NOT that the pin is illegitimate. A pin that was
+// already in effect while the platform ran its source version is exactly the documented
+// no-migration path (the topology has always lived on that one vhost, so the move renames
+// nothing); a pin introduced in the same update as the version bump only LOOKS like it, and
+// telling the two apart needs the cluster.
+func virtualHostPinSuppressesRename(p *otilmv1alpha1.Platform, from, to bom.Bundle) bool {
+	return p.Spec.Messaging.VirtualHost != "" &&
+		from.Messaging.DefaultVirtualHost != to.Messaging.DefaultVirtualHost
 }
 
 // decideExternalMessagingMigration decides a version move for a platform on an EXTERNAL broker.
@@ -222,6 +249,23 @@ func decideExternalMessagingMigration(p *otilmv1alpha1.Platform, from, to bom.Bu
 			"the current ones still hold, re-enrol remote proxies, then set spec.messaging.migrationAcknowledgedForVersion to %q to proceed",
 			running, requested, requested),
 	}
+}
+
+// messagingTopologyDiffers reports whether moving between two bundles changes the messaging
+// topology the platform depends on, in whichever way matters for the platform's own broker
+// mode: the effective virtual host for a MANAGED broker (the operator owns that topology and
+// migrates it), and an exchange RENAME for an EXTERNAL one (the operator owns nothing there,
+// so what matters is whether the target stops publishing to something the source used).
+//
+// It is the same question decideMigrationStart asks, factored out so a caller that has no
+// migration to decide — the unrecorded-running-version guard, which must judge a move the
+// engine would otherwise treat as a fresh install — asks it identically rather than growing a
+// second, drifting definition.
+func messagingTopologyDiffers(p *otilmv1alpha1.Platform, from, to bom.Bundle) bool {
+	if !platformbuilder.MessagingManaged(p) {
+		return messagingExchangesRenamed(from, to)
+	}
+	return platformbuilder.ManagedVirtualHostFor(p, from) != platformbuilder.ManagedVirtualHostFor(p, to)
 }
 
 // messagingExchangesRenamed reports whether the target bundle STOPS serving an exchange the

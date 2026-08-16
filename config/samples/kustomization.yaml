@@ -4,6 +4,8 @@ resources:
 - connector_minimal.yaml
 - connector_full.yaml
 - connector_with_registration.yaml
+- connector_otpki.yaml
+- connector_timestamp_formatting.yaml
 - v1alpha1_proxy.yaml
 - proxy_minimal.yaml
 - proxy_full.yaml

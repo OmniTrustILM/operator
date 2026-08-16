@@ -22,14 +22,14 @@ docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 echo "Starting SonarQube Community on port ${SONAR_PORT}..."
 docker run -d --name "${CONTAINER_NAME}" -p "${SONAR_PORT}:9000" sonarqube:community >/dev/null
 
-echo "Waiting for SonarQube to be ready (up to 2 minutes)..."
-for i in $(seq 1 120); do
+echo "Waiting for SonarQube to be ready (up to 5 minutes)..."
+for i in $(seq 1 300); do
     if curl -sf "${SONAR_URL}/api/system/status" 2>/dev/null | grep -q '"status":"UP"'; then
         echo "SonarQube is ready."
         break
     fi
     if [ "$i" -eq 120 ]; then
-        echo "ERROR: SonarQube failed to start within 2 minutes."
+        echo "ERROR: SonarQube failed to start within 5 minutes."
         exit 1
     fi
     sleep 1

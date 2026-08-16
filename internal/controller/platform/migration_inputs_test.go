@@ -29,6 +29,9 @@ package platform
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -39,6 +42,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
+	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
 // TestMigrationInputDriftBlocksTheMigration: each of these edits changes what "the source
@@ -69,6 +74,18 @@ func TestMigrationInputDriftBlocksTheMigration(t *testing.T) {
 				p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
 					Mode: "external", APIURL: "http://provisioner.example.com",
 				}
+			},
+		},
+		{
+			// The migration started with the monitor disabled (migratingGatePlatform sets no
+			// spec.core.timeQualityMonitor at all): guardMigrationTimeQualityMonitor refuses to
+			// START a migration while it is enabled, so enabling it mid-flight is the only way
+			// this drift can ever occur — and it must still be caught, because the sidecar rides
+			// Core's pod (never fenced) and would refill the very queue the drain is waiting to
+			// empty.
+			name: "the time-quality-monitor sidecar is enabled mid-flight",
+			drift: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: true}
 			},
 		},
 	}
@@ -106,6 +123,73 @@ func TestMigrationInputDriftBlocksTheMigration(t *testing.T) {
 			assert.Contains(t, strings.Join(drainEvents(rec), " "), reasonMigrationInputsChanged)
 		})
 	}
+}
+
+// TestMigrationInputFingerprintStaysCompatibleWithAPreExistingRecord is the compat scenario a
+// review of the monitor-fingerprint addition found: a migration recorded by an operator build
+// that PREDATES the time-quality-monitor fingerprint term entirely carries an InputsHash
+// computed with NO monitor consideration whatsoever — not even "timeQualityMonitor=false", since
+// that line did not exist yet. Upgrading the operator to this build and resuming that migration
+// (with the monitor left disabled, the only state a pre-existing record's platform can be in)
+// must not trip the drift guard.
+//
+// This is reproduced directly rather than inferred: the test computes the hash the exact way the
+// pre-existing 13-field fingerprint did (no 14th line for the monitor, at all) and stamps it onto
+// an in-flight record as if an older build had written it, then runs the real gate against it.
+func TestMigrationInputFingerprintStaysCompatibleWithAPreExistingRecord(t *testing.T) {
+	fenced := []otilmv1alpha1.FencedWorkload{{Name: schedulerWorkloadName, Kind: kindDeployment, Replicas: 3}}
+	p := migratingGatePlatform(otilmv1alpha1.MigrationPhaseDraining, fenced...)
+	require.Nil(t, p.Spec.Core.TimeQualityMonitor, "the fixture's premise: a pre-existing record's platform has the monitor unset")
+
+	u := p.Status.Upgrade
+	from, fromKnown := bom.BundleFor(u.FromVersion)
+	to, toKnown := bom.BundleFor(u.ToVersion)
+	require.True(t, fromKnown)
+	require.True(t, toKnown)
+	src := p.DeepCopy()
+	src.Spec.Version = u.FromVersion
+	conn := platformbuilder.ResolveMessagingConnection(src)
+	preExistingInputs := strings.Join([]string{
+		"from=" + u.FromVersion,
+		"to=" + u.ToVersion,
+		"mode=" + p.Spec.Messaging.Mode,
+		"broker=" + p.Spec.Messaging.BrokerType,
+		"sourceVhost=" + platformbuilder.ManagedVirtualHostFor(src, from),
+		"targetVhost=" + platformbuilder.ManagedVirtualHostFor(src, to),
+		"provisioning=" + provisioningModeOf(p),
+		"host=" + conn.Host,
+		"port=" + fmt.Sprint(conn.Port),
+		"credentialsSecret=" + conn.CredentialsSecretName,
+		"administratorSecret=" + conn.AdministratorCredentialsSecretName,
+		"usernameKey=" + conn.UsernameKey,
+		"passwordKey=" + conn.PasswordKey,
+		// deliberately NO 14th line for the monitor — this is what a build before it existed
+		// would have hashed.
+	}, "\n")
+	sum := sha256.Sum256([]byte(preExistingInputs))
+	p.Status.Upgrade.InputsHash = hex.EncodeToString(sum[:])
+
+	// pinMigrationInputs (inside migrationReconciler) only fills an EMPTY hash, so the
+	// pre-existing value stamped above survives fixture setup unchanged.
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(0, 0)...)
+
+	render, handled, _, err := r.gateMessagingMigration(context.Background(),
+		storedPlatform(t, r), bundleFor(t, platformVersion219), platformVersion219)
+	require.NoError(t, err)
+	assert.False(t, handled,
+		"an operator upgrade must not trip false drift on a migration recorded before the monitor field existed")
+	assert.True(t, render.requeue, "the migration keeps advancing normally")
+
+	stored := storedPlatform(t, r)
+	assert.NotEqual(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
+	require.NotNil(t, stored.Status.Upgrade, "the migration it is protecting is not discarded")
+	assert.Equal(t, otilmv1alpha1.MigrationPhaseDraining, stored.Status.Upgrade.Phase)
+	cond := migrationCondition(stored)
+	if cond != nil {
+		assert.NotEqual(t, reasonMigrationInputsChanged, cond.Reason,
+			"the presence-conditional term must hash identically to the pre-existing shape when the monitor is off")
+	}
+	assert.NotContains(t, strings.Join(drainEvents(rec), " "), reasonMigrationInputsChanged)
 }
 
 // TestMigrationInputsAllowTheSteeringControls: the two fields an operator needs in order to get

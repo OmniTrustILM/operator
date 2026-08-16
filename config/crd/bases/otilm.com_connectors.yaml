@@ -401,8 +401,14 @@ spec:
                     description: Name is the registration name of the connector.
                     type: string
                   platformUrl:
-                    description: PlatformURL is the URL of the platform to register
-                      with.
+                    description: |-
+                      PlatformURL is the platform's BASE API URL — INCLUDING its /api prefix — that the
+                      operator posts the connector registration to, e.g. https://ilm.example.com/api.
+
+                      Core serves its REST API under /api and the operator appends ONLY the versioned endpoint
+                      (/v2/connector/register), so a platformUrl without the /api prefix produces a 404. A
+                      platform served under an additional path prefix carries that here too, e.g.
+                      https://gateway.example.com/ilm/api. A trailing slash is tolerated.
                     type: string
                 required:
                 - authType

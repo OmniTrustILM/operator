@@ -517,14 +517,14 @@ func TestResolveManagedKeycloakSCCPodTemplate(t *testing.T) {
 }
 
 // TestResolveManagedKeycloakAppliesTheme locks the ilm theme delivery for a version bundle that
-// ships it (the default 2.18.0 bundle): the pod template gains an SCC-clean init-theme container
+// ships it (the default bundle): the pod template gains an SCC-clean init-theme container
 // that stages the BOM keycloak-theme image into a dedicated emptyDir, the Keycloak container mounts
 // it at /opt/keycloak/themes, and the default realm selects it via loginTheme=ilm. This is the
 // operator's mirror of the chart's runtime theme layering; the inner loop locks the render so a
 // regression is caught without the Kind e2e. DefaultImageRegistry is applied first, mirroring how
 // RenderPlatform/the reconciler default the shared image coordinates before rendering.
 func TestResolveManagedKeycloakAppliesTheme(t *testing.T) {
-	p := managedKCPlatform(nil) // spec.version "" → default 2.18.0 bundle (ships keycloak-theme)
+	p := managedKCPlatform(nil) // spec.version "" → the default bundle (ships keycloak-theme)
 	DefaultImageRegistry(p)
 	kc := findManagedObj(ResolveManagedKeycloak(p), keycloakKind)
 	require.NotNil(t, kc)

@@ -1,0 +1,63 @@
+# connector_otpki.yaml — the OT PKI connector (authority provider).
+#
+# The image ships from the PRIVATE ILM repository, so the pull secret is mandatory:
+#   kubectl create secret docker-registry registry-credentials -n ilm \
+#     --docker-server=hub.omnitrustregistry.com --docker-username=<user> --docker-password=<token>
+#
+# The connector's login password key is delivered as a POD ENV via secretKeyRef — the operator
+# never inlines it into the CR:
+#   kubectl create secret generic otpki-connector-secret -n ilm \
+#     --from-literal=login_password_key=<key>
+apiVersion: otilm.com/v1alpha1
+kind: Connector
+metadata:
+  name: otpki-connector
+  namespace: ilm
+  labels:
+    app.kubernetes.io/part-of: ilm-platform
+spec:
+  image:
+    repository: hub.omnitrustregistry.com/ilm-private/otpki-connector
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+    pullSecrets:
+      - registry-credentials
+
+  service:
+    port: 8080
+    type: ClusterIP
+
+  env:
+    - name: PORT
+      value: "8080"
+    - name: LOG_LEVEL
+      value: "INFO"
+
+  secretRefs:
+    - name: otpki-connector-secret
+      type: env
+      keys:
+        - secretKey: login_password_key
+          envVar: OTPKI_LOGIN_PASSWORD_KEY
+
+  probes:
+    readiness:
+      path: /v2/health/readiness
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      failureThreshold: 3
+    startup:
+      path: /v2/health/liveness
+      initialDelaySeconds: 10
+      periodSeconds: 10
+      failureThreshold: 10
+
+  registration:
+    name: "OT PKI"
+    # The platform's BASE API URL, /api prefix INCLUDED — the operator appends only
+    # /v2/connector/register. Without the /api this registration 404s.
+    platformUrl: "http://core.ilm.svc.cluster.local:8080/api"
+    authType: none
+    customAttributes:
+      - name: description
+        content: "OT PKI authority provider"

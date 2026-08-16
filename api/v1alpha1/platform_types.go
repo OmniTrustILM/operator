@@ -233,6 +233,11 @@ type MessagingSpec struct {
 	// Management controls exposure of the broker's management UI.
 	// +optional
 	Management MessagingManagementSpec `json:"management,omitempty"`
+	// TimeQuality toggles Core's time-quality messaging integration. The monitor SIDECAR is a
+	// separate, independent control (spec.core.timeQualityMonitor) — enabling one never
+	// enables the other.
+	// +optional
+	TimeQuality TimeQualitySpec `json:"timeQuality,omitempty"`
 	// MigrationAcknowledgedForVersion is the external-broker escape hatch for a messaging
 	// version migration: when mode=external the operator does not own the broker and
 	// cannot migrate a foreign topology itself, so a platform upgrade whose target version
@@ -256,6 +261,23 @@ type MessagingManagementSpec struct {
 	// no /mq route.
 	// +optional
 	Expose bool `json:"expose,omitempty"`
+}
+
+// TimeQualitySpec toggles Core's TIME-QUALITY MESSAGING INTEGRATION — the platform-side half
+// of the time-quality feature pair. It is deliberately INDEPENDENT of the time-quality-monitor
+// sidecar (spec.core.timeQualityMonitor): the Helm chart separates the two so an EXTERNAL
+// monitor, or a staged rollout (integration first, monitor later), is possible, and the
+// operator mirrors that split exactly.
+//
+// It renders the selected platform version's time-quality env var on Core (2.19.0+:
+// MESSAGING_TIME_QUALITY_ENABLED). A bundle whose wiring profile does not name that variable
+// renders NOTHING, so the same CR stays portable across platform versions.
+type TimeQualitySpec struct {
+	// Enabled turns on Core's time-quality messaging integration. Core then publishes its
+	// time-quality configuration and consumes the monitor's request/result queues, which the
+	// managed topology provisions from 2.18.0 onward.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // ManagedMessagingSpec configures the operator-provisioned RabbitMQ cluster rendered as
@@ -649,12 +671,72 @@ type QueueArgument struct {
 	Value apiextensionsv1.JSON `json:"value"`
 }
 
+// TimeQualityMonitorSpec configures the OPTIONAL time-quality-monitor SIDECAR on the Core pod
+// — the second, INDEPENDENT half of the time-quality feature pair (the first is
+// spec.messaging.timeQuality, which toggles Core's own integration). The chart keeps them
+// separate so an EXTERNAL monitor, or a staged rollout, is possible, and the operator mirrors
+// that: enabling one never enables the other.
+//
+// The sidecar's image comes from the selected platform version's bundle (2.19.0+, published to
+// a PRIVATE repository), so a bundle that does not carry that image renders no sidecar at all
+// and the same CR stays portable across platform versions — the same version-gating the
+// bundled provisioning service uses.
+//
+// CREDENTIALS. The monitor authenticates to the broker as the platform's dedicated monitor
+// user. In MANAGED messaging the operator wires the topology-generated monitor-user Secret
+// automatically and Credentials may be left unset. In EXTERNAL messaging the operator manages
+// no broker users, so Credentials.secretRef is REQUIRED (enforced by a PlatformSpec CEL rule).
+// No credential value is ever held here — only a Secret reference.
+//
+// TWO BEHAVIORAL COUPLINGS to know before enabling this:
+//
+//  1. Enabling the monitor BLOCKS a messaging migration from starting. The sidecar rides
+//     Core's pod, which a migration's fence never stops, so an enabled monitor is an
+//     unfenced producer the drain cannot account for — disable it for the migration window
+//     (spec.version move), then re-enable it once the move completes.
+//  2. The sidecar's readiness probe gates the CORE POD's readiness (chart parity): Kubernetes
+//     requires every container in a pod to be Ready before the pod is, so a failing monitor
+//     takes Core out of its Service's endpoints along with it. The escape hatch is disabling
+//     the sidecar (Enabled: false).
+type TimeQualityMonitorSpec struct {
+	// Enabled deploys the time-quality-monitor sidecar on the Core pod.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Image overrides the sidecar's image settings per field. Unset fields fall back to the
+	// shared spec.common.image and then the version bundle (whose per-component repository —
+	// the private one this image ships from — wins over a stock shared repository). PullSecrets
+	// set here are unioned into the Core POD's imagePullSecrets, which is how a private sidecar
+	// image is pulled alongside public component images.
+	// +optional
+	Image ImageSpec `json:"image,omitempty"`
+
+	// Resources overrides the sidecar container's resource requirements (requests/limits).
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Credentials references the Secret holding the monitor's broker username/password, and
+	// lets the user map the in-Secret keys. REQUIRED when messaging.mode=external; ignored when
+	// messaging.mode=managed (the operator reads back the topology-generated monitor-user
+	// Secret, whose keys are the upstream operator's).
+	// +optional
+	Credentials *CredentialsRef `json:"credentials,omitempty"`
+}
+
 // CoreSpec configures the ILM Core component. It embeds the shared ComponentSpec
 // (image, replicas, resources, env, secret/configmap refs, volumes, probes, security
 // context, pod metadata, scheduling, init/sidecar passthrough, serviceAccount, service,
 // metrics) and adds the Core-only wiring field ClientCertHeader (the client-certificate
 // forwarding header the design review found is consumed solely by Core). Provisioning is a
 // platform-level concern and lives at spec.provisioning, not here.
+//
+// The XValidation rules mirror the Helm chart's platformInstanceId guards. An explicit
+// instance id is ONE value shared by every replica, and Core folds it into the certificate
+// serial numbers it issues — so a multi-replica Core configured with an explicit id would emit
+// IDENTICAL serials from different pods. Both rules are SPEC-ONLY (they fire only when
+// instanceId is set), so no CR that exists today can be wedged by them.
+// +kubebuilder:validation:XValidation:rule="!has(self.instanceId) || !has(self.replicas) || self.replicas <= 1",message="core.instanceId requires a single-replica core: one explicit id is shared by every replica, which would emit identical certificate serial numbers — for multi-replica core use workloadType: StatefulSet and leave instanceId unset"
+// +kubebuilder:validation:XValidation:rule="!has(self.instanceId) || !has(self.autoscaling)",message="core.instanceId cannot be combined with core.autoscaling: an autoscaled core is multi-replica by definition — use workloadType: StatefulSet and leave instanceId unset"
 type CoreSpec struct {
 	// ComponentSpec is the shared per-component override surface (inline, so the CRD
 	// stays flat).
@@ -665,6 +747,37 @@ type CoreSpec struct {
 	// application database — this only covers the client-certificate forwarding header.
 	// +optional
 	ClientCertHeader string `json:"clientCertHeader,omitempty"`
+	// InstanceID is Core's explicit platform instance id (0–65535), rendered as the selected
+	// platform version's instance-id env var (2.19.0+: PLATFORM_INSTANCE_ID). Core folds it
+	// into the certificate serial numbers it issues, so the value must be UNIQUE per running
+	// Core pod.
+	//
+	// Set it ONLY on a single-replica Core (the CEL rules on this type, and the HA-profile rule
+	// on PlatformSpec, reject every multi-replica combination). Leave it UNSET for the derived
+	// paths: workloadType=StatefulSet derives a unique id per pod from the pod ordinal, and a
+	// Deployment lets Core derive one from its pod IP (two pods sharing the last two IPv4
+	// octets then collide, which is why StatefulSet is the multi-replica shape).
+	//
+	// A bundle whose wiring does not name the instance-id variable (pre-2.19.0) renders
+	// nothing, so the same CR stays portable across platform versions.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	InstanceID *int32 `json:"instanceId,omitempty"`
+	// TimeQualityMonitor configures the optional time-quality-monitor sidecar on the Core pod.
+	// It is INDEPENDENT of spec.messaging.timeQuality (Core's own integration): the two are
+	// separate controls, and either can be used without the other.
+	//
+	// Two behavioral couplings to know before enabling it: (1) it BLOCKS a messaging
+	// migration from starting — the sidecar rides Core's pod, which a migration's fence
+	// never stops, so an enabled monitor is an unfenced producer the drain cannot account
+	// for; disable it for the migration window (the spec.version move), then re-enable it
+	// once the move completes. (2) its readiness probe gates the CORE POD's readiness
+	// (chart parity) — Kubernetes requires every container in a pod to be Ready before the
+	// pod is, so a failing monitor takes Core out of its Service's endpoints along with it;
+	// disabling the sidecar is the escape hatch.
+	// +optional
+	TimeQualityMonitor *TimeQualityMonitorSpec `json:"timeQualityMonitor,omitempty"`
 }
 
 // SchedulerSpec configures the scheduler component. It embeds the shared
@@ -1144,6 +1257,19 @@ const (
 // RegisterAdminSpec) because keycloak.mode is in a sibling sub-tree the RegisterAdminSpec
 // rule cannot see. The certificate method has no such requirement.
 // +kubebuilder:validation:XValidation:rule="!has(self.registerAdmin) || !has(self.registerAdmin.password) || !has(self.registerAdmin.password.enabled) || !self.registerAdmin.password.enabled || (has(self.keycloak) && self.keycloak.mode == 'managed')",message="registerAdmin.password requires keycloak.mode=managed (the operator creates the realm user via the Keycloak admin API)"
+//
+// A fourth cross-field rule closes the HA hole in core.instanceId's own guards: the HA profile
+// gives a component that sets NEITHER replicas NOR autoscaling a multi-replica default, which
+// the CoreSpec rules cannot see (highAvailability is in a sibling sub-tree). With HA enabled,
+// an explicit instanceId therefore requires an explicit single-replica core.
+// +kubebuilder:validation:XValidation:rule="!has(self.core) || !has(self.core.instanceId) || !has(self.highAvailability) || !has(self.highAvailability.enabled) || !self.highAvailability.enabled || (has(self.core.replicas) && self.core.replicas <= 1)",message="core.instanceId with highAvailability.enabled requires an explicit single-replica core (set core.replicas: 1): the HA profile would otherwise give core a multi-replica default, and one explicit id shared by every replica emits identical certificate serial numbers"
+//
+// A fifth cross-field rule gates the time-quality-monitor sidecar's credentials on the broker
+// mode: with a MANAGED broker the operator wires the topology-generated monitor-user Secret,
+// but with an EXTERNAL broker it manages no users and has nothing to wire, so the CR must name
+// a Secret. It lives here (not on TimeQualityMonitorSpec) because messaging.mode is in a
+// sibling sub-tree that rule cannot see.
+// +kubebuilder:validation:XValidation:rule="!has(self.core) || !has(self.core.timeQualityMonitor) || !has(self.core.timeQualityMonitor.enabled) || !self.core.timeQualityMonitor.enabled || self.messaging.mode == 'managed' || (has(self.core.timeQualityMonitor.credentials) && has(self.core.timeQualityMonitor.credentials.secretRef) && self.core.timeQualityMonitor.credentials.secretRef.size() > 0)",message="core.timeQualityMonitor.credentials.secretRef is required when messaging.mode=external (with an external broker the operator has no generated monitor-user Secret to wire)"
 type PlatformSpec struct {
 	// Version selects which platform version bundle the operator reconciles this
 	// Platform against — the tested set of component images, env-var wiring, and managed-

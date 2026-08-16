@@ -323,19 +323,27 @@ func TestPlatformsForSecret(t *testing.T) {
 func TestReferencedSecretNames(t *testing.T) {
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
+			Version:       platformVersion219,
 			Common:        otilmv1alpha1.CommonSpec{TrustedCertificates: otilmv1alpha1.TrustedCertificatesSpec{SecretRef: "trust"}},
 			Database:      otilmv1alpha1.DatabaseSpec{Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "db"}},
 			Messaging:     otilmv1alpha1.MessagingSpec{Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "mq"}},
 			Provisioning:  &otilmv1alpha1.ProvisioningSpec{APIKeySecretRef: "apikey"},
 			RegisterAdmin: &otilmv1alpha1.RegisterAdminSpec{Certificate: &otilmv1alpha1.AdminCertificateSpec{SecretRef: stringPtr("admincert")}},
 			Edge:          &otilmv1alpha1.EdgeSpec{TLS: &otilmv1alpha1.EdgeTLSSpec{SecretRef: stringPtr("edgetls")}},
+			Core: otilmv1alpha1.CoreSpec{
+				TimeQualityMonitor: &otilmv1alpha1.TimeQualityMonitorSpec{
+					Enabled:     true,
+					Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "tqmonitor"},
+				},
+			},
 		},
 	}
 	assert.ElementsMatch(t,
-		[]string{"db", "mq", "trust", "apikey", "admincert", "edgetls"},
-		referencedSecretNames(p))
+		[]string{"db", "mq", "trust", "apikey", "admincert", "edgetls", "tqmonitor"},
+		referencedSecretNames(p),
+		"the monitor sidecar's credentials Secret joins the watch when it renders")
 
-	// Empty/unset refs are skipped.
+	// Empty/unset refs are skipped, including a Platform whose monitor sidecar does not render.
 	assert.Empty(t, referencedSecretNames(&otilmv1alpha1.Platform{}))
 }
 

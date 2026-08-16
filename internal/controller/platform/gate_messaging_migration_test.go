@@ -375,6 +375,57 @@ func TestGateMessagingMigrationStartRendersTheSourceTopology(t *testing.T) {
 		"the objects the pass would apply are the SOURCE topology, whole")
 }
 
+// TestGateMessagingMigrationRefusesToStartWhileTimeQualityMonitorEnabled: the time-quality-monitor
+// sidecar rides Core's pod, and Core is deliberately never a fence target (it is the drain's
+// CONSUMER) — so an enabled monitor is an unfenced PRODUCER the fence cannot see or stop. Refused
+// BEFORE anything is recorded, so nothing is fenced and there is nothing to unwind.
+func TestGateMessagingMigrationRefusesToStartWhileTimeQualityMonitorEnabled(t *testing.T) {
+	p := migrationGatePlatform()
+	p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: true}
+	_, to := migrationBundles(t)
+	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
+
+	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err, steadyStateNotFailure)
+	assert.True(t, handled, "nothing may be fenced while the monitor is an unfenced producer")
+	assert.Equal(t, ctrl.Result{}, res)
+
+	stored := storedPlatform(t, r)
+	assert.Equal(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
+	cond := migrationCondition(stored)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonMigrationTimeQualityMonitorEnabled, cond.Reason)
+	assert.Contains(t, cond.Message, "spec.core.timeQualityMonitor")
+	assert.Contains(t, cond.Message, "revert spec.version to "+platformVersion218,
+		"the message names the version to revert to, for a user who would rather not proceed right now")
+	assertNoBrokerCoordinates(t, cond.Message)
+	assert.Nil(t, stored.Status.Upgrade, "nothing may be recorded — the refusal runs before beginMigration")
+	assert.Contains(t, strings.Join(drainEvents(rec), " "), reasonMigrationTimeQualityMonitorEnabled)
+
+	assert.Equal(t, int32(2), replicasOf(t, r, gatewayWorkloadName), "nothing is fenced")
+	assert.Equal(t, int32(3), replicasOf(t, r, schedulerWorkloadName), "nothing is fenced")
+}
+
+// TestGateMessagingMigrationStartsWithTimeQualityMonitorDisabled is the control for
+// TestGateMessagingMigrationRefusesToStartWhileTimeQualityMonitorEnabled: with the sidecar
+// disabled (the default — spec.core.timeQualityMonitor unset), the migration starts exactly as
+// TestGateMessagingMigrationStartFencesAndHoldsTheSourceVersion proves, so the new guard refuses
+// only the specific case it exists for.
+func TestGateMessagingMigrationStartsWithTimeQualityMonitorDisabled(t *testing.T) {
+	p := migrationGatePlatform()
+	_, to := migrationBundles(t)
+	r, _ := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
+
+	_, handled, _, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
+	require.NoError(t, err)
+	assert.False(t, handled, "the migration starts normally when the monitor is disabled")
+
+	stored := storedPlatform(t, r)
+	require.NotNil(t, stored.Status.Upgrade, "the migration was recorded")
+	assert.NotEqual(t, otilmv1alpha1.PlatformPhaseDegraded, stored.Status.Phase)
+}
+
 // TestGateMessagingMigrationHoldsFencingWhileProducersRun: the fence patch is instantaneous,
 // the producers are not. Fencing must not hand over to the drain while pods are still up —
 // the drain would start counting an "empty" queue that is still being written to.
@@ -477,7 +528,7 @@ func TestGateMessagingMigrationRefusesAnUnrelatedVersion(t *testing.T) {
 	r, rec := migrationReconciler(t, p, interceptor.Funcs{})
 
 	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion217)
-	require.NoError(t, err, "a refusal is a steady state, not a reconcile failure")
+	require.NoError(t, err, steadyStateNotFailure)
 	assert.True(t, handled)
 	assert.Equal(t, ctrl.Result{}, res, "terminal until a spec edit re-enqueues the platform")
 
@@ -1042,7 +1093,7 @@ func TestGateMessagingMigrationRefusesAnUnknownRunningVersion(t *testing.T) {
 	r, rec := migrationReconciler(t, p, interceptor.Funcs{}, producerWorkloads(2, 3)...)
 
 	_, handled, res, err := r.gateMessagingMigration(context.Background(), p, to, platformVersion219)
-	require.NoError(t, err, "a refusal is a steady state, not a reconcile failure")
+	require.NoError(t, err, steadyStateNotFailure)
 	assert.True(t, handled, "nothing of the requested version may be rendered on a guess")
 	assert.Equal(t, ctrl.Result{}, res, "terminal until a spec edit re-enqueues the platform")
 

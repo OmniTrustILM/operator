@@ -31,13 +31,17 @@
 #     --from-literal=username=ilm --from-literal=password=<db-password>
 #
 # WHAT THE OPERATOR CREATES
-#   - A RabbitmqCluster named "ilm-messaging" (1 replica here), plus the topology CRs:
-#     a Vhost ("czertainly" by default; set messaging.virtualHost to change it), four
-#     Users (administrator/provisioner/proxy/core), their Permissions, the czertainly +
-#     czertainly-proxy Exchanges, the seven core.* Queues, and the six Bindings. The
-#     Topology Operator generates one "<user>-user-credentials" Secret per User; the
-#     operator wires Core/scheduler to the "ilm-messaging" Service and the core-user
-#     Secret. NONE of this is in the CR — no credentials, no coordinates.
+#   - A RabbitmqCluster named "ilm-messaging" (1 replica here), plus the topology CRs for the
+#     default 2.19.0 bundle: a Vhost ("/" by default; set messaging.virtualHost to change it),
+#     five Users (administrator/provisioner/proxy/core/monitor), their five Permissions, the
+#     ilm + ilm-proxy Exchanges, eleven Queues (core + the six core.* + provider.status-poll +
+#     the three time-quality.*) and ten Bindings. Every VHOST-BOUND name is scoped by the
+#     vhost — "ilm-messaging-default-vhost", "ilm-messaging-default-queue-core" and so on;
+#     Users are cluster-global and stay unscoped. Pinning the legacy "czertainly" vhost (or any
+#     vhost explicitly) renders the unscoped names instead. The Topology Operator generates one
+#     "<user>-user-credentials" Secret per User; the operator wires Core/scheduler to the
+#     "ilm-messaging" Service and the core-user Secret. NONE of this is in the CR — no
+#     credentials, no coordinates.
 #
 # DELETION (deletionPolicy)
 #   - Retain (the default): deleting this Platform LEAVES the RabbitmqCluster, its topology,
@@ -60,7 +64,7 @@ spec:
   messaging:
     mode: managed
     brokerType: rabbitmq
-    # virtualHost: czertainly   # optional; omit to use the chart default "czertainly"
+    # virtualHost: "/"          # optional; omit to use the 2.19.0 bundle default "/"
     managed:
       replicas: 1
       # version omitted → the RabbitMQ Cluster Operator uses its matched default server image.

@@ -211,10 +211,14 @@ func TestGateMessagingPresentClusterNotReadyWaits(t *testing.T) {
 	// Deletion safety: the applied cluster carries NO controller owner reference.
 	assert.Empty(t, applied.GetOwnerReferences(), "the managed cluster must carry no owner reference")
 
-	// A topology CR (the Vhost) must also have been applied.
+	// A topology CR (the Vhost) must also have been applied. The fixture pins no spec.version,
+	// so it runs the DEFAULT bundle — 2.19.0, whose "/" virtual host scopes vhost-bound names
+	// with "-default". Kept a literal (not ManagedMessagingVhostName) so a naming regression is
+	// a diff rather than a tautology; the unscoped legacy names stay frozen by the builder's
+	// own TestLegacyTopologyNamesAreFrozen, which is pinned to 2.18.0.
 	var vhost unstructured.Unstructured
 	vhost.SetGroupVersionKind(platformbuilder.ManagedMessagingClusterGVK().GroupVersion().WithKind("Vhost"))
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "ilm-messaging-vhost"}, &vhost))
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "ns", Name: "ilm-messaging-default-vhost"}, &vhost))
 	assert.Empty(t, vhost.GetOwnerReferences(), "topology CRs carry no owner reference either")
 }
 

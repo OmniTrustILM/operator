@@ -45,7 +45,7 @@ func TestResolveImagePrefersComponentOverShared(t *testing.T) {
 func TestResolveImageFallsBackToBOMTag(t *testing.T) {
 	shared := otilmv1alpha1.ImageSpec{Registry: "hub.omnitrustregistry.com", Repository: "ilm"}
 	ref, _ := ResolveImage(bom.Lookup, "core", shared, otilmv1alpha1.ImageSpec{Name: "core"})
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.18.0", ref)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.19.0", ref)
 }
 
 func TestResolveImageConnectorStyleRepositoryTag(t *testing.T) {
@@ -67,7 +67,7 @@ func TestResolveImageSharedFillsWhatComponentOmits(t *testing.T) {
 func TestResolveImageBOMFillsName(t *testing.T) {
 	// Known component, no name/tag on comp/shared → both filled from the bundle.
 	ref, _ := ResolveImage(bom.Lookup, "core", otilmv1alpha1.ImageSpec{Repository: "ilm"}, otilmv1alpha1.ImageSpec{})
-	assert.Equal(t, "ilm/core:2.18.0", ref)
+	assert.Equal(t, "ilm/core:2.19.0", ref)
 }
 
 // TestResolveImageNilLookupSkipsBundleFallback proves a nil bundleLookup (the

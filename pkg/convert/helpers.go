@@ -185,6 +185,22 @@ func toResourceList(m map[string]string) corev1.ResourceList {
 	return out
 }
 
+// resourcesFrom converts a chart "resources" sub-block (requests/limits) into typed
+// ResourceRequirements via a YAML round-trip, or nil when it is absent, empty or unparseable.
+// It is the ONE conversion both component resources and the time-quality-monitor sidecar's
+// resources go through, so the two can never diverge.
+func resourcesFrom(block vals) *corev1.ResourceRequirements {
+	res := mapOf(block["resources"])
+	if len(res) == 0 {
+		return nil
+	}
+	var rr resourceRequirements
+	if roundTrip(res, &rr) != nil || (len(rr.Requests) == 0 && len(rr.Limits) == 0) {
+		return nil
+	}
+	return rr.toCore()
+}
+
 // componentSpecPath maps an umbrella values key to the Platform spec path segment for that
 // component, used in customization hints. For the top-level "image" block (Core's image)
 // it returns "core".

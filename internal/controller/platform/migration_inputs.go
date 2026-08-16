@@ -37,10 +37,33 @@ package platform
 //
 // WHAT IS PINNED. A FINGERPRINT — a hash, never the values — of the inputs those derivations
 // read: the messaging mode and broker type, the effective source and target virtual hosts, the
-// provisioning mode and the resolved messaging wiring (which Secret holds the administrator
-// the drain authenticates as, under which keys, and which broker Service it reaches). Hashing
-// is not obfuscation for its own sake: status is published, and a virtual host is a broker
-// coordinate the engine may never write there.
+// provisioning mode, the resolved messaging wiring (which Secret holds the administrator
+// the drain authenticates as, under which keys, and which broker Service it reaches), and —
+// PRESENCE-CONDITIONALLY — the time-quality-monitor sidecar's enabled flag. The monitor flag
+// belongs here for a different reason than the others: it is not a topology-identity input, it
+// is an UNFENCED PRODUCER toggle (see guardMigrationTimeQualityMonitor) — a migration is refused
+// from ever STARTING while it is on, so the only way it can be true during a live migration is
+// enabling it mid-flight, which would refill the very queue the drain is waiting to empty.
+//
+// PRESENCE-CONDITIONAL, NOT UNCONDITIONAL — this is a COMPATIBILITY requirement, not a stylistic
+// choice. Every migration record written by an operator build that predates this field has no
+// monitor term in its hash AT ALL (the term did not exist yet), and the field itself ships in
+// this SAME release — so the only state such a record's platform can be in is monitor
+// DISABLED. If the term were appended unconditionally (even as "timeQualityMonitor=false"), an
+// in-flight migration surviving an operator upgrade would recompute a DIFFERENT hash than the one
+// it was recorded with, and guardMigrationInputs would refuse it as drifted — a false positive
+// with no spec-level remedy once the migration is past the reversible phases (CuttingOver and
+// CleaningUp refuse a spec.version revert outright; resuming just re-trips the same false drift
+// forever). Appending the term ONLY when the monitor is enabled makes a disabled monitor hash
+// IDENTICALLY to the pre-existing shape, so an upgrade changes nothing for the migrations that
+// exist today. An in-flight ENABLE still changes the hash (disabled → enabled adds the term) and
+// still trips the guard, which is the behavior this field exists for. A record can never
+// legitimately START with the term present, because guardMigrationTimeQualityMonitor refuses to
+// start a migration while the monitor is enabled in the first place — so "started disabled,
+// enabled mid-flight" is the only path that ever produces the term on a live record.
+//
+// Hashing is not obfuscation for its own sake: status is published, and a virtual host is a
+// broker coordinate the engine may never write there.
 //
 // WHAT IS DELIBERATELY NOT PINNED, because these are the controls a stuck migration is steered
 // with: spec.version (reverting it is how a reversible migration is aborted) and
@@ -95,10 +118,11 @@ func (r *Reconciler) guardMigrationInputs(ctx context.Context, p *otilmv1alpha1.
 
 	message := fmt.Sprintf(
 		"the messaging migration from platform version %s to %s was started against a different messaging configuration; "+
-			"spec.messaging.mode, spec.messaging.brokerType, spec.messaging.virtualHost, spec.provisioning.mode or the "+
-			"messaging credentials wiring changed while it was in flight, and following that change could migrate the wrong "+
-			"topology or leave the previous one behind — restore them to the values the migration started with, or revert "+
-			"spec.version to %s to abort it while it is still fencing or draining",
+			"spec.messaging.mode, spec.messaging.brokerType, spec.messaging.virtualHost, spec.provisioning.mode, "+
+			"spec.core.timeQualityMonitor.enabled or the messaging credentials wiring changed while it was in flight, and "+
+			"following that change could migrate the wrong topology, leave an unfenced producer publishing against the "+
+			"drain, or leave the previous topology behind — restore them to the values the migration started with, or "+
+			"revert spec.version to %s to abort it while it is still fencing or draining",
 		u.FromVersion, u.ToVersion, u.FromVersion)
 	setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationInputsChanged, message)
 	res, err := r.steadyState(ctx, p, reasonMigrationInputsChanged, message)
@@ -129,7 +153,7 @@ func migrationInputFingerprint(p *otilmv1alpha1.Platform) (string, bool) {
 
 	// Every part is a NAME or a MODE, and the whole join is hashed before it is stored — the
 	// virtual hosts in particular must never be recoverable from status.
-	inputs := strings.Join([]string{
+	fields := []string{
 		"from=" + u.FromVersion,
 		"to=" + u.ToVersion,
 		"mode=" + p.Spec.Messaging.Mode,
@@ -143,10 +167,25 @@ func migrationInputFingerprint(p *otilmv1alpha1.Platform) (string, bool) {
 		"administratorSecret=" + conn.AdministratorCredentialsSecretName,
 		"usernameKey=" + conn.UsernameKey,
 		"passwordKey=" + conn.PasswordKey,
-	}, "\n")
+	}
+	// PRESENCE-CONDITIONAL: see the file-level comment for why this line must be omitted
+	// entirely (never even appended as "=false") when the monitor is disabled, rather than
+	// appended unconditionally.
+	if timeQualityMonitorEnabledFlag(p) {
+		fields = append(fields, "timeQualityMonitor=true")
+	}
 
-	sum := sha256.Sum256([]byte(inputs))
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\n")))
 	return hex.EncodeToString(sum[:]), true
+}
+
+// timeQualityMonitorEnabledFlag reads spec.core.timeQualityMonitor.enabled directly (nil-safe).
+// Like provisioningModeOf it reads the RAW toggle rather than a bundle-gated derivation
+// (platformbuilder.TimeQualityMonitorEnabled also checks whether the SELECTED bundle carries
+// the monitor image): the fingerprint's job is to catch the FLAG changing, regardless of which
+// bundle happens to be selected at the moment it is taken.
+func timeQualityMonitorEnabledFlag(p *otilmv1alpha1.Platform) bool {
+	return p.Spec.Core.TimeQualityMonitor != nil && p.Spec.Core.TimeQualityMonitor.Enabled
 }
 
 // provisioningModeOf reads spec.provisioning.mode as written, rather than through

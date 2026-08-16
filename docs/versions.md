@@ -22,10 +22,11 @@ This operator build ships the following tested bundles. The engine columns are t
 
 | Platform version | PostgreSQL | RabbitMQ | Keycloak |
 | ---------------- | ---------- | -------- | -------- |
-| **2.18.0** (default) | 18 | 4.3.1 | 26.6.3 |
+| **2.19.0** (default) | 18 | 4.3.1 | 26.6.3 |
+| 2.18.0 | 18 | 4.3.1 | 26.6.3 |
 | 2.17.0 | 16 | 4.2.0 | 26.4.0 |
 
-`2.18.0` is the operator's **default** — the bundle selected when `spec.version` is empty at
+`2.19.0` is the operator's **default** — the bundle selected when `spec.version` is empty at
 creation. It is not necessarily the newest bundle this build carries: the default moves only
 via a separate, deliberate change, once a newer release is fully supported.
 
@@ -36,7 +37,7 @@ apiVersion: otilm.com/v1alpha1
 kind: Platform
 metadata: { name: ilm, namespace: ilm }
 spec:
-  version: "2.18.0"     # a tested bundle; omit/"" pins the operator's DEFAULT at creation (no auto-upgrade)
+  version: "2.19.0"     # a tested bundle; omit/"" pins the operator's DEFAULT at creation (no auto-upgrade)
   database:  { mode: managed }
   messaging: { mode: managed }
 ```
@@ -69,7 +70,7 @@ The version the operator actually reconciled against is reported on
 ```bash
 kubectl get platform -n ilm
 # NAME   PHASE     VERSION   READY   AGE
-# ilm    Running   2.18.0    True    3m
+# ilm    Running   2.19.0    True    3m
 ```
 
 `status.observedVersion` always reflects the *resolved* version — the concrete version
@@ -101,7 +102,7 @@ kubectl describe platform ilm -n ilm
 # Conditions:
 #   Type      Status  Reason              Message
 #   Degraded  True    UnsupportedVersion  platform version "9.9.9" is not supported by this
-#                                         operator; supported versions: 2.17.0, 2.18.0
+#                                         operator; supported versions: 2.17.0, 2.18.0, 2.19.0
 ```
 
 A `Warning` Event with reason `UnsupportedVersion` is recorded alongside the condition.

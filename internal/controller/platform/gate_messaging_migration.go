@@ -107,9 +107,23 @@ const (
 	// reasonMigrationStateError: the migration state could not be written, or names a version
 	// this operator build does not carry. The reconcile stops rather than act blindly.
 	reasonMigrationStateError = "MigrationStateError"
-	// reasonMigrationWorkloadKindChanged: a fenced component's workloadType was changed while
-	// the migration holds it at zero replicas. Refused — see migrationWorkloadKindFlip.
+	// reasonMigrationWorkloadKindChanged: a component's workloadType was changed while a
+	// messaging migration is recorded — either a FENCED component whose recorded kind no longer
+	// matches its render (migrationWorkloadKindFlip), or any component (core included, which is
+	// never fenced) whose live workload kind no longer matches its render
+	// (guardMigrationWorkloadKind). Refused in both cases.
 	reasonMigrationWorkloadKindChanged = "MigrationWorkloadKindChanged"
+	// reasonMigrationWorkloadKindPending: a component's workloadType switch is still
+	// outstanding, so a messaging migration must not START on top of it — see
+	// guardMigrationWorkloadKind.
+	reasonMigrationWorkloadKindPending = "WorkloadKindSwitchPending"
+	// reasonMigrationAbortWorkloadKind: a single edit reverted spec.version AND changed a
+	// component's workloadType. The abort ran (the fence is lifted, the record discarded); the
+	// SWITCH is what this pass refused — see guardMigrationWorkloadKind's kindGuardAbort stage.
+	reasonMigrationAbortWorkloadKind = "WorkloadKindSwitchAfterAbort"
+	// reasonMigrationTimeQualityMonitorEnabled: a messaging migration was requested while the
+	// time-quality-monitor sidecar is enabled — see guardMigrationTimeQualityMonitor.
+	reasonMigrationTimeQualityMonitorEnabled = "MigrationTimeQualityMonitorEnabled"
 	// reasonMigrationInputsChanged: a migration-critical spec input changed mid-flight — see
 	// migrationInputFingerprint for what that covers and why it cannot be followed.
 	reasonMigrationInputsChanged = "MigrationInputsChanged"
@@ -164,10 +178,80 @@ type migrationRender struct {
 func (r *Reconciler) gateMessagingMigration(ctx context.Context, p *otilmv1alpha1.Platform, target bom.Bundle, targetVersion string) (migrationRender, bool, ctrl.Result, error) {
 	render := migrationRender{version: targetVersion, bundle: target}
 
-	// The SOURCE bundle is read only to decide whether a move needs a migration at all; an
-	// in-flight one is decided entirely from status.upgrade, so a running version this
-	// operator build no longer carries does not silence one that is already recorded.
-	//
+	source, handled, res, err := r.guardMigrationSourceKnown(ctx, p, target, targetVersion)
+	if handled || err != nil {
+		return render, true, res, err
+	}
+
+	switch decision := decideMigration(p, source, target); decision.Action {
+	case migrationActionNone:
+		return render, false, ctrl.Result{}, nil
+
+	case migrationActionVerifyPin:
+		// The move looks additive only because spec.messaging.virtualHost pins a vhost that
+		// resolves the same under both bundles. Confirm from the cluster that the platform is
+		// actually ON that vhost before treating the move as needing no migration.
+		if handled, res, err := r.guardMigrationVirtualHostPin(ctx, p, targetVersion); handled || err != nil {
+			return render, true, res, err
+		}
+		return render, false, ctrl.Result{}, nil
+
+	case migrationActionRefuse:
+		res, err := r.refuseMigration(ctx, p, decision)
+		return render, true, res, err
+
+	case migrationActionAbort:
+		// Capture the target BEFORE the abort discards status.upgrade — it is what the refusal
+		// below names, and it is gone the moment concludeMigration lands.
+		aborted := p.Status.Upgrade.ToVersion
+		if err := r.abortMigration(ctx, p); err != nil {
+			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
+			return render, true, res, aerr
+		}
+		// The abort ALWAYS proceeds: it is the user's revert, and it lifts the fence. What must
+		// not ride along with it is a workloadType switch requested in the SAME edit — the
+		// switch deletes a workload the fence has only just released, and a delete issued in the
+		// same pass races the restore. So the abort completes and the SWITCH is refused for this
+		// pass; with no migration recorded, the next reconcile orchestrates it stop-before-start.
+		if handled, res, err := r.guardMigrationWorkloadKind(ctx, p, aborted, kindGuardAbort); handled || err != nil {
+			return render, true, res, err
+		}
+		// The abort restored exactly the prior state, and spec.version already names the
+		// version the platform is running: the reconcile proceeds down the ordinary path.
+		return render, false, ctrl.Result{}, nil
+
+	case migrationActionStart:
+		return r.startMigrationAction(ctx, p, targetVersion, render)
+
+	default: // migrationActionResume
+		return r.advanceMigration(ctx, p, render)
+	}
+}
+
+// guardMigrationSourceKnown runs the two guards that must pass before ANY migration decision can
+// be made, in this ORDER — a reviewed invariant, kept exactly as it was before this helper was
+// extracted:
+//
+//  1. an empty observed version is a fresh install ONLY once the cluster confirms there is no
+//     live platform underneath it (guardMigrationUnrecordedRunningVersion) — checked first,
+//     and only when no migration is already recorded, so an in-flight one is never re-litigated;
+//  2. the reported running version must be one this build can reason about, UNLESS a migration
+//     is already in flight — an in-flight one is decided entirely from status.upgrade, so a
+//     running version this operator build no longer carries must not silence one already
+//     recorded.
+//
+// It returns the SOURCE bundle decideMigration needs; handled=true means one of the two guards
+// short-circuited the reconcile and the returned bundle is the zero value.
+func (r *Reconciler) guardMigrationSourceKnown(ctx context.Context, p *otilmv1alpha1.Platform, target bom.Bundle, targetVersion string) (bom.Bundle, bool, ctrl.Result, error) {
+	// An EMPTY observed version resolves to the operator's default bundle, which reads as a
+	// fresh install — so before that inference is acted on, confirm from the cluster that there
+	// is no live platform underneath it. See guardMigrationUnrecordedRunningVersion.
+	if p.Status.ObservedVersion == "" && !migrationInFlight(p) {
+		if handled, res, err := r.guardMigrationUnrecordedRunningVersion(ctx, p, target, targetVersion); handled || err != nil {
+			return bom.Bundle{}, true, res, err
+		}
+	}
+
 	// With no migration recorded, an unrecognised running version is a REFUSAL, not a
 	// shrug. The trigger's whole question — does this move rename the messaging virtual
 	// host? — is answered from the running version's bundle, and without it the engine
@@ -184,36 +268,36 @@ func (r *Reconciler) gateMessagingMigration(ctx context.Context, p *otilmv1alpha
 			p.Status.ObservedVersion, targetVersion, p.Status.ObservedVersion, strings.Join(bom.SupportedVersions(), ", "))
 		setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationSourceVersionUnknown, message)
 		res, err := r.steadyState(ctx, p, reasonMigrationSourceVersionUnknown, message)
+		return bom.Bundle{}, true, res, err
+	}
+	return source, false, ctrl.Result{}, nil
+}
+
+// startMigrationAction runs the migrationActionStart path: the two guards that must refuse
+// BEFORE anything is recorded, in order, and then begins the migration and advances it.
+//
+// Nothing has to be unwound if either guard refuses, because nothing has been written yet — and,
+// for the same reason, neither guard may read status.upgrade (it is nil here; they take the
+// source version from status.observedVersion / targetVersion instead).
+func (r *Reconciler) startMigrationAction(ctx context.Context, p *otilmv1alpha1.Platform, targetVersion string, render migrationRender) (migrationRender, bool, ctrl.Result, error) {
+	// beginMigration persists the migration and the fence then records kinds, which is exactly
+	// the state an outstanding workloadType switch has not settled.
+	if handled, res, err := r.guardMigrationWorkloadKind(ctx, p, targetVersion, kindGuardStart); handled || err != nil {
 		return render, true, res, err
 	}
-
-	switch decision := decideMigration(p, source, target); decision.Action {
-	case migrationActionNone:
-		return render, false, ctrl.Result{}, nil
-
-	case migrationActionRefuse:
-		res, err := r.refuseMigration(ctx, p, decision)
+	// The time-quality-monitor sidecar is an unfenced PRODUCER riding Core's pod (Core itself is
+	// never fenced — see platformbuilder.MigrationFenceTargets), so fencing every OTHER producer
+	// while it keeps running would leave it refilling the very queue the drain needs to reach
+	// zero, and the migration would grind until spec.messaging.managed.drainTimeout aborted it —
+	// every time, not occasionally.
+	if handled, res, err := r.guardMigrationTimeQualityMonitor(ctx, p, targetVersion); handled || err != nil {
 		return render, true, res, err
-
-	case migrationActionAbort:
-		if err := r.abortMigration(ctx, p); err != nil {
-			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
-			return render, true, res, aerr
-		}
-		// The abort restored exactly the prior state, and spec.version already names the
-		// version the platform is running: the reconcile proceeds down the ordinary path.
-		return render, false, ctrl.Result{}, nil
-
-	case migrationActionStart:
-		if err := r.beginMigration(ctx, p, targetVersion); err != nil {
-			res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
-			return render, true, res, aerr
-		}
-		return r.advanceMigration(ctx, p, render)
-
-	default: // migrationActionResume
-		return r.advanceMigration(ctx, p, render)
 	}
+	if err := r.beginMigration(ctx, p, targetVersion); err != nil {
+		res, aerr := r.applyOrDegrade(ctx, p, reasonMigrationStateError, err)
+		return render, true, res, aerr
+	}
+	return r.advanceMigration(ctx, p, render)
 }
 
 // advanceMigration runs the recorded phase of a live migration.
@@ -242,6 +326,13 @@ func (r *Reconciler) advanceMigration(ctx context.Context, p *otilmv1alpha1.Plat
 			name, requested, p.Status.Upgrade.ToVersion, recorded, p.Status.Upgrade.FromVersion)
 		setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationWorkloadKindChanged, message)
 		res, err := r.steadyState(ctx, p, reasonMigrationWorkloadKindChanged, message)
+		return render, true, res, err
+	}
+
+	// The flip check above catches only a FENCED component's recorded-vs-requested kind. This
+	// catches the live cluster disagreeing with the render, which is the only signal a CORE
+	// workloadType change produces — core is deliberately never fenced.
+	if handled, res, err := r.guardMigrationWorkloadKind(ctx, p, p.Status.Upgrade.ToVersion, kindGuardInFlight); handled || err != nil {
 		return render, true, res, err
 	}
 
@@ -372,6 +463,58 @@ func migrationSourceBundle(p *otilmv1alpha1.Platform) (bom.Bundle, error) {
 func (r *Reconciler) refuseMigration(ctx context.Context, p *otilmv1alpha1.Platform, d migrationDecision) (ctrl.Result, error) {
 	setMigrationCondition(p, metav1.ConditionFalse, d.Reason, d.Message)
 	return r.steadyState(ctx, p, d.Reason, d.Message)
+}
+
+// guardMigrationTimeQualityMonitor refuses to START a messaging migration while the
+// time-quality-monitor sidecar is enabled.
+//
+// WHY REFUSED RATHER THAN FENCED ALONGSIDE THE OTHERS. The sidecar rides Core's pod, and CORE
+// IS DELIBERATELY NEVER A FENCE TARGET (see platformbuilder.MigrationFenceTargets) — it is the
+// drain's CONSUMER, the very thing the fence must go on running so the queues it empties keep
+// emptying. Whenever a bundle renders the monitor, it is itself an unfenced PRODUCER: it
+// publishes into the time-quality.results queue, which the Draining phase needs to reach zero
+// along with every other drainable queue on the source virtual host. An operator-shipped
+// producer the fence cannot see and cannot stop would refill that queue for as long as the
+// sidecar keeps running, so the migration would grind until spec.messaging.managed.drainTimeout
+// aborted it.
+//
+// THE GUARD READS THE RAW SPEC FLAG (m.Enabled), NOT platformbuilder.TimeQualityMonitorEnabled's
+// bundle-gated derivation — deliberately, and it must stay that way. On the flagship
+// 2.18.0 → 2.19.0 path the SOURCE bundle carries no monitor component at all, so the sidecar is
+// not actually publishing anything while that particular drain runs; but refusing on the flag
+// rather than on "does it render right now" is what keeps this guard, and the fingerprint's
+// PRESENCE-CONDITIONAL timeQualityMonitor term (migration_inputs.go), honest across every bundle
+// pair, including ones where the source itself renders the monitor. The operator does not permit
+// an enabled monitor across a messaging migration, full stop, because on any bundle that renders
+// it the sidecar would publish into queues the drain requires empty.
+//
+// Refused BEFORE anything is recorded, the same as guardMigrationWorkloadKind's kindGuardStart:
+// beginMigration has not run yet, so there is nothing to unwind, and the source version is read
+// through migrationSourceVersion (status.observedVersion) rather than status.upgrade, which is
+// nil here.
+//
+// A DETERMINISTIC, user-correctable steady state: disable spec.core.timeQualityMonitor for the
+// migration window (it can be re-enabled once the move completes — the target topology carries
+// the same monitor-user role), or leave it enabled and revert spec.version to stay on the
+// running version instead. No broker coordinate is named — only spec field paths and version
+// strings.
+func (r *Reconciler) guardMigrationTimeQualityMonitor(ctx context.Context, p *otilmv1alpha1.Platform, version string) (bool, ctrl.Result, error) {
+	if m := p.Spec.Core.TimeQualityMonitor; m == nil || !m.Enabled {
+		return false, ctrl.Result{}, nil
+	}
+	from := migrationSourceVersion(p)
+	message := fmt.Sprintf(
+		"the messaging migration to platform version %s cannot start while spec.core.timeQualityMonitor is enabled: the "+
+			"sidecar rides core's pod, which the migration fence never stops (core is the drain's consumer, not one of its "+
+			"producers), and the operator does not permit an enabled monitor across a messaging migration because on any "+
+			"bundle that renders it the sidecar would publish into queues the drain requires empty — disable "+
+			"spec.core.timeQualityMonitor for the migration window, then request %s again (the sidecar can be "+
+			"re-enabled once the move completes), or revert spec.version to %s to stay on the version this platform is "+
+			"currently running",
+		version, version, from)
+	setMigrationCondition(p, metav1.ConditionFalse, reasonMigrationTimeQualityMonitorEnabled, message)
+	res, err := r.steadyState(ctx, p, reasonMigrationTimeQualityMonitorEnabled, message)
+	return true, res, err
 }
 
 // beginMigration records a new migration and persists it BEFORE anything is fenced.

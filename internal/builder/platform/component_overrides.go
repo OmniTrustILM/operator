@@ -68,9 +68,24 @@ func applyComponentSpec(p *otilmv1alpha1.Platform, c *common.Component, spec oti
 
 	applyScalingOverrides(p, c, spec)
 
-	// Env: APPEND user env AFTER the operator-derived env. BuildDeployment emits env in
-	// slice order and Kubernetes container-env semantics make the LAST duplicate win, so a
-	// user variable overrides an operator-derived one of the same name.
+	// Env: APPEND user env AFTER whatever the operator has already put in c.Env.
+	// buildContainerEnv renders c.Env, then c.SecretEnv, then c.ConfigMapEnv, then
+	// c.ExtraEnv, then c.FieldRefEnv — that FIXED slice order, not Go append order, decides
+	// who wins a duplicate name (Kubernetes container-env semantics: last one in the
+	// rendered list wins). That is THREE precedence tiers, not one:
+	//   - a PLAIN-VALUE operator default (one the operator itself appended to c.Env, e.g.
+	//     Core's explicit PLATFORM_INSTANCE_ID) loses to a user spec.env entry of the same
+	//     name, because the user's entry lands in the SAME slice, after it.
+	//   - a user's KEYED Secret/ConfigMap ref (c.ExtraEnv, appended by
+	//     applyRefAndVolumeOverrides below) beats both of those and every reference-derived
+	//     operator var the operator sourced via c.SecretEnv or c.ConfigMapEnv — overriding a
+	//     wired default is what that surface exists for.
+	//   - a DOWNWARD-API var (c.FieldRefEnv, e.g. the pod-index-derived
+	//     PLATFORM_INSTANCE_ID) beats EVERYTHING, user sources included, because it is the
+	//     pod's own identity rather than configuration: a StatefulSet Core's instance id IS
+	//     its ordinal, and one shared value across replicas would collide their certificate
+	//     serial numbers. spec.core.instanceId is the supported way to supply one, and it is
+	//     validated against a multi-replica core.
 	for _, e := range spec.Env {
 		c.Env = append(c.Env, common.EnvPair{Name: e.Name, Value: e.Value})
 	}
@@ -231,8 +246,9 @@ func applyServiceAccountAndServiceOverrides(c *common.Component, spec otilmv1alp
 }
 
 // appendRefBindings appends one RefBindings result onto the component: keyed env into
-// ExtraEnv (appended last so user refs win), whole-source env into EnvFrom, and volumes
-// + their mounts.
+// ExtraEnv (which renders after the operator's own env sources, so user refs win over
+// those — but not over the downward-API entries in FieldRefEnv), whole-source env into
+// EnvFrom, and volumes + their mounts.
 func appendRefBindings(c *common.Component, b common.RefBindings) {
 	c.ExtraEnv = append(c.ExtraEnv, b.Env...)
 	c.EnvFrom = append(c.EnvFrom, b.EnvFrom...)

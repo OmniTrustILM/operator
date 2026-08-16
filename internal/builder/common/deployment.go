@@ -130,8 +130,20 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 }
 
 // buildContainerEnv builds the main container's env in order: inline, secretKeyRef,
-// configMapKeyRef, fieldRef, then ExtraEnv (appended LAST so a user-supplied keyed ref of
-// the same name wins, per Kubernetes container-env last-duplicate-wins semantics).
+// configMapKeyRef, ExtraEnv, then fieldRef. Kubernetes resolves a duplicate env name to the
+// LAST entry in the list, so that order IS the precedence, and it encodes two rules:
+//
+//   - ExtraEnv wins over the operator's own Env/SecretEnv/ConfigMapEnv. It is the passthrough
+//     slot for user-supplied keyed Secret/ConfigMap refs, and overriding an operator default
+//     is what that surface is for.
+//   - FieldRefEnv wins over EVERYTHING, user-supplied sources included. Its entries are not
+//     configuration: they are the pod's OWN IDENTITY, read through the downward API, and only
+//     the operator ever puts anything there. Core's PLATFORM_INSTANCE_ID on a StatefulSet is
+//     the case that makes this load-bearing — it is the pod ORDINAL, which is what keeps each
+//     replica's certificate serial numbers distinct. A keyed ref mapped onto that name would
+//     otherwise hand every replica one shared id, silently, and duplicate serials are not a
+//     failure the platform can detect afterwards. A user who genuinely wants to supply the id
+//     sets spec.core.instanceId, which is validated against multi-replica core.
 //
 // An env entry whose NAME is empty is omitted. A version's wiring profile leaves an
 // env-var name empty to OMIT that variable for that platform version (data-driven
@@ -176,6 +188,8 @@ func buildContainerEnv(c Component) []corev1.EnvVar {
 			},
 		})
 	}
+	env = append(env, c.ExtraEnv...)
+	// The downward-API entries go LAST, after every user-supplied source — see the doc above.
 	for _, f := range c.FieldRefEnv {
 		if f.EnvVar == "" {
 			continue
@@ -187,7 +201,7 @@ func buildContainerEnv(c Component) []corev1.EnvVar {
 			},
 		})
 	}
-	return append(env, c.ExtraEnv...)
+	return env
 }
 
 // buildContainerPorts builds the main container's ports: the primary port first (named

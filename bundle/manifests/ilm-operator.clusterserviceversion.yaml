@@ -85,7 +85,7 @@ metadata:
                 }
               ],
               "name": "X.509 Compliance Provider",
-              "platformUrl": "https://ilm-core.ilm-system.svc.cluster.local:8443"
+              "platformUrl": "https://ilm-core.ilm-system.svc.cluster.local:8443/api"
             },
             "service": {
               "port": 8080
@@ -295,6 +295,138 @@ metadata:
                 "name": "cache"
               }
             ]
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/part-of": "ilm-platform"
+            },
+            "name": "otpki-connector",
+            "namespace": "ilm"
+          },
+          "spec": {
+            "env": [
+              {
+                "name": "PORT",
+                "value": "8080"
+              },
+              {
+                "name": "LOG_LEVEL",
+                "value": "INFO"
+              }
+            ],
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "pullSecrets": [
+                "registry-credentials"
+              ],
+              "repository": "hub.omnitrustregistry.com/ilm-private/otpki-connector",
+              "tag": "1.0.0"
+            },
+            "probes": {
+              "readiness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 5,
+                "path": "/v2/health/readiness",
+                "periodSeconds": 10
+              },
+              "startup": {
+                "failureThreshold": 10,
+                "initialDelaySeconds": 10,
+                "path": "/v2/health/liveness",
+                "periodSeconds": 10
+              }
+            },
+            "registration": {
+              "authType": "none",
+              "customAttributes": [
+                {
+                  "content": "OT PKI authority provider",
+                  "name": "description"
+                }
+              ],
+              "name": "OT PKI",
+              "platformUrl": "http://core.ilm.svc.cluster.local:8080/api"
+            },
+            "secretRefs": [
+              {
+                "keys": [
+                  {
+                    "envVar": "OTPKI_LOGIN_PASSWORD_KEY",
+                    "secretKey": "login_password_key"
+                  }
+                ],
+                "name": "otpki-connector-secret",
+                "type": "env"
+              }
+            ],
+            "service": {
+              "port": 8080,
+              "type": "ClusterIP"
+            }
+          }
+        },
+        {
+          "apiVersion": "otilm.com/v1alpha1",
+          "kind": "Connector",
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/part-of": "ilm-platform"
+            },
+            "name": "timestamp-formatting-connector",
+            "namespace": "ilm"
+          },
+          "spec": {
+            "env": [
+              {
+                "name": "SERVER_PORT",
+                "value": "8080"
+              },
+              {
+                "name": "LOGGING_LEVEL_COM_OTILM",
+                "value": "INFO"
+              }
+            ],
+            "image": {
+              "pullPolicy": "IfNotPresent",
+              "pullSecrets": [
+                "registry-credentials"
+              ],
+              "repository": "hub.omnitrustregistry.com/ilm-private/timestamp-formatting-connector",
+              "tag": "1.0.0"
+            },
+            "probes": {
+              "readiness": {
+                "failureThreshold": 3,
+                "initialDelaySeconds": 5,
+                "path": "/v2/health/readiness",
+                "periodSeconds": 10
+              },
+              "startup": {
+                "failureThreshold": 10,
+                "initialDelaySeconds": 10,
+                "path": "/v2/health/liveness",
+                "periodSeconds": 10
+              }
+            },
+            "registration": {
+              "authType": "none",
+              "customAttributes": [
+                {
+                  "content": "Timestamp formatting connector",
+                  "name": "description"
+                }
+              ],
+              "name": "Timestamp Formatting",
+              "platformUrl": "http://core.ilm.svc.cluster.local:8080/api"
+            },
+            "service": {
+              "port": 8080,
+              "type": "ClusterIP"
+            }
           }
         },
         {
@@ -521,7 +653,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-08-04T16:32:34Z"
+    createdAt: "2026-08-05T16:07:00Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1

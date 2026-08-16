@@ -48,6 +48,13 @@ func managedMQPlatform(mutate func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Plat
 	p := &otilmv1alpha1.Platform{
 		ObjectMeta: metav1.ObjectMeta{Name: "ilm", Namespace: "ns"},
 		Spec: otilmv1alpha1.PlatformSpec{
+			// PINNED to 2.18.0. Every test built on this fixture asserts the 2.18.0 managed
+			// topology in detail — the czertainly exchanges, the 10-queue/9-binding cardinality,
+			// the 33-object count, the pre-rename permission regexes and the unscoped legacy
+			// names live platforms carry. They are VERSION-SPECIFIC tests, not default-bundle
+			// tests; the 2.19.0 topology has its own, which set spec.Version through the mutator
+			// (applied AFTER this literal, so they still override).
+			Version: testVersion218,
 			Messaging: otilmv1alpha1.MessagingSpec{
 				Mode:       "managed",
 				BrokerType: "rabbitmq",
@@ -96,8 +103,8 @@ func renderedNames(t *testing.T, objs []client.Object) []string {
 // linger forever holding finalizers over live queues). Never relax this test: the legacy
 // vhost must map to an EMPTY scope, unconditionally.
 func TestLegacyTopologyNamesAreFrozen(t *testing.T) {
-	t.Run("default bundle (2.18.0)", func(t *testing.T) {
-		p := managedMQPlatform(nil) // vhost unset -> the 2.18.0 bundle default
+	t.Run("2.18.0 bundle (the legacy unscoped names)", func(t *testing.T) {
+		p := managedMQPlatform(nil) // vhost unset -> the pinned 2.18.0 bundle's legacy default
 		assert.Equal(t, frozenUnscopedTopologyNames, renderedNames(t, ResolveManagedMessaging(p)))
 	})
 
@@ -717,7 +724,11 @@ func TestManagedMessagingNoLeak(t *testing.T) {
 // data (not scattered literals): the rendered users/exchanges/queues/bindings counts equal
 // the BOM topology's.
 func TestManagedMessagingTopologyIsBOMData(t *testing.T) {
-	topo := bom.Messaging()
+	// Reads the 2.18.0 topology explicitly, because managedMQPlatform is pinned there. Using
+	// the default wrapper would compare a 2.19.0 expectation against a 2.18.0 render.
+	b, ok := bom.BundleFor(testVersion218)
+	require.True(t, ok)
+	topo := b.Messaging
 	p := managedMQPlatform(nil)
 	objs := ResolveManagedMessaging(p)
 	assert.Len(t, findManagedObjs(objs, rmqKindUser), len(topo.Users))

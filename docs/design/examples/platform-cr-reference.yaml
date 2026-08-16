@@ -191,10 +191,10 @@ spec:
     # the platform to the broker Service + the Topology-generated per-user Secrets (Core uses
     # the core-user Secret). managed.* is FLAT (no "rabbitmqCluster" wrapper).
     #   mode: managed
-    #   virtualHost: czertainly        # optional; the vhost the operator provisions (default "czertainly")
+    #   virtualHost: czertainly        # optional; omit to use the bundle default ("/" on 2.19.0, "czertainly" on 2.18.0)
     #   managed:
     #     replicas: 3
-    #     version: "4.3.1"             # selects the RabbitmqCluster image (bundle default for 2.18.0)
+    #     version: "4.3.1"             # selects the RabbitmqCluster image (bundle default for 2.19.0)
     #     upgradeAcknowledged: false   # set true to OPT IN to a MAJOR RabbitMQ upgrade of a running cluster
     #     storage: { size: 20Gi }
     #     resources: {}                # per-node requests/limits
@@ -216,7 +216,7 @@ spec:
     realm: ilm                         # the platform realm name (default "ilm")
     # managed:
     #   instances: 2
-    #   version: "26.6.3"              # selects the Keycloak CR image (bundle default for 2.18.0)
+    #   version: "26.6.3"              # selects the Keycloak CR image (bundle default for 2.19.0)
     #   logLevel: info                 # managed Keycloak root log level (KC_LOG_LEVEL); empty = Keycloak default (info)
     #   upgradeAcknowledged: false     # set true to OPT IN to a MAJOR Keycloak upgrade of a running instance
     #   realmImport:                   # optional, create-only import from a user ConfigMap
@@ -367,7 +367,7 @@ spec:
 #       # (managed: the Topology-generated provisioner/proxy Secrets); override here:
 #       provisionerCredentials: { secretRef: "", usernameKey: username, passwordKey: password }
 #       proxyCredentials: { secretRef: "", usernameKey: username, passwordKey: password }
-#       exchange: czertainly-proxy           # bootstrap proxy exchange (bundle default)
+#       exchange: czertainly-proxy           # bootstrap proxy exchange (bundle default: 2.18.0: czertainly-proxy; 2.19.0+: ilm-proxy)
 #       responseQueue: core                  # bootstrap response queue (bundle default)
 #       # + the full shared ComponentSpec (image/replicas/resources/env/probes/...) inline.
 # -----------------------------------------------------------------------------

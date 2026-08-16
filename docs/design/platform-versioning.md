@@ -1,10 +1,16 @@
 # Platform versioning, templates & upgrades — design
 
-> Status: **steps 1–3 implemented (committed, green): the 2.17.0 + 2.18.0 bundles are shipped,
-> with wiring/feature-gating + the downgrade guard green; remaining: the upgrade + e2e
-> version-matrix (steps 4–5)**. Captures the version-management
-> architecture for the `Platform` CRD: how the operator wires each supported ILM platform
-> version, how the default version is chosen, and how upgrades/downgrades are handled.
+> Status: **all five steps implemented (committed, green)**. Three released bundles ship —
+> 2.17.0, 2.18.0 and 2.19.0, the last of which is `DefaultVersion` — with per-version
+> wiring/feature-gating, the downgrade guard, the `docs/upgrades.md` procedures, and the Kind
+> e2e version matrix (`matrix-upgrade`, `matrix-migration`). The 2.18.0 → 2.19.0 move renames
+> the managed messaging virtual host, so it is carried out by the **messaging-migration engine**
+> (fence → drain → cut over → clean up) rather than by a plain apply; that engine is documented
+> in `docs/upgrades.md` and lives in `internal/controller/platform/messaging_migration_*.go`.
+> This file captures the version-management architecture for the `Platform` CRD: how the
+> operator wires each supported ILM platform version, how the default version is chosen, and how
+> upgrades/downgrades are handled. Sections 1 and 6a record the ORIGINAL 2.17.0 → 2.18.0
+> analysis the model was derived from, and are kept as history rather than as current state.
 
 ## 1. Problem (validated against `helm-charts` 2.17.0 → 2.18.0)
 
@@ -36,7 +42,10 @@ images match the wiring, which is why the quickstart works on 2.18.0 images).
 
 1. The operator wires **each** supported platform version correctly from per-version **data**
    (env names, component set, topology) — never one version's contract hard-coded for all.
-2. The default version is the operator's **newest** (2.18.0).
+2. The default version is the operator's **newest released** bundle (**2.19.0**). Newest and
+   default are separate decisions — a released bundle can exist, reachable via an explicit
+   `spec.version`, before `DefaultVersion` moves to it (see `DefaultVersion`'s own doc in
+   `pkg/bom/bom.go`).
 3. Upgrades are **explicit, ordered, and safe**; downgrades are **refused**; an operator
    upgrade never silently upgrades a running platform.
 
@@ -157,13 +166,16 @@ bundle data:
 6. ✅ **Tests** — builder tests assert 2.17.0 renders `RABBITMQ_*`/no-provisioning/no-proxy +
    core:2.17.0, and that `ProvisioningDeploy` is version-gated; bom tests cover the new bundle.
    (A dedicated 2.17.0 golden snapshot is optional follow-up.)
-7. ⏳ **Upgrade + e2e** (steps 4–5) — `config/samples/platform_2170.yaml` + the 2.17.0→2.18.0
-   `docs/upgrades.md` worked example (done); an e2e version-matrix (2.17.0-on-2.17.0,
-   2.18.0-on-2.18.0, upgrade) remains.
+7. ✅ **Upgrade + e2e** (steps 4–5) — `config/samples/platform_2170.yaml` + the
+   `docs/upgrades.md` worked examples (2.17.0→2.18.0 and the 2.18.0→2.19.0 managed-broker
+   runbook), plus the Kind e2e version matrix: `matrix-upgrade` walks a managed platform
+   2.17.0 → 2.18.0 → 2.19.0, and `matrix-migration` exercises the messaging migration end to
+   end (fence, drain hold, drain timeout + abort, and a full run to completion with the source
+   topology reclaimed).
 
 ## 7. Open inputs
 
 Resolved — the 2.17.0 and 2.18.0 contracts are captured in §6a (images, Core env, topology shape)
-from `helm-charts` tags 2.17.0/2.18.0. Any remaining per-component env nuance (auth,
-scheduler, fe-administrator) is read from the 2.17.0 chart as each component's wiring is authored
-in step 3.
+from `helm-charts` tags 2.17.0/2.18.0, and every per-component wiring nuance (auth, scheduler,
+fe-administrator) was authored from the 2.17.0 chart in step 3. The 2.19.0 contract was added the
+same way, from the 2.19.0 chart.

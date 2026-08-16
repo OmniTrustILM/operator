@@ -71,6 +71,9 @@ const (
 	secretVolumeFileMode       = 0o644
 	// binSh is the shell the operator's init/sidecar containers exec their generated scripts with.
 	binSh = "/bin/sh"
+	// podIndexLabelFieldPath is the downward-API path to the pod-ordinal label Kubernetes
+	// auto-stamps on StatefulSet pods from v1.28 (apps.kubernetes.io/pod-index).
+	podIndexLabelFieldPath = "metadata.labels['apps.kubernetes.io/pod-index']"
 )
 
 // readOnlyRootFS returns a *bool true, for components whose every writable path is
@@ -159,12 +162,17 @@ func ResolveCore(p *otilmv1alpha1.Platform) common.Component {
 
 	c := common.Component{
 		Name: "core", Instance: p.Name, Namespace: p.Namespace,
-		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Core.Image.PullSecrets),
+		Image: image, PullPolicy: policy, PullSecrets: common.MergePullSecrets(p.Spec.Common.Image.PullSecrets, p.Spec.Core.Image.PullSecrets, timeQualityMonitorPullSecrets(p)),
 		Replicas: 1, Port: depServicePort, ServiceType: corev1.ServiceTypeClusterIP,
-		// Recreate: Core runs schema migrations at startup. A rolling update would briefly run the
-		// old and new pods together; Recreate terminates the old pod first so a migrating pod is
-		// never interrupted mid-flight — which, with Core's non-idempotent cross-service migrations,
-		// can wedge the schema on the retry. Matches the chart's deploy-once model. See Component.Recreate.
+		// Recreate: Core runs its Flyway schema migrations at start-up, and the migrations
+		// THEMSELVES are safe under concurrency — Flyway takes a lock, so when several Core
+		// pods start together exactly one migrates and the rest wait. That confirmed contract
+		// is what makes multi-replica Core supported (workloadType: StatefulSet). What
+		// Recreate buys is the VERSION boundary on the single-replica Deployment path: a
+		// RollingUpdate would leave the OLD Core serving traffic against a schema the NEW pod
+		// has already migrated. Recreate terminates the old pod first, so one Core VERSION
+		// owns the schema at a time. It matches the chart's deploy-once model and is IGNORED
+		// for a StatefulSet, which has its own update strategy. See Component.Recreate.
 		Recreate: true,
 		Command:  imageCommand(p.Spec.Common.Image, p.Spec.Core.Image),
 		Args:     imageArgs(p.Spec.Common.Image, p.Spec.Core.Image),
@@ -208,9 +216,37 @@ func ResolveCore(p *otilmv1alpha1.Platform) common.Component {
 	// identity (a downward-API env), sourced from the pod name via fieldRef
 	// metadata.name. Omitted when proxy is disabled.
 	if p.Spec.Common.Proxy.Enabled {
-		c.FieldRefEnv = []common.FieldRefEnv{
-			{EnvVar: w.ProxyInstanceIDEnv, FieldPath: "metadata.name"},
-		}
+		c.FieldRefEnv = append(c.FieldRefEnv, common.FieldRefEnv{
+			EnvVar: w.ProxyInstanceIDEnv, FieldPath: "metadata.name",
+		})
+	}
+
+	// PLATFORM_INSTANCE_ID (derived): a StatefulSet Core with no explicit id takes a stable,
+	// unique id per pod from the pod ORDINAL — exposed by Kubernetes as the
+	// apps.kubernetes.io/pod-index label and projected via the downward API, exactly as the
+	// Helm chart derives it. coreInitContainers pairs this with the fail-fast guard.
+	if coreDerivesInstanceIDFromPodIndex(p) {
+		c.FieldRefEnv = append(c.FieldRefEnv, common.FieldRefEnv{
+			EnvVar: w.PlatformInstanceIDEnv, FieldPath: podIndexLabelFieldPath,
+		})
+	}
+
+	// Time-quality-monitor sidecar (2.19.0+, opt-in). It is appended AFTER the OPA sidecar so
+	// OPA stays first: SidecarsFirst renders sidecars before the main container, and Core's
+	// postStart hook blocks on OPA's port.
+	if TimeQualityMonitorEnabled(p) {
+		c.Sidecars = append(c.Sidecars, timeQualityMonitorSidecar(p))
+	}
+
+	// PLATFORM_INSTANCE_ID (explicit): an operator-assigned instance id renders as a plain
+	// value. It is placed before applyComponentSpec so a user's own spec.core.env entry of the
+	// same name still wins (last-wins container-env semantics). The wiring name is EMPTY before
+	// 2.19.0, so this renders on 2.19.0+ only.
+	if p.Spec.Core.InstanceID != nil {
+		c.Env = append(c.Env, common.EnvPair{
+			Name:  w.PlatformInstanceIDEnv,
+			Value: strconv.FormatInt(int64(*p.Spec.Core.InstanceID), 10),
+		})
 	}
 
 	// Layer the user's per-component overrides (env/resources/replicas/refs/volumes/
@@ -305,6 +341,14 @@ func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 	// Splice shared DB/messaging env at a stable position (after the header env,
 	// before the proxy env) for a deterministic env ordering.
 	env = append(env[:2], append(sharedEnv, env[2:]...)...)
+
+	// Time-quality integration (2.19.0+). The wiring name is EMPTY in earlier bundles and
+	// buildContainerEnv drops a nameless variable, so this renders on 2.19.0+ only — the same
+	// version-gating the 2.17.0 bundle uses to omit the proxy/provisioning env.
+	env = append(env, common.EnvPair{
+		Name:  w.TimeQualityEnabledEnv,
+		Value: strconv.FormatBool(p.Spec.Messaging.TimeQuality.Enabled),
+	})
 
 	// Proxy URLs are only injected when set.
 	if p.Spec.Common.Proxy.HTTP != "" {
@@ -844,16 +888,67 @@ func provisioningConfigured(p *otilmv1alpha1.Platform) bool {
 	return provisioningAPIURL(p) != ""
 }
 
-// coreInitContainers returns Core's ordered init containers. wait-for-auth
-// always runs first; the provision-instance-queue init container is appended only
-// on the proxy path (spec.proxy.enabled AND a provisioning API configured). Both are
-// SCC-hardened by the common BuildDeployment path.
+// coreDerivesInstanceIDFromPodIndex reports whether Core takes its platform instance id from
+// the pod ORDINAL: a StatefulSet Core, no explicit spec.core.instanceId, and a bundle whose
+// wiring names the instance-id env var (2.19.0+). It is the single predicate the downward-API
+// projection and the fail-fast init guard share, so they can never drift apart.
+func coreDerivesInstanceIDFromPodIndex(p *otilmv1alpha1.Platform) bool {
+	return p.Spec.Core.WorkloadType == otilmv1alpha1.WorkloadKindStatefulSet &&
+		p.Spec.Core.InstanceID == nil &&
+		wiringFor(p).PlatformInstanceIDEnv != ""
+}
+
+// coreInitContainers returns Core's ordered init containers. The instance-id guard runs FIRST
+// when Core derives its id from the pod ordinal (it must fail the pod immediately, not after
+// the dependency wait loops have burned minutes); wait-for-auth always follows; the
+// provision-instance-queue init container is appended only on the proxy path
+// (spec.proxy.enabled AND a provisioning API configured). All are SCC-hardened by the common
+// BuildDeployment path.
 func coreInitContainers(p *otilmv1alpha1.Platform) []corev1.Container {
-	inits := []corev1.Container{waitForAuthInitContainer(p)}
+	var inits []corev1.Container
+	if coreDerivesInstanceIDFromPodIndex(p) {
+		inits = append(inits, verifyInstanceIDInitContainer(p))
+	}
+	inits = append(inits, waitForAuthInitContainer(p))
 	if p.Spec.Common.Proxy.Enabled && provisioningConfigured(p) {
 		inits = append(inits, provisionInstanceQueueInitContainer(p))
 	}
 	return inits
+}
+
+// verifyInstanceIDInitContainer returns the "verify-instance-id" init container: a one-shot
+// guard that FAILS the pod when the pod-index-derived instance id resolved to an empty value.
+//
+// WHY IT EXISTS: Kubernetes auto-stamps the apps.kubernetes.io/pod-index label only from
+// v1.28. On an older cluster the downward-API reference silently resolves to "", Core falls
+// back to deriving its id from the pod IP, and two pods whose IPv4 addresses share their last
+// two octets then issue certificates with IDENTICAL serial numbers — a silent, unrecoverable
+// data defect. The Helm chart catches this at TEMPLATE time from .Capabilities.KubeVersion;
+// the operator has no such render-time cluster fact, so it checks the value itself, in the
+// pod, before Core starts.
+func verifyInstanceIDInitContainer(p *otilmv1alpha1.Platform) corev1.Container {
+	w := wiringFor(p)
+	image, policy := common.ResolveImage(resolveBundle(p).Lookup, "curl", p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+	script := fmt.Sprintf(`if [ -z "$%s" ]; then
+echo "%s is empty: a StatefulSet core derives it from the apps.kubernetes.io/pod-index label, which Kubernetes auto-stamps only on v1.28+. On an older cluster core would fall back to deriving the id from the pod IP and could issue duplicate certificate serial numbers. Upgrade the cluster to v1.28+, or set spec.core.instanceId on a single-replica core." >&2
+exit 1
+fi
+echo "instance id resolved"
+`, w.PlatformInstanceIDEnv, w.PlatformInstanceIDEnv)
+	return corev1.Container{
+		Name:            "verify-instance-id",
+		Image:           image,
+		ImagePullPolicy: policy,
+		Env: []corev1.EnvVar{{
+			Name: w.PlatformInstanceIDEnv,
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: podIndexLabelFieldPath},
+			},
+		}},
+		Command: []string{binSh, "-c", script},
+		// Read-only root filesystem: ENABLED. The guard writes nothing to disk.
+		SecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: readOnlyRootFS()},
+	}
 }
 
 // Placeholders and fixed values of the per-instance queue registration request. The queue

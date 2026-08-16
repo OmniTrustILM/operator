@@ -100,7 +100,11 @@ func TestDecideMigration(t *testing.T) {
 			wantAction: migrationActionNone,
 		},
 		{
-			name: "managed: a user-pinned virtualHost is the same vhost under both bundles",
+			// A pin resolves to the same vhost under both bundles, so the trigger sees no
+			// rename — but only the CLUSTER can say whether the platform was already on that
+			// vhost or is being moved onto it by this very update, so the decision is deferred
+			// rather than waved through. See Reconciler.guardMigrationVirtualHostPin.
+			name: "managed: a user-pinned virtualHost across a bundle-default rename is verified, not assumed",
 			platform: func() *otilmv1alpha1.Platform {
 				p := migrationPlatform(modeManaged, platformVersion218, platformVersion219)
 				p.Spec.Messaging.VirtualHost = pinnedTestVirtualHost
@@ -108,6 +112,19 @@ func TestDecideMigration(t *testing.T) {
 			}(),
 			from:       platformVersion218,
 			to:         platformVersion219,
+			wantAction: migrationActionVerifyPin,
+		},
+		{
+			// The same pin between two bundles that already share a default vhost suppresses
+			// nothing, so there is nothing to verify: this is the ordinary additive path.
+			name: "managed: a user-pinned virtualHost between bundles with the same default is simply no migration",
+			platform: func() *otilmv1alpha1.Platform {
+				p := migrationPlatform(modeManaged, platformVersion217, platformVersion218)
+				p.Spec.Messaging.VirtualHost = pinnedTestVirtualHost
+				return p
+			}(),
+			from:       platformVersion217,
+			to:         platformVersion218,
 			wantAction: migrationActionNone,
 		},
 		{
@@ -272,6 +289,12 @@ func assertNoBrokerCoordinates(t *testing.T, message string) {
 		"amqp",
 		"password",
 		"@",
+		// The queue-name class: "time-quality." covers every queue the messaging topology
+		// carries under that prefix (time-quality.config, time-quality.config-request,
+		// time-quality.results) — a literal queue name is a broker coordinate exactly like a
+		// vhost or a host, and naming one in a user-facing message is the same leak this helper
+		// exists to catch.
+		"time-quality.",
 	}
 	for _, f := range forbidden {
 		assert.NotContains(t, strings.ToLower(message), f,
