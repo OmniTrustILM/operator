@@ -68,6 +68,10 @@ jobs:
           esac
           {
             echo "version=$version"
+            # Registry convention: images are tagged with the plain SemVer, no "v" —
+            # consistent with every other ILM image (core:2.19.0, scheduler:1.1.1, ...).
+            # The git tag and the GitHub release keep the v prefix (Go modules require it).
+            echo "image_version=${version#v}"
             echo "ref=$ref"
             # Mark recognised pre-release suffixes as GitHub pre-releases; plain vX.Y.Z is a full release.
             if printf '%s' "$version" | grep -Eq -- '-(rc|alpha|beta|preview|develop|dev|pre)([.-]|$)'; then
@@ -99,7 +103,7 @@ jobs:
 
       - name: Generate install manifests
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.version.outputs.image_version }}
         run: |
           set -euo pipefail
           make build-installer build-installer-crds \
@@ -110,7 +114,7 @@ jobs:
 
       - name: Verify the pinned operator image is pullable
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.version.outputs.image_version }}
         run: |
           set -euo pipefail
           image="hub.omnitrustregistry.com/ilm/operator:${VERSION}"
