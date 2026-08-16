@@ -101,6 +101,123 @@ kubectl get platform ilm -n ilm -w   # observedVersion 2.17.0 → 2.18.0, READY 
   for you. Some app-internal names persist (the `com.czertainly` log package, the `czertainlydb`
   default DB name) and are cosmetic.
 
+## Worked example: 2.18.0 → 2.19.0 (the messaging migration)
+
+Unlike 2.17.0 → 2.18.0, this move **renames** the managed messaging topology — the virtual
+host (`czertainly` → `/`) and the exchanges (`czertainly`/`czertainly-proxy` →
+`ilm`/`ilm-proxy`). A plain apply cannot converge that: the source and target objects are
+disjoint, and traffic has to move from one to the other without loss. So on a **managed**
+broker the operator runs its messaging-migration engine automatically the moment
+`spec.version` crosses this boundary — there is no separate flag to opt in with:
+
+```yaml
+spec:
+  version: "2.19.0"     # was "2.18.0"
+```
+
+```bash
+kubectl apply -f platform.yaml
+kubectl get platform ilm -n ilm -w
+```
+
+`status.observedVersion` stays `2.18.0` throughout Fencing and Draining (the platform keeps
+rendering its source topology while the migration waits) and only moves to `2.19.0` once
+CuttingOver starts — `Ready` tracks Core + the auth provider only, which the fence never
+touches, so the platform is not expected to go unready just because a migration is under way.
+
+### The four phases
+
+The engine walks the same four phases, in order, for every managed-broker version move that
+renames the topology. Progress is recorded on `status.upgrade.phase` and mirrored on the
+**`MessagingMigration`** condition and **`MessagingMigrationPhase`** events:
+
+1. **Fencing** — the platform's message PRODUCERS (the API gateway, the scheduler, and the
+   bundled provisioning service when `provisioning.mode=deploy`) are scaled to zero, and their
+   replica counts are recorded so they can be restored exactly. Core — the CONSUMER that
+   drains the queues — deliberately keeps running.
+2. **Draining** — the engine polls the source virtual host until every WORK queue reports
+   empty across three consecutive polls; long-lived RETENTION queues are exempt (they are
+   designed never to empty). Bounded by `spec.messaging.managed.drainTimeout` (default `15m`).
+3. **CuttingOver** — the target topology (`/`, `ilm`/`ilm-proxy`) is declared, the services
+   Core depends on are restored on it, Core itself is rolled onto the target wiring, and the
+   fenced producers are released back onto the new topology — the gateway reopens last.
+4. **CleaningUp** — the source topology (`czertainly`, `czertainly-proxy`) is reclaimed.
+
+```bash
+kubectl describe platform ilm -n ilm
+# Conditions:
+#   Type                 Status  Reason     Message
+#   MessagingMigration   True    Draining   messaging migration from platform version 2.18.0
+#       to 2.19.0 is in phase Draining (2 of 3 consecutive clean drain polls)
+kubectl get events -n ilm --field-selector involvedObject.name=ilm | grep MessagingMigrationPhase
+kubectl get platform ilm -n ilm -w
+# observedVersion moves 2.18.0 -> 2.19.0 when CuttingOver starts; Phase returns to Running once
+# Core's rollout onto the target wiring completes.
+```
+
+### Aborting or forcing it through
+
+- **Reverting `spec.version` to `2.18.0` aborts the migration — reversibly, but only while it
+  is still Fencing or Draining.** The fence is lifted, the recorded migration is cleared, and
+  the platform keeps running 2.18.0 exactly as it was. Once CuttingOver has started the move
+  is forward-only: a revert is refused (reason `MigrationForwardOnly`) and the only way out is
+  letting it finish.
+- **A drain that has not gone quiet within `drainTimeout`** blocks the migration — the fence
+  is lifted so 2.18.0 keeps serving at full strength — rather than waiting forever. The
+  migration record is deliberately kept, so it cannot silently restart and re-fence the same
+  producers on the next reconcile. That leaves exactly **two** ways out, and both are yours to
+  choose; nothing the operator does on its own resumes a drain that has expired, and an
+  unrelated spec edit only re-enqueues the Platform into the same blocked state.
+
+  Either **abort** — revert `spec.version` to `2.18.0`, exactly as above (the phase is still
+  Draining, so the revert is still reversible) — or **discard the remainder** with the
+  explicit, destructive escape hatch, which re-fences the producers and cuts over anyway:
+
+  ```yaml
+  spec:
+    messaging:
+      managed:
+        forceCutoverForVersion: "2.19.0"   # cut over anyway; drop whatever is left on czertainly
+  ```
+
+  The value must name the target version, and it authorises **this** attempt only: a
+  `forceCutoverForVersion` the spec already carried when the migration started is recorded as
+  carried over and does nothing until you clear the field and set it again.
+
+### Preconditions the engine enforces
+
+The operator refuses to even **start** this migration — with an actionable reason, before
+anything is fenced — when:
+
+- **`spec.core.timeQualityMonitor` is enabled.** The sidecar rides Core's pod, which the
+  fence never stops, so an enabled monitor would be an unfenced producer the drain can never
+  account for. Disable it for the migration window; it can be re-enabled once the move
+  completes.
+- **A component `workloadType` switch is already under way, or requested in the same edit.**
+  The two changes are refused together — finish one before starting the other.
+
+Once a migration **is** recorded, changing a migration-relevant spec field mid-flight
+(`spec.messaging.mode`, `spec.messaging.brokerType`, `spec.messaging.virtualHost`,
+`spec.provisioning.mode`, or the messaging credentials wiring) is refused too (reason
+`MigrationInputsChanged`) — restore the value, or revert `spec.version` while the migration
+is still reversible.
+
+### What this engine does NOT cover
+
+- **An external broker.** The operator does not own it and cannot migrate it, so the same
+  version bump is refused (reason `ExternalMessagingMigrationRequired`) until you migrate your
+  own broker's topology by hand and attest to it:
+
+  ```yaml
+  spec:
+    messaging:
+      migrationAcknowledgedForVersion: "2.19.0"
+  ```
+
+- **A platform that pins `spec.messaging.virtualHost` to the same vhost the target bundle
+  would also default to.** With no vhost change there is nothing to migrate — the version
+  bump applies as an ordinary additive update instead.
+
 ## Managed-infrastructure major-version upgrades (the guard)
 
 A **MAJOR** version bump of an **already-running, operator-managed** dependency is a

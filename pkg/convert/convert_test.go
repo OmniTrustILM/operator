@@ -497,3 +497,85 @@ global:
 	assert.Empty(t, r.Platform.Spec.Messaging.Host)
 	assert.Contains(t, strings.Join(r.customization, "\n"), "no external broker host")
 }
+
+// TestConvertMapsCoreFeatureValues proves the 2.19.0 Core values reach the CR instead of the
+// UNMAPPED footer: workloadType, platformInstanceId, the messaging time-quality toggle (local
+// and global forms), and the monitor sidecar block.
+func TestConvertMapsCoreFeatureValues(t *testing.T) {
+	values := vals{
+		"workloadType":       "StatefulSet",
+		"platformInstanceId": 42,
+		"messaging":          vals{"timeQuality": vals{"enabled": true}},
+	}
+	values["timeQualityMonitor"] = vals{
+		"enabled": true,
+		"image": vals{
+			"registry": "hub.omnitrustregistry.com", "repository": "ilm-private",
+			"name": "time-quality-monitor", "tag": "1.0.0",
+			"pullSecrets": []interface{}{"registry-credentials"},
+			"resources":   vals{"requests": vals{"cpu": "50m", "memory": "150M"}},
+			"probes":      vals{"liveness": vals{"initialDelaySeconds": 9}},
+		},
+		"logging": vals{"level": "DEBUG"},
+	}
+	r := Convert(values, "ilm", "ilm")
+	spec := r.Platform.Spec
+
+	assert.Equal(t, otilmv1alpha1.WorkloadKindStatefulSet, spec.Core.WorkloadType)
+	require.NotNil(t, spec.Core.InstanceID)
+	assert.Equal(t, int32(42), *spec.Core.InstanceID)
+	assert.True(t, spec.Messaging.TimeQuality.Enabled)
+	require.NotNil(t, spec.Core.TimeQualityMonitor)
+	assert.True(t, spec.Core.TimeQualityMonitor.Enabled)
+
+	m := spec.Core.TimeQualityMonitor
+	require.NotNil(t, m)
+	assert.Equal(t, "ilm-private", m.Image.Repository)
+	assert.Equal(t, "1.0.0", m.Image.Tag)
+	assert.Equal(t, []string{"registry-credentials"}, m.Image.PullSecrets)
+	require.NotNil(t, m.Resources, "the chart nests resources under image — they must NOT be dropped")
+	assert.Equal(t, "50m", m.Resources.Requests.Cpu().String())
+
+	out, err := r.Render()
+	require.NoError(t, err)
+	for _, key := range []string{"workloadType", "platformInstanceId", "timeQualityMonitor", "messaging"} {
+		// The trailing newline pins this to the BARE top-level report (flagUnmappedTopLevel
+		// appends just the key, so that line reads "# UNMAPPED: <key>\n"). Without it, the
+		// nested per-sub-key reports required below ("timeQualityMonitor.image.probes (...)")
+		// would false-positive: they legitimately start with "# UNMAPPED: timeQualityMonitor".
+		assert.NotContains(t, out, "# UNMAPPED: "+key+"\n",
+			"a block whose keys were all consumed must not be reported as unmapped")
+	}
+
+	// Everything the CR cannot express must be reported BY NAME. Marking the block known is
+	// what stops the top-level reporter, so the nested reporter owes the user the difference.
+	assert.Contains(t, out, "timeQualityMonitor.image.probes")
+	assert.Contains(t, out, "timeQualityMonitor.logging")
+}
+
+// TestConvertMessagingBlockIsReportedPerSubKey pins the other half of the messaging contract.
+// The chart-local messaging block is only PARTLY mapped — timeQuality maps, the broker
+// coordinates come from global.messaging — and flagUnmappedTopLevel inspects top-level keys
+// only, so the block is all-or-nothing there. Left out of knownTopLevel it prints
+// "# UNMAPPED: messaging" even when its only key was fully consumed (the case above); put in
+// without per-sub-key accounting it swallows the coordinates silently. This asserts the third
+// option: registered, with every UNCONSUMED sub-key named by its exact path.
+func TestConvertMessagingBlockIsReportedPerSubKey(t *testing.T) {
+	r := Convert(vals{
+		"messaging": vals{
+			"timeQuality": vals{"enabled": true},
+			"host":        "rabbit.local",
+			"port":        5672,
+		},
+	}, "ilm", "ilm")
+	out, err := r.Render()
+	require.NoError(t, err)
+
+	assert.True(t, r.Platform.Spec.Messaging.TimeQuality.Enabled)
+	assert.NotContains(t, out, "# UNMAPPED: messaging\n",
+		"the whole block must never be reported once it is registered")
+	assert.Contains(t, out, "messaging.host")
+	assert.Contains(t, out, "messaging.port")
+	assert.NotContains(t, out, "messaging.timeQuality",
+		"a sub-key that WAS consumed must not be reported")
+}

@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: api-gateway
         app.kubernetes.io/instance: ilm
@@ -134,7 +134,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: auth
         app.kubernetes.io/instance: ilm
@@ -159,7 +159,7 @@ spec:
             secretKeyRef:
               key: connection-string
               name: auth-db
-        image: hub.omnitrustregistry.com/ilm/auth:1.6.3
+        image: hub.omnitrustregistry.com/ilm/auth:1.7.0
         imagePullPolicy: IfNotPresent
         name: auth
         ports:
@@ -235,7 +235,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: auth-opa-policies
         app.kubernetes.io/instance: ilm
@@ -316,7 +316,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: core
         app.kubernetes.io/instance: ilm
@@ -383,11 +383,13 @@ spec:
           value: http://auth:8080
         - name: SCHEDULER_BASE_URL
           value: http://scheduler:8080
-        - name: LOGGING_LEVEL_COM_CZERTAINLY
+        - name: LOGGING_LEVEL_COM_OTILM
           value: INFO
         - name: PROVISIONING_API_URL
           value: https://prov.example.com
         - name: PROXY_ENABLED
+          value: "false"
+        - name: MESSAGING_TIME_QUALITY_ENABLED
           value: "false"
         - name: JDBC_USERNAME
           valueFrom:
@@ -436,7 +438,7 @@ spec:
             configMapKeyRef:
               key: messaging.amqp.port
               name: messaging-configmap
-        image: hub.omnitrustregistry.com/ilm/core:2.18.0
+        image: hub.omnitrustregistry.com/ilm/core:2.19.0
         imagePullPolicy: IfNotPresent
         lifecycle:
           postStart:
@@ -546,7 +548,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: fe-administrator
         app.kubernetes.io/instance: ilm
@@ -555,7 +557,7 @@ spec:
         app.kubernetes.io/part-of: ilm
     spec:
       containers:
-      - image: hub.omnitrustregistry.com/ilm/frontend-administrator:2.18.0
+      - image: hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0
         imagePullPolicy: IfNotPresent
         name: fe-administrator
         ports:
@@ -635,7 +637,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.18.0
+        otilm.com/platform-version: 2.19.0
       labels:
         app.kubernetes.io/component: scheduler
         app.kubernetes.io/instance: ilm
@@ -647,7 +649,7 @@ spec:
       - env:
         - name: PORT
           value: "8080"
-        - name: LOGGING_LEVEL_COM_CZERTAINLY
+        - name: LOGGING_LEVEL_COM_OTILM
           value: INFO
         - name: JDBC_URL
           value: jdbc:postgresql://ilm-db-rw:5432/ilm?characterEncoding=UTF-8
@@ -683,7 +685,7 @@ spec:
             configMapKeyRef:
               key: messaging.amqp.port
               name: messaging-configmap
-        image: hub.omnitrustregistry.com/ilm/scheduler:1.1.0
+        image: hub.omnitrustregistry.com/ilm/scheduler:1.1.1
         imagePullPolicy: IfNotPresent
         name: scheduler
         ports:

@@ -75,7 +75,13 @@ type RegistrationAttribute struct {
 
 // RegistrationSpec defines the platform registration configuration for the connector.
 type RegistrationSpec struct {
-	// PlatformURL is the URL of the platform to register with.
+	// PlatformURL is the platform's BASE API URL — INCLUDING its /api prefix — that the
+	// operator posts the connector registration to, e.g. https://ilm.example.com/api.
+	//
+	// Core serves its REST API under /api and the operator appends ONLY the versioned endpoint
+	// (/v2/connector/register), so a platformUrl without the /api prefix produces a 404. A
+	// platform served under an additional path prefix carries that here too, e.g.
+	// https://gateway.example.com/ilm/api. A trailing slash is tolerated.
 	// +kubebuilder:validation:Required
 	PlatformURL string `json:"platformUrl"`
 

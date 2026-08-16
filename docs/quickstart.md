@@ -15,7 +15,7 @@ Pick one path (the CRDs install with the operator):
 
 ```bash
 # kubectl apply — self-contained release manifest (installs into ilm-operator-system)
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
 
 # …or Helm (configurable; pick your own namespace)
 helm install ilm-operator deploy/charts/ilm-operator \
@@ -154,8 +154,8 @@ No credentials are ever inlined in the CR, status, conditions, events, or logs.
 ```bash
 kubectl get platform -n ilm -w
 # NAME   PHASE         VERSION   READY   AGE
-# ilm    Progressing   2.18.0    False   …
-# ilm    Running       2.18.0    True    …
+# ilm    Progressing   2.19.0    False   …
+# ilm    Running       2.19.0    True    …
 ```
 
 `READY` is the `Available` condition (Core + auth ready). Until an upstream operator

@@ -1,0 +1,61 @@
+# platform_core_statefulset.yaml — a MULTI-REPLICA Core, pinned to ILM 2.19.0.
+#
+# This sample PINS spec.version on purpose, and must: the multi-replica shape below depends on
+# PLATFORM_INSTANCE_ID, which only the 2.19.0 wiring names. On an older bundle three Core
+# replicas get NEITHER a per-pod instance id NOR the init-container guard that catches its
+# absence — three pods deriving ids from their pod IPs, free to issue certificates with
+# identical serial numbers. And spec.version pins on create (status.observedVersion), so an
+# install made against an operator whose default was older stays there until it is upgraded
+# deliberately.
+#
+# Core scales horizontally as a StatefulSet. Two facts make this shape the supported one:
+#   - Flyway locking: several Core pods may start together; exactly one runs the schema
+#     migration and the rest wait, so concurrent start-up is safe.
+#   - Instance identity: each Core pod needs a UNIQUE platform instance id (it goes into the
+#     certificate serial numbers Core issues). A StatefulSet pod carries a stable ordinal,
+#     which the operator projects into PLATFORM_INSTANCE_ID from the
+#     apps.kubernetes.io/pod-index label (Kubernetes v1.28+; an init container fails the pod
+#     fast if the label is missing, rather than letting Core mis-derive the id).
+#
+# DO NOT set spec.core.instanceId here: one explicit id is shared by every replica, so every
+# replica would emit IDENTICAL certificate serial numbers. The CRD rejects that combination.
+# Use spec.core.instanceId only on a single-replica Core.
+#
+# Switching workloadType on a RUNNING platform is orchestrated stop-before-start: the operator
+# stops the superseded workload and only then applies the new kind, so two Cores never run at
+# once. Expect a short Core outage across that switch. The switch is REFUSED while a messaging
+# migration is in flight — finish one before starting the other.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - Kubernetes v1.28+ (for the pod-index label).
+#   - An external PostgreSQL and an external AMQP broker, with their credentials Secrets:
+#       kubectl create secret generic ilm-db -n ilm \
+#         --from-literal=username=ilm --from-literal=password=<db-password>
+#       kubectl create secret generic ilm-messaging -n ilm \
+#         --from-literal=username=ilm --from-literal=password=<broker-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.19.0"                   # pin explicitly (GitOps); 2.19.0 is also the default
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  core:
+    workloadType: StatefulSet
+    replicas: 3

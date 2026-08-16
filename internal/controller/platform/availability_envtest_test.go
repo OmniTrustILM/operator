@@ -134,7 +134,7 @@ var _ = Describe("Platform availability primitives", func() {
 			}, "2s", platformInterval).Should(BeTrue(), "core must be a StatefulSet, not a Deployment")
 		})
 
-		It("prunes the old Deployment when a component is switched Deployment->StatefulSet (apply+prune)", func() {
+		It("stops the old Deployment before applying a StatefulSet when a component is switched (stop-before-start)", func() {
 			const ns = "ilm-sts-switch"
 			p := lifecyclePlatform(ns, nil) // default: core is a Deployment
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
@@ -153,19 +153,32 @@ var _ = Describe("Platform availability primitives", func() {
 				g.Expect(k8sClient.Update(ctx, &cur)).To(Succeed())
 			}, platformTimeout, platformInterval).Should(Succeed())
 
-			By("applying the new StatefulSet")
+			By("stopping the superseded Deployment BEFORE the StatefulSet is ever applied")
+			var dep appsv1.Deployment
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &dep)).To(Succeed())
+				g.Expect(dep.GetDeletionTimestamp()).NotTo(BeNil(), "the superseded Deployment must be foreground-deleted first")
+			}, platformTimeout, platformInterval).Should(Succeed())
+			Consistently(func() bool {
+				var sts appsv1.StatefulSet
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &sts)
+				return apierrors.IsNotFound(err)
+			}, "2s", platformInterval).Should(BeTrue(), "the new kind must not appear while the old one still has pods")
+
+			By("simulating the garbage collector finishing (envtest runs none)")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &dep)).To(Succeed())
+			dep.Finalizers = nil
+			Expect(k8sClient.Update(ctx, &dep)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &appsv1.Deployment{}))
+			}, platformTimeout, platformInterval).Should(BeTrue())
+
+			By("applying the new StatefulSet now that the old kind is genuinely gone")
 			Eventually(func(g Gomega) {
 				var sts appsv1.StatefulSet
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &sts)).To(Succeed())
 				g.Expect(sts.Spec.ServiceName).To(Equal("core"))
 			}, platformTimeout, platformInterval).Should(Succeed())
-
-			By("pruning the now-de-rendered Deployment (the old kind is reclaimed)")
-			Eventually(func() bool {
-				var dep appsv1.Deployment
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &dep)
-				return apierrors.IsNotFound(err)
-			}, platformTimeout, platformInterval).Should(BeTrue(), "the old core Deployment must be pruned after the kind switch")
 		})
 	})
 

@@ -63,7 +63,7 @@ The switch is `database.pgBouncer.managed`. Full explanation:
 | Sample | Shows |
 |---|---|
 | [`platform_2170.yaml`](./platform_2170.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.17.0. |
-| [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0 — a **preview** bundle: opt-in only via an explicit `spec.version`, not yet advertised or eligible as the default. |
+| [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0 — the operator's current default; pinning it explicitly is the GitOps-recommended form. |
 | [`platform_managed_pinned_versions.yaml`](./platform_managed_pinned_versions.yaml) | Pin each **managed engine** version (PostgreSQL / RabbitMQ / Keycloak) + the major-upgrade guard. |
 
 See [`docs/versions.md`](../../docs/versions.md) for the supported matrix and
@@ -74,6 +74,7 @@ See [`docs/versions.md`](../../docs/versions.md) for the supported matrix and
 |---|---|
 | [`platform_high_availability.yaml`](./platform_high_availability.yaml) | The HA profile (one flag) + a per-component HPA and PDB override. |
 | [`platform_production.yaml`](./platform_production.yaml) | HA + multi-instance managed infra + sized resources together. |
+| [`platform_core_statefulset.yaml`](./platform_core_statefulset.yaml) | **Multi-replica Core** as a StatefulSet (per-pod instance id from the pod ordinal). Pins **2.19.0** (the only bundle that wires the per-pod instance id). |
 
 ### Edge & TLS
 | Sample | Shows |
@@ -104,9 +105,14 @@ See [`docs/versions.md`](../../docs/versions.md) for the supported matrix and
 ## Connector samples
 
 The operator also manages standalone `Connector` CRs:
-[`connector_minimal.yaml`](./connector_minimal.yaml),
-[`connector_full.yaml`](./connector_full.yaml),
-[`connector_with_registration.yaml`](./connector_with_registration.yaml).
+
+| Sample | Shows |
+|---|---|
+| [`connector_minimal.yaml`](./connector_minimal.yaml) | The smallest Connector that runs. |
+| [`connector_full.yaml`](./connector_full.yaml) | Every shipped Connector field with example values. |
+| [`connector_with_registration.yaml`](./connector_with_registration.yaml) | Self-registration with the platform (`registration.platformUrl` is the platform's **base API URL, `/api` included**; the operator appends only `/v2/connector/register`). |
+| [`connector_otpki.yaml`](./connector_otpki.yaml) | **OT PKI** connector — private-registry image + pull secret + its secret-backed login password key. |
+| [`connector_timestamp_formatting.yaml`](./connector_timestamp_formatting.yaml) | **Timestamp formatting** connector — private-registry image + pull secret. |
 
 ## Proxy samples
 

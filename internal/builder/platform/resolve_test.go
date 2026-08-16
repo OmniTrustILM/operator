@@ -214,7 +214,7 @@ func TestResolveCoreEnvOverridesAppendedLast(t *testing.T) {
 func TestResolveCoreImageResolvedFromBOM(t *testing.T) {
 	// Shared registry/repository + bundle-provided core name/tag.
 	c := ResolveCore(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.18.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.19.0", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy), "default pull policy when unset")
 }
 
@@ -491,6 +491,189 @@ func TestResolveCoreProxyInstanceIDGatedOnProxy(t *testing.T) {
 	// It is downward-API only — never inlined as a value.
 	_, hasInline = envValue(c.Env, w.ProxyInstanceIDEnv)
 	assert.False(t, hasInline, "PROXY_INSTANCE_ID is sourced via fieldRef, not inline")
+}
+
+// TestCoreTimeQualityEnvIsWiringGated proves the two halves of the contract: the
+// MESSAGING_TIME_QUALITY_ENABLED value follows spec.messaging.timeQuality.enabled, and the
+// variable is rendered ONLY by a bundle whose wiring names it (2.19.0+). A 2.18.0 platform
+// must render no such variable at all, whatever the toggle says — the same empty-name gating
+// that keeps 2.17.0 free of the proxy/provisioning env.
+func TestCoreTimeQualityEnvIsWiringGated(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		enabled bool
+		want    string // "" means the variable must be absent
+	}{
+		{"2.19.0 default off", testVersion219, false, "false"},
+		{"2.19.0 enabled", testVersion219, true, "true"},
+		{"2.18.0 renders nothing", testVersion218, false, ""},
+		{"2.18.0 renders nothing even when enabled", testVersion218, true, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := basePlatform()
+			p.Spec.Version = c.version
+			p.Spec.Messaging.TimeQuality.Enabled = c.enabled
+			got, found := envValue(ResolveCore(p).Env, "MESSAGING_TIME_QUALITY_ENABLED")
+			if c.want == "" {
+				assert.False(t, found, "MESSAGING_TIME_QUALITY_ENABLED must not render on %s", c.version)
+				return
+			}
+			assert.True(t, found, "MESSAGING_TIME_QUALITY_ENABLED must render on %s", c.version)
+			assert.Equal(t, c.want, got)
+		})
+	}
+}
+
+// TestCoreExplicitInstanceIDEnv proves the explicit id renders as a plain value on 2.19.0 and
+// renders nothing on a bundle whose wiring does not name the variable.
+func TestCoreExplicitInstanceIDEnv(t *testing.T) {
+	id := int32(42)
+
+	p := basePlatform()
+	p.Spec.Version = testVersion219
+	p.Spec.Core.InstanceID = &id
+	got, found := envValue(ResolveCore(p).Env, "PLATFORM_INSTANCE_ID")
+	assert.True(t, found, "PLATFORM_INSTANCE_ID must render on 2.19.0")
+	assert.Equal(t, "42", got)
+
+	old := basePlatform()
+	old.Spec.Version = testVersion218
+	old.Spec.Core.InstanceID = &id
+	_, found = envValue(ResolveCore(old).Env, "PLATFORM_INSTANCE_ID")
+	assert.False(t, found, "PLATFORM_INSTANCE_ID must not render on 2.18.0")
+}
+
+// TestCoreStatefulSetDerivesInstanceIDFromPodIndex proves a StatefulSet Core with no explicit
+// id projects the pod ordinal into PLATFORM_INSTANCE_ID and ships the fail-fast guard, and
+// that the guard is absent on every other shape.
+func TestCoreStatefulSetDerivesInstanceIDFromPodIndex(t *testing.T) {
+	const fieldPath = "metadata.labels['apps.kubernetes.io/pod-index']"
+
+	sts := basePlatform()
+	sts.Spec.Version = testVersion219
+	sts.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	c := ResolveCore(sts)
+	require.Len(t, c.FieldRefEnv, 1)
+	assert.Equal(t, "PLATFORM_INSTANCE_ID", c.FieldRefEnv[0].EnvVar)
+	assert.Equal(t, fieldPath, c.FieldRefEnv[0].FieldPath)
+	require.NotEmpty(t, c.InitContainers)
+	assert.Equal(t, testVerifyInstanceID, c.InitContainers[0].Name,
+		"the guard must run FIRST, before the minutes-long dependency wait loops")
+
+	// An explicit id wins: no derivation, no guard.
+	explicit := basePlatform()
+	explicit.Spec.Version = testVersion219
+	explicit.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	explicit.Spec.Core.InstanceID = i32Ptr(3)
+	ec := ResolveCore(explicit)
+	assert.Empty(t, ec.FieldRefEnv)
+	assert.NotEqual(t, testVerifyInstanceID, ec.InitContainers[0].Name)
+
+	// A Deployment derives nothing (Core falls back to IP-derivation by design).
+	dep := basePlatform()
+	dep.Spec.Version = testVersion219
+	dc := ResolveCore(dep)
+	assert.Empty(t, dc.FieldRefEnv)
+	assert.NotEqual(t, testVerifyInstanceID, dc.InitContainers[0].Name)
+
+	// A bundle without the wiring name derives nothing either.
+	old := basePlatform()
+	old.Spec.Version = testVersion218
+	old.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	oc := ResolveCore(old)
+	assert.Empty(t, oc.FieldRefEnv)
+	assert.NotEqual(t, testVerifyInstanceID, oc.InitContainers[0].Name)
+}
+
+// TestDerivedInstanceIDBeatsEveryUserSuppliedSource renders the FINAL container env and pins
+// the one precedence a user override must never win: the pod-index-derived
+// PLATFORM_INSTANCE_ID is the StatefulSet pod's own ordinal, and a keyed core.secretRefs or
+// core.configMapRefs entry mapped onto that name would hand every replica ONE shared instance
+// id — colliding their certificate serial numbers, silently and undetectably after the fact.
+// Kubernetes resolves a duplicate env name to the LAST entry, so this asserts on position.
+func TestDerivedInstanceIDBeatsEveryUserSuppliedSource(t *testing.T) {
+	const env = "PLATFORM_INSTANCE_ID"
+	name := env
+
+	cases := []struct {
+		name  string
+		apply func(*otilmv1alpha1.Platform)
+	}{
+		{
+			name: "a keyed secretRef mapped onto the derived name",
+			apply: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Core.SecretRefs = []otilmv1alpha1.SecretRef{{
+					Name: "shared-id", Type: otilmv1alpha1.RefTypeEnv,
+					Keys: []otilmv1alpha1.RefKeyMapping{{SecretKey: "id", EnvVar: &name}},
+				}}
+			},
+		},
+		{
+			name: "a keyed configMapRef mapped onto the derived name",
+			apply: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Core.ConfigMapRefs = []otilmv1alpha1.ConfigMapRef{{
+					Name: "shared-id", Type: otilmv1alpha1.RefTypeEnv,
+					Keys: []otilmv1alpha1.ConfigMapKeyMapping{{ConfigMapKey: "id", EnvVar: &name}},
+				}}
+			},
+		},
+		{
+			name: "a plain spec.core.env entry of the same name",
+			apply: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Core.Env = []otilmv1alpha1.EnvVar{{Name: env, Value: "7"}}
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := basePlatform()
+			p.Spec.Version = testVersion219
+			p.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+			p.Spec.Core.Replicas = i32Ptr(3)
+			c.apply(p)
+
+			resolved := ResolveCore(p)
+			sts := common.BuildStatefulSet(resolved)
+			var main *corev1.Container
+			for i := range sts.Spec.Template.Spec.Containers {
+				if sts.Spec.Template.Spec.Containers[i].Name == resolved.Name {
+					main = &sts.Spec.Template.Spec.Containers[i]
+				}
+			}
+			require.NotNil(t, main, "the rendered StatefulSet must carry a core container")
+
+			last := -1
+			for i, e := range main.Env {
+				if e.Name == env {
+					last = i
+				}
+			}
+			require.GreaterOrEqual(t, last, 0, "%s must be rendered at all", env)
+			winner := main.Env[last]
+			require.NotNil(t, winner.ValueFrom, "the winning %s entry must be reference-derived", env)
+			require.NotNil(t, winner.ValueFrom.FieldRef,
+				"the LAST %s entry decides the value, and it must be the derived pod ordinal", env)
+			assert.Equal(t, podIndexLabelFieldPath, winner.ValueFrom.FieldRef.FieldPath)
+		})
+	}
+}
+
+// TestCoreProxyAndPodIndexFieldRefsCoexist pins the append (not assign) fix: a proxy-enabled
+// StatefulSet Core needs BOTH downward-API variables.
+func TestCoreProxyAndPodIndexFieldRefsCoexist(t *testing.T) {
+	p := basePlatform()
+	p.Spec.Version = testVersion219
+	p.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	p.Spec.Common.Proxy.Enabled = true
+	names := map[string]string{}
+	for _, f := range ResolveCore(p).FieldRefEnv {
+		names[f.EnvVar] = f.FieldPath
+	}
+	assert.Equal(t, "metadata.name", names["PROXY_INSTANCE_ID"])
+	assert.Equal(t, "metadata.labels['apps.kubernetes.io/pod-index']", names["PLATFORM_INSTANCE_ID"])
 }
 
 func TestResolveCoreProvisioning(t *testing.T) {
@@ -931,7 +1114,7 @@ func heredocParts(t *testing.T, script string) (body, outside string) {
 // exchange the provision-instance-queue script binds the pod's queue to.
 //
 // RESOLUTION: it is the SAME proxy exchange the provisioning builder declares — the selected
-// bundle's default (2.18.0: czertainly-proxy; 2.19.0: ilm-proxy) or the
+// bundle's default (2.19.0, the default: ilm-proxy; 2.18.0: czertainly-proxy) or the
 // spec.provisioning.deploy.exchange override. A hard-coded exchange would make Core's
 // registration retry forever on a platform whose bundle renamed it.
 //
@@ -948,11 +1131,11 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 		notWant string
 	}{
 		{
-			name: "default version (2.18.0) uses the czertainly proxy exchange",
+			name: "default version (2.19.0) uses the ilm proxy exchange",
 			mutate: func(_ *otilmv1alpha1.Platform) {
 				// no extra spec setup: default version resolves without explicit mutation
 			},
-			want: testExchangeCzertainlyProxy,
+			want: testExchangeIlmProxy,
 		},
 		{
 			name:    "explicit 2.18.0 uses the czertainly proxy exchange",
@@ -970,7 +1153,7 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 			name:    "spec.provisioning.deploy.exchange overrides the bundle default",
 			mutate:  exchangeOverride(testCustomProxyExchange),
 			want:    testCustomProxyExchange,
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 		// Hostile values. None can be STORED any more (the CRD constrains the field's charset),
 		// so these prove the CONSTRUCTION is safe regardless — the value stays inert JSON data
@@ -979,31 +1162,31 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 			name:    "command substitution stays inert data",
 			mutate:  exchangeOverride("$(id)"),
 			want:    "$(id)",
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 		{
 			name:    "backtick command substitution stays inert data",
 			mutate:  exchangeOverride("`id`"),
 			want:    "`id`",
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 		{
 			name:    "an embedded double quote cannot reshape the JSON",
 			mutate:  exchangeOverride(`a"b`),
 			want:    `a"b`,
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 		{
 			name:    "an embedded newline cannot break out of the heredoc",
 			mutate:  exchangeOverride("a\nb"),
 			want:    "a\nb",
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 		{
 			name:    "a variable reference is not expanded",
 			mutate:  exchangeOverride("a$VAR"),
 			want:    "a$VAR",
-			notWant: testExchangeCzertainlyProxy,
+			notWant: testExchangeIlmProxy,
 		},
 	}
 	for _, tc := range tests {
@@ -1310,6 +1493,12 @@ func TestResolveCoreProvisionQueueBodyIsConfigurable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := proxyProvisioningPlatform()
+			// PINNED to 2.18.0. This table asserts the request body BYTE-FOR-BYTE, including the
+			// bundle's proxy exchange — its stated purpose is that an unset field "renders exactly the
+			// bytes it rendered before the field existed", which is a 2.18.0 fact. The exchange's
+			// VERSION resolution is asserted separately, on both bundles, by
+			// TestResolveCoreProvisionQueueInitExchangeIsVersionResolved.
+			p.Spec.Version = testVersion218
 			tc.mutate(p)
 			body, outside := heredocParts(t, provisionQueueScript(t, p))
 
@@ -1555,7 +1744,7 @@ func TestResolveSchedulerBasics(t *testing.T) {
 
 func TestResolveSchedulerImage(t *testing.T) {
 	c := ResolveScheduler(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.1.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.1.1", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy))
 }
 
@@ -1567,7 +1756,7 @@ func TestResolveSchedulerInlineEnv(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "8080", port)
 
-	logLevel, ok := envValue(c.Env, "LOGGING_LEVEL_COM_CZERTAINLY")
+	logLevel, ok := envValue(c.Env, "LOGGING_LEVEL_COM_OTILM")
 	require.True(t, ok)
 	assert.Equal(t, "INFO", logLevel)
 
@@ -1805,7 +1994,7 @@ func TestResolveAuthBasics(t *testing.T) {
 
 func TestResolveAuthImage(t *testing.T) {
 	c := ResolveAuth(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.6.3", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.7.0", c.Image)
 }
 
 func TestResolveAuthInlineEnv(t *testing.T) {
@@ -1998,7 +2187,7 @@ func TestResolveFeAdministratorBasics(t *testing.T) {
 
 func TestResolveFeAdministratorImage(t *testing.T) {
 	c := ResolveFeAdministrator(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.18.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0", c.Image)
 }
 
 func TestResolveFeAdministratorNoEnv(t *testing.T) {

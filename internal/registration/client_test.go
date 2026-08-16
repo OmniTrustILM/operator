@@ -203,6 +203,38 @@ func TestPostInvalidURL(t *testing.T) {
 	assert.Contains(t, err.Error(), "creating request")
 }
 
+// TestPostComposesTheRequestURL pins the EXACT path that leaves the process, for every shape of
+// platformUrl the contract allows.
+//
+// platformUrl is the platform's BASE API URL — it already ends in /api — so the composition has
+// exactly one job: JOIN. The real hazard is a trailing slash, because plain concatenation turns
+// "https://host/api/" + "/v2/connector/register" into "https://host/api//v2/connector/register",
+// which Core does not route. The subpath cases are here because they are what proves the join
+// never rewrites or re-states the base's own path.
+func TestPostComposesTheRequestURL(t *testing.T) {
+	cases := []struct{ name, suffix, want string }{
+		{"base API url", "/api", "/api/v2/connector/register"},
+		{"base API url with a trailing slash", "/api/", "/api/v2/connector/register"},
+		{"subpath prefix", "/ilm/api", "/ilm/api/v2/connector/register"},
+		{"subpath prefix with a trailing slash", "/ilm/api/", "/ilm/api/v2/connector/register"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set(contentTypeKey, contentTypeJSON)
+				_, _ = w.Write([]byte(`{"uuid":"u","name":"n","status":"connected"}`))
+			}))
+			defer srv.Close()
+
+			_, err := Register(context.Background(), NewClient(srv.URL+c.suffix), &Request{Name: "n"})
+			require.NoError(t, err)
+			assert.Equal(t, c.want, gotPath, "platformUrl suffix %q", c.suffix)
+		})
+	}
+}
+
 func TestPostInvalidResponseJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(contentTypeKey, contentTypeJSON)

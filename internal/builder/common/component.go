@@ -260,13 +260,17 @@ type Component struct {
 	// ConfigMapEnv lists env vars sourced via configMapKeyRef; rendered after Env and SecretEnv.
 	ConfigMapEnv []ConfigMapEnvRef
 	// FieldRefEnv lists env vars sourced from pod fields via the downward API
-	// (valueFrom.fieldRef); rendered after Env, SecretEnv, and ConfigMapEnv.
+	// (valueFrom.fieldRef); rendered LAST, after every other source including ExtraEnv, so
+	// they win on a duplicate name. These are the pod's own IDENTITY rather than
+	// configuration — only the operator writes here, and nothing a user supplies may shadow
+	// a value derived from the pod itself (see buildContainerEnv).
 	FieldRefEnv []FieldRefEnv
-	// ExtraEnv carries fully-formed container env vars appended LAST (after Env,
-	// SecretEnv, ConfigMapEnv, FieldRefEnv) so they win on a duplicate name. It is the
-	// passthrough slot for user-supplied keyed secret/configmap refs rendered via the
-	// shared key-mapping logic, whose secretKeyRef/configMapKeyRef shape the typed
-	// SecretEnv/ConfigMapEnv helpers do not cover (e.g. arbitrary EnvVar names).
+	// ExtraEnv carries fully-formed container env vars appended after Env, SecretEnv and
+	// ConfigMapEnv, so they win over the operator's defaults on a duplicate name (but not
+	// over FieldRefEnv). It is the passthrough slot for user-supplied keyed secret/configmap
+	// refs rendered via the shared key-mapping logic, whose secretKeyRef/configMapKeyRef
+	// shape the typed SecretEnv/ConfigMapEnv helpers do not cover (e.g. arbitrary EnvVar
+	// names).
 	ExtraEnv []corev1.EnvVar
 	// EnvFrom carries whole-Secret / whole-ConfigMap envFrom sources (a SecretRef/
 	// ConfigMapRef of type=env with no key mapping projects every key). Rendered on the

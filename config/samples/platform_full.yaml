@@ -43,7 +43,7 @@ spec:
   # necessarily the newest bundle it carries — so an existing CR keeps today's behaviour. One
   # operator build supports a RANGE of versions; an unknown version degrades with a
   # supported-versions message. status.observedVersion reports the resolved version.
-  version: "2.18.0"                          # omit/"" pins the operator's default at creation (no auto-upgrade)
+  version: "2.19.0"                          # omit/"" pins the operator's default at creation (no auto-upgrade)
 
   # ── platform-wide knobs ──
   deletionPolicy: Retain            # Retain (default) | Delete
@@ -201,7 +201,7 @@ spec:
     clientCertHeader: ssl-client-cert   # client-cert forwarding header from edge to Core
     replicas: 2
     image:
-      tag: 2.18.0                   # per-field override of spec.common.image
+      tag: 2.19.0                   # per-field override of spec.common.image
     resources:
       requests:
         cpu: 500m

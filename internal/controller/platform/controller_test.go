@@ -1015,10 +1015,20 @@ var _ = Describe("Platform Controller", func() {
 				p.Spec.Utils = otilmv1alpha1.UtilsSpec{Enabled: false}
 			})
 
-			By("verifying the utils Deployment/Service/SA are pruned")
+			// The Deployment is pruned with FOREGROUND propagation, so it survives its own
+			// delete until its pods are gone (see pruneDeleteOptions). envtest runs no garbage
+			// collector, so here it stops at exactly that point: deletionTimestamp set and the
+			// foregroundDeletion finalizer held. On a real cluster the collector removes both
+			// once the ReplicaSet and pods are reclaimed, which is what the Kind e2e observes.
+			// Its pod-owning children are the whole reason for the policy, so "pruned" for a
+			// workload means STOPPING, not merely absent.
+			By("verifying the utils Deployment is stopped, and the Service/SA are pruned outright")
 			Eventually(func(g Gomega) {
 				var dep appsv1.Deployment
-				g.Expect(apierrors.IsNotFound(k8sClient.Get(ctx, utilsKey, &dep))).To(BeTrue(), "Deployment pruned")
+				g.Expect(k8sClient.Get(ctx, utilsKey, &dep)).To(Succeed(), "the workload outlives its pods")
+				g.Expect(dep.DeletionTimestamp).NotTo(BeNil(), "Deployment pruned (terminating)")
+				g.Expect(dep.Finalizers).To(ContainElement("foregroundDeletion"),
+					"the pods must be gone before the object is")
 				var svc corev1.Service
 				g.Expect(apierrors.IsNotFound(k8sClient.Get(ctx, utilsKey, &svc))).To(BeTrue(), "Service pruned")
 				var sa corev1.ServiceAccount
@@ -1262,13 +1272,10 @@ var _ = Describe("Platform Controller", func() {
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
-		It("allows a fresh platform to pin directly to the preview 2.19.0 bundle", func() {
-			// 2.19.0 is a preview bundle (Released: false): excluded from SupportedVersions()
-			// and never DefaultVersion-eligible, but an explicit spec.version still resolves it
-			// on a fresh install like this one. There is no separate preview-upgrade guard — a
-			// LIVE platform can name it too; the messaging-migration suite covers what governs
-			// that move (fence/drain/cutover for a managed broker, migrationAcknowledgedForVersion
-			// for an external one).
+		It("allows a fresh platform to pin the newest bundle explicitly", func() {
+			// A fresh install may always name a version explicitly. 2.19.0 is now the DEFAULT, so this
+			// spec proves the explicit-pin path still resolves and reports the same version the
+			// version-less path lands on — the GitOps form, and the one status.observedVersion echoes.
 			const ns = "ilm-version-2190-fresh"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion219))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
@@ -1283,15 +1290,18 @@ var _ = Describe("Platform Controller", func() {
 		})
 
 		It("clears the stale Degraded condition once a refused spec.version is corrected", func() {
+			// PINNED to 2.18.0: this spec needs a version move that actually RENAMES the external
+			// messaging topology, and 2.18.0 → 2.19.0 is the only one this build carries. Started on
+			// the default it would be a no-op the moment 2.19.0 becomes the default.
 			const ns = "ilm-version-degraded-cleared"
-			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, ""))).To(Succeed())
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion218))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
 
-			By("reaching Running on the operator's default (released) version")
+			By("reaching Running on an explicitly pinned 2.18.0")
 			Eventually(func(g Gomega) {
 				var got otilmv1alpha1.Platform
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
-				g.Expect(got.Status.ObservedVersion).To(Equal(bom.DefaultVersion))
+				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion218))
 			}, platformTimeout, platformInterval).Should(Succeed())
 
 			By("requesting an upgrade that renames the EXTERNAL messaging topology without acknowledgement, so the platform goes Degraded")
@@ -1318,7 +1328,7 @@ var _ = Describe("Platform Controller", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got); err != nil {
 					return err
 				}
-				got.Spec.Version = bom.DefaultVersion
+				got.Spec.Version = platformVersion218
 				return k8sClient.Update(ctx, &got)
 			}, platformTimeout, platformInterval).Should(Succeed())
 

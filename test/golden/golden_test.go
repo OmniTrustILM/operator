@@ -57,6 +57,8 @@ import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -75,6 +77,9 @@ const (
 	goldenDir = "testdata"
 	// docSeparator joins serialized objects into a single multi-document YAML stream.
 	docSeparator = "---\n"
+	// version2190 pins a variant to the 2.19.0 bundle — the default bundle, pinned here
+	// explicitly so the variant is stable across future default moves.
+	version2190 = "2.19.0"
 )
 
 // updateGolden, when true (UPDATE_GOLDEN=1 in the environment, or -update on the test
@@ -171,6 +176,9 @@ func variants() []variant {
 		managedDBVariant(),
 		managedDBNoPoolerVariant(),
 		version2190Variant(),
+		timeQualityVariant(),
+		coreInstanceIDVariant(),
+		coreStatefulSetVariant(),
 	}
 }
 
@@ -299,19 +307,77 @@ func managedDBNoPoolerVariant() variant {
 	return variant{name: "managed-db-no-pooler", platform: platformFor(spec)}
 }
 
-// version2190Variant: a platform PINNED to the 2.19.0 bundle (a preview bundle — reachable
-// only by naming it explicitly), with proxy support on so the provision-instance-queue init
-// container renders too. It is the byte-for-byte record of what "spec.version: 2.19.0" ships:
-// the 2.19.0 image tags (core / frontend-administrator 2.19.0, auth 1.7.0, scheduler 1.1.1),
-// the 2.19.0 wiring (the LOGGING_LEVEL_COM_OTILM rename), and the renamed proxy exchange
-// (czertainly-proxy → ilm-proxy) in the queue-registration request. Every other variant
-// renders the default (2.18.0) bundle, so the diff between this golden and minimal's is the
-// version contract itself.
+// version2190Variant: a platform PINNED to the 2.19.0 bundle — the default bundle, pinned here
+// explicitly so the variant is stable across future default moves — with proxy support on so
+// the provision-instance-queue init container renders too. It is the byte-for-byte record of
+// what "spec.version: 2.19.0" ships: the 2.19.0 image tags (core / frontend-administrator
+// 2.19.0, auth 1.7.0, scheduler 1.1.1), the 2.19.0 wiring (the LOGGING_LEVEL_COM_OTILM rename),
+// and the renamed proxy exchange (czertainly-proxy → ilm-proxy) in the queue-registration
+// request. Every other variant now renders the same 2.19.0 default, so this variant's value is
+// the explicit pin plus the proxy path, not a version delta.
 func version2190Variant() variant {
 	spec := fullFeatureSpec()
-	spec.Version = "2.19.0"
+	spec.Version = version2190
 	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	return variant{name: "version-2190", platform: platformFor(spec)}
+}
+
+// timeQualityVariant: the 2.19.0 platform with BOTH time-quality controls on — Core's
+// integration env and the monitor sidecar (external broker, so the monitor's credentials come
+// from an explicit Secret reference). It is the byte-for-byte record of the private sidecar
+// image resolution, the pod-level pull-secret union, the monitor's broker wiring and its
+// resource block.
+//
+// The RESOURCES are set here explicitly and on purpose: fullFeatureSpec supplies no resources
+// at all (VERIFIED: test/golden/golden_test.go:121-140), so a variant that left them unset
+// would record a golden with no resources block and prove nothing about the one sidecar field
+// that is neither image nor credentials.
+func timeQualityVariant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2190
+	spec.Common.Image.PullSecrets = []string{"registry-credentials"}
+	spec.Messaging.TimeQuality = otilmv1alpha1.TimeQualitySpec{Enabled: true}
+	spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{
+		Enabled:     true,
+		Image:       otilmv1alpha1.ImageSpec{PullSecrets: []string{"private-registry-credentials"}},
+		Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "time-quality-monitor-credentials"},
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("150M"),
+			},
+			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("300M")},
+		},
+	}
+	return variant{name: "time-quality", platform: platformFor(spec)}
+}
+
+// coreInstanceIDVariant: a 2.19.0 platform with an EXPLICIT spec.core.instanceId on a
+// single-replica Core. It is the byte-for-byte record of the plain-value PLATFORM_INSTANCE_ID
+// render — the shape the CEL guards exist to protect — and its diff against version-2190's
+// golden isolates the plain-value PLATFORM_INSTANCE_ID render, since that golden also runs
+// with proxy support enabled (so the diff additionally covers PROXY_ENABLED/ENABLE_PROXIES,
+// the PROXY_INSTANCE_ID fieldRef, and the provision-instance-queue init container), which is
+// what makes an accidental fieldRef (the derived shape) or a missing gate visible in review.
+func coreInstanceIDVariant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2190
+	spec.Core.InstanceID = ptr(int32(7))
+	spec.Core.Replicas = ptr(int32(1))
+	return variant{name: "core-instance-id", platform: platformFor(spec)}
+}
+
+// coreStatefulSetVariant: a 2.19.0 platform whose Core renders as a multi-replica StatefulSet
+// with NO explicit instanceId — the shipped multi-replica shape. It is the byte-for-byte
+// record of the two things that shape depends on and nothing else asserts together: the
+// downward-API PLATFORM_INSTANCE_ID projected from apps.kubernetes.io/pod-index, and the
+// verify-instance-id init container standing FIRST, ahead of wait-for-auth.
+func coreStatefulSetVariant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2190
+	spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	spec.Core.Replicas = ptr(int32(3))
+	return variant{name: "core-statefulset", platform: platformFor(spec)}
 }
 
 // ---- the snapshot test ------------------------------------------------------

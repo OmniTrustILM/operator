@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -67,6 +68,28 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+// requestURL composes the absolute request URL for a path relative to the client's base URL.
+//
+// spec.registration.platformUrl is the platform's BASE API URL — it already carries the /api
+// prefix (see RegistrationSpec.PlatformURL) — so this deliberately does NOT inject, rewrite or
+// de-duplicate any path segment. It only JOINS. url.URL.JoinPath keeps the base's own path
+// exactly once and cleans the result, so a trailing slash on the base can no longer produce the
+// "//v2/..." that Core does not route.
+//
+// A base URL that does not PARSE falls back to concatenation, so an invalid platformUrl still
+// fails inside http.NewRequestWithContext with the same "creating request" error it has always
+// produced (TestPostInvalidURL) rather than a new, differently-worded one.
+//
+// SECURITY: the URL is never placed in an error, condition or log line — Core's host/port must
+// not leak out of this package (the same reason Post's transport error is a fixed phrase).
+func (c *Client) requestURL(path string) string {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return c.baseURL + path
+	}
+	return u.JoinPath(path).String()
+}
+
 // Post sends a JSON POST request to the given path. The body is JSON-encoded
 // and the result (if non-nil) is decoded from the response body.
 // Returns a *Error for HTTP errors. 5xx and network errors are retryable; 4xx are not.
@@ -76,7 +99,7 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 		return fmt.Errorf("marshalling request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.requestURL(path), bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

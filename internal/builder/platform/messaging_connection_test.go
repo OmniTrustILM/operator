@@ -48,11 +48,11 @@ func TestResolveMessagingConnectionExternalUnchanged(t *testing.T) {
 }
 
 func TestResolveMessagingConnectionManagedResolvesToRabbitMQ(t *testing.T) {
-	p := managedMQPlatform(nil) // name "ilm", no virtualHost → default czertainly
+	p := managedMQPlatform(nil) // name "ilm", no virtualHost → the pinned 2.18.0 bundle's czertainly
 	conn := ResolveMessagingConnection(p)
 	assert.Equal(t, "ilm-messaging", conn.Host, "managed host is the RabbitMQ client Service <cluster>")
 	assert.Equal(t, int32(5672), conn.Port)
-	assert.Equal(t, "czertainly", conn.VirtualHost, "managed vhost defaults to czertainly")
+	assert.Equal(t, "czertainly", conn.VirtualHost, "the 2.18.0 managed vhost is czertainly")
 	assert.Equal(t, "ilm-messaging-core-user-credentials", conn.CredentialsSecretName,
 		"managed creds come from the Topology-generated Core-user Secret")
 	assert.Equal(t, "ilm-messaging-provisioner-user-credentials", conn.ProvisioningCredentialsSecretName,
@@ -165,9 +165,9 @@ func TestResolveMessagingConnectionManagedIgnoresUserKeys(t *testing.T) {
 	assert.Equal(t, "password", conn.PasswordKey, "managed keeps the Topology-generated password key")
 }
 
-// TestResolveMessagingConnectionManagedAdministratorCredentials proves a managed broker on
-// the default (2.18.0) bundle exposes the Topology-generated administrator-user Secret name
-// and the management API endpoint the queue-depth poll authenticates against.
+// TestResolveMessagingConnectionManagedAdministratorCredentials proves a managed broker on the
+// pinned 2.18.0 bundle exposes the Topology-generated administrator-user Secret name and the
+// management API endpoint the queue-depth poll authenticates against.
 func TestResolveMessagingConnectionManagedAdministratorCredentials(t *testing.T) {
 	p := managedMQPlatform(nil)
 	conn := ResolveMessagingConnection(p)

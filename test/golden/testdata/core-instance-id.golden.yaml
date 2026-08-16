@@ -1,0 +1,1170 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: api-gateway
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: ilm
+  name: api-gateway
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: api-gateway
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: api-gateway
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: api-gateway
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - env:
+        - name: KONG_DATABASE
+          value: "off"
+        - name: KONG_PREFIX
+          value: /tmp/
+        - name: KONG_PROXY_ACCESS_LOG
+          value: /dev/stdout
+        - name: KONG_ADMIN_ACCESS_LOG
+          value: /dev/stdout
+        - name: KONG_PROXY_ERROR_LOG
+          value: /dev/stderr
+        - name: KONG_ADMIN_ERROR_LOG
+          value: /dev/stderr
+        - name: KONG_ADMIN_LISTEN
+          value: 0.0.0.0:8001, 0.0.0.0:8444 ssl
+        - name: KONG_STATUS_LISTEN
+          value: 0.0.0.0:8100
+        - name: KONG_DECLARATIVE_CONFIG
+          value: /kong/declarative/kong.yml
+        - name: KONG_PLUGINS
+          value: request-transformer,cors,file-log,response-transformer,post-function
+        - name: KONG_LOG_LEVEL
+          value: info
+        image: hub.omnitrustregistry.com/ilm/kong:3.9.1
+        imagePullPolicy: IfNotPresent
+        name: api-gateway
+        ports:
+        - containerPort: 8000
+          name: consumer-http
+        - containerPort: 8001
+          name: admin-http
+        readinessProbe:
+          exec:
+            command:
+            - kong
+            - health
+          failureThreshold: 3
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          exec:
+            command:
+            - kong
+            - health
+          failureThreshold: 45
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /kong/declarative
+          name: api-gateway-config-volume
+        - mountPath: /tmp
+          name: ephemeral
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: api-gateway
+      volumes:
+      - configMap:
+          items:
+          - key: kong.yml
+            path: kong.yml
+          name: global-configmap
+        name: api-gateway-config-volume
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 10Mi
+        name: ephemeral
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth
+    app.kubernetes.io/part-of: ilm
+  name: auth
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: auth
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: auth
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: auth
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - env:
+        - name: TMPDIR
+          value: /tmp
+        - name: AUTH_CREATE_UNKNOWN_USERS
+          value: "false"
+        - name: AUTH_CREATE_UNKNOWN_ROLES
+          value: "false"
+        - name: SYNC_POLICY
+          value: create-only
+        - name: ASPNETCORE_URLS
+          value: http://+:8080
+        - name: AUTH_DB_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              key: connection-string
+              name: auth-db
+        image: hub.omnitrustregistry.com/ilm/auth:1.7.0
+        imagePullPolicy: IfNotPresent
+        name: auth
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 45
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /tmp
+          name: ephemeral
+        - mountPath: /etc/ssl/certs
+          name: trusted-certificates-volume
+          readOnly: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: auth
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+        name: ephemeral
+      - name: trusted-certificates-volume
+        secret:
+          defaultMode: 420
+          secretName: trusted-certificates
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: auth-opa-policies
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth-opa-policies
+    app.kubernetes.io/part-of: ilm
+  name: auth-opa-policies
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: auth-opa-policies
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: auth-opa-policies
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: auth-opa-policies
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - image: hub.omnitrustregistry.com/ilm/auth-opa-policies:1.4.1
+        imagePullPolicy: IfNotPresent
+        name: auth-opa-policies
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /index.html
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 45
+          httpGet:
+            path: /index.html
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /var/cache/nginx
+          name: ephemeral
+        - mountPath: /tmp
+          name: ephemeral
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: auth-opa-policies
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+        name: ephemeral
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: core
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: core
+    app.kubernetes.io/part-of: ilm
+  name: core
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: core
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: core
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: core
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - args:
+        - run
+        - --server
+        - --addr=0.0.0.0:8181
+        - --set=services.nginx.url=http://auth-opa-policies:8080
+        - --set=bundles.nginx.service=nginx
+        - --set=bundles.nginx.resource=bundles/bundle.tar.gz
+        image: hub.omnitrustregistry.com/ilm/opa:1.10.0-static
+        imagePullPolicy: IfNotPresent
+        name: auth-opa
+        ports:
+        - containerPort: 8181
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health?bundle=true
+            port: 8181
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health?bundle=true
+            port: 8181
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+      - env:
+        - name: HEADER_ENABLED
+          value: "true"
+        - name: HEADER_NAME
+          value: ssl-client-cert
+        - name: JDBC_URL
+          value: jdbc:postgresql://db.example.com:5432/ilm?characterEncoding=UTF-8
+        - name: BROKER_VIRTUAL_HOST
+          value: ilm
+        - name: OPA_BASE_URL
+          value: http://localhost:8181
+        - name: AUTH_SERVICE_BASE_URL
+          value: http://auth:8080
+        - name: SCHEDULER_BASE_URL
+          value: http://scheduler:8080
+        - name: LOGGING_LEVEL_COM_OTILM
+          value: INFO
+        - name: PROVISIONING_API_URL
+          value: https://prov.example.com
+        - name: PROXY_ENABLED
+          value: "false"
+        - name: MESSAGING_TIME_QUALITY_ENABLED
+          value: "false"
+        - name: PLATFORM_INSTANCE_ID
+          value: "7"
+        - name: JDBC_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: core-secret
+        - name: JDBC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: core-secret
+        - name: BROKER_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: messaging-secret
+        - name: BROKER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: messaging-secret
+        - name: TRUSTED_CERTIFICATES
+          valueFrom:
+            secretKeyRef:
+              key: ca.crt
+              name: trusted-certificates
+              optional: true
+        - name: PROVISIONING_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: provisioningApiKey
+              name: provisioning-secret
+        - name: ADMIN_CERT
+          valueFrom:
+            secretKeyRef:
+              key: tls.crt
+              name: admin-certificate-secret
+              optional: true
+        - name: BROKER_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: messaging.host
+              name: messaging-configmap
+        - name: BROKER_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: messaging.amqp.port
+              name: messaging-configmap
+        image: hub.omnitrustregistry.com/ilm/core:2.19.0
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - sh
+              - -c
+              - /opt/ilm/scripts/register-admin.sh
+        name: core
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health/readiness
+            port: 8080
+          initialDelaySeconds: 15
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 45
+          httpGet:
+            path: /api/v1/health/liveness
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /tmp
+          name: ephemeral
+        - mountPath: /opt/ilm/scripts
+          name: core-scripts
+          readOnly: true
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          while ! nc -z auth 8080; do sleep 1; done &&
+          while ! nc -z auth-opa-policies 8080; do sleep 1; done &&
+          echo "auth service seems to be started" &&
+          while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done &&
+          while ! nc -z scheduler 8080; do sleep 1; done &&
+          echo "messaging and scheduler service seems to be started"
+        env:
+        - name: MQ_WAIT_HOST
+          value: messaging-service
+        - name: MQ_WAIT_PORT
+          value: "5672"
+        image: hub.omnitrustregistry.com/ilm/curl:8.16.0
+        imagePullPolicy: IfNotPresent
+        name: wait-for-auth
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: core
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+        name: ephemeral
+      - configMap:
+          defaultMode: 493
+          items:
+          - key: register-admin.sh
+            path: register-admin.sh
+          name: ilm-core-scripts
+        name: core-scripts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: fe-administrator
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: fe-administrator
+    app.kubernetes.io/part-of: ilm
+  name: fe-administrator
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: fe-administrator
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: fe-administrator
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: fe-administrator
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - image: hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0
+        imagePullPolicy: IfNotPresent
+        name: fe-administrator
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 45
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /usr/share/nginx/html/config.js
+          name: fe-administrator-config-volume
+          subPath: config.js
+        - mountPath: /var/cache/nginx
+          name: ephemeral
+        - mountPath: /tmp
+          name: ephemeral
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: fe-administrator
+      volumes:
+      - configMap:
+          items:
+          - key: config.js
+            path: config.js
+          name: fe-administrator-configmap
+        name: fe-administrator-config-volume
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+        name: ephemeral
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: scheduler
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: scheduler
+    app.kubernetes.io/part-of: ilm
+  name: scheduler
+  namespace: ilm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: scheduler
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        otilm.com/platform-version: 2.19.0
+      labels:
+        app.kubernetes.io/component: scheduler
+        app.kubernetes.io/instance: ilm
+        app.kubernetes.io/managed-by: ilm-operator
+        app.kubernetes.io/name: scheduler
+        app.kubernetes.io/part-of: ilm
+    spec:
+      containers:
+      - env:
+        - name: PORT
+          value: "8080"
+        - name: LOGGING_LEVEL_COM_OTILM
+          value: INFO
+        - name: JDBC_URL
+          value: jdbc:postgresql://db.example.com:5432/ilm?characterEncoding=UTF-8
+        - name: BROKER_VIRTUAL_HOST
+          value: ilm
+        - name: JDBC_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: core-secret
+        - name: JDBC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: core-secret
+        - name: BROKER_USERNAME
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: messaging-secret
+        - name: BROKER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: password
+              name: messaging-secret
+        - name: BROKER_HOST
+          valueFrom:
+            configMapKeyRef:
+              key: messaging.host
+              name: messaging-configmap
+        - name: BROKER_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: messaging.amqp.port
+              name: messaging-configmap
+        image: hub.omnitrustregistry.com/ilm/scheduler:1.1.1
+        imagePullPolicy: IfNotPresent
+        name: scheduler
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /health/readiness
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          failureThreshold: 45
+          httpGet:
+            path: /health/liveness
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /tmp
+          name: ephemeral
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - |
+          while ! nc -z "$MQ_WAIT_HOST" "$MQ_WAIT_PORT"; do sleep 1; done &&
+          echo "messaging service seems to be started"
+        env:
+        - name: MQ_WAIT_HOST
+          value: messaging-service
+        - name: MQ_WAIT_PORT
+          value: "5672"
+        image: hub.omnitrustregistry.com/ilm/curl:8.16.0
+        imagePullPolicy: IfNotPresent
+        name: wait-for-messaging-service
+        resources: {}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: scheduler
+      volumes:
+      - emptyDir:
+          medium: Memory
+          sizeLimit: 1Mi
+        name: ephemeral
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: network-policy
+    app.kubernetes.io/part-of: ilm
+  name: ilm-allow-edge-to-gateway
+  namespace: ilm
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - port: 8000
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/name: api-gateway
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: network-policy
+    app.kubernetes.io/part-of: ilm
+  name: ilm-allow-egress
+  namespace: ilm
+spec:
+  egress:
+  - {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/part-of: ilm
+  policyTypes:
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: network-policy
+    app.kubernetes.io/part-of: ilm
+  name: ilm-default-deny-ingress
+  namespace: ilm
+spec:
+  ingress:
+  - from:
+    - podSelector: {}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: ilm
+      app.kubernetes.io/part-of: ilm
+  policyTypes:
+  - Ingress
+---
+apiVersion: v1
+data:
+  config.js: |-
+    window.__ENV__ =
+    {
+        "API_URL": "/api",
+        "LOGIN_URL": "/login",
+        "LOGOUT_URL": "/logout",
+        "ENABLE_PROXIES": false
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: fe-administrator
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: fe-administrator
+    app.kubernetes.io/part-of: ilm
+  name: fe-administrator-configmap
+  namespace: ilm
+---
+apiVersion: v1
+data:
+  kong.yml: |
+    _format_version: "2.1"
+    _transform: true
+    services:
+        - name: core
+          host: core
+          port: 8080
+          protocol: http
+          routes:
+            - name: protocols_route
+              strip_path: false
+              preserve_host: true
+              paths:
+                - /api
+        - name: core-login-logout
+          host: core
+          port: 8080
+          protocol: http
+          path: /api
+          routes:
+            - name: core-oauth2_route
+              strip_path: false
+              preserve_host: true
+              paths:
+                - /login
+                - /logout
+        - name: fe-administrator
+          host: fe-administrator
+          port: 8080
+          protocol: http
+          routes:
+            - name: fe-administrator_route-cert
+              strip_path: true
+              preserve_host: true
+              paths:
+                - /administrator
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: global
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: global
+    app.kubernetes.io/part-of: ilm
+  name: global-configmap
+  namespace: ilm
+---
+apiVersion: v1
+data:
+  register-admin.sh: |
+    #!/bin/sh
+
+    # Register the FIRST platform admin with Core's local-admin API (POST /api/v1/local/admins),
+    # which Core accepts ONLY from localhost — so this runs IN-POD (a cross-pod POST is rejected).
+    # A postStart hook is fire-and-forget; Core's create is idempotent, so re-runs are safe.
+
+    # Wait for Core + the OPA sidecar to be listening on localhost.
+    while ! nc -z localhost 8080; do sleep 1; done
+    while ! nc -z localhost 8181; do sleep 1; done
+
+    # Strip the PEM armor + ALL whitespace from $ADMIN_CERT (sourced via secretKeyRef on Core) down
+    # to the SINGLE-LINE base64 DER body Core decodes. The echo is INTENTIONALLY UNQUOTED: the shell
+    # then field-splits the multi-line PEM on newlines and echo re-joins it as one line — awk's
+    # [[:blank:]] removes spaces/tabs but NOT newlines, so a quoted echo would leave embedded newlines
+    # that break the JSON body (Core: "Unable to read HTTP message"). Mirrors the chart's register-admin.sh.
+    CERT=$( echo $ADMIN_CERT | awk '{gsub(/[[:blank:]]/,""); print}' )
+    CERT=$( echo $CERT | awk '{gsub(/-----BEGINCERTIFICATE-----/,""); print}' )
+    CERT=$( echo $CERT | awk '{gsub(/-----ENDCERTIFICATE-----/,""); print}' )
+
+    # The request body, composed by the operator with encoding/json and read from a QUOTED heredoc:
+    # the shell performs NO parameter expansion and NO command substitution inside it, so the admin
+    # identity is inert data — an apostrophe in a surname included. Only the certificate placeholder
+    # is substituted, from the base64 $CERT above.
+    read -r BODY <<'EOF'
+    {"username":"","firstName":"","email":"","enabled":true,"certificateData":"__ADMIN_CERT__"}
+    EOF
+    BODY=$(printf '%s' "$BODY" | sed "s|__ADMIN_CERT__|${CERT}|")
+
+    curl -X POST \
+      -H 'content-type: application/json' \
+      -d "${BODY}" \
+      http://localhost:8080/api/v1/local/admins
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: core-scripts
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: core-scripts
+    app.kubernetes.io/part-of: ilm
+  name: ilm-core-scripts
+  namespace: ilm
+---
+apiVersion: v1
+data:
+  messaging.amqp.port: "5672"
+  messaging.host: messaging-service
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: messaging
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: messaging
+    app.kubernetes.io/part-of: ilm
+  name: messaging-configmap
+  namespace: ilm
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: api-gateway
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: ilm
+  name: api-gateway
+  namespace: ilm
+spec:
+  ports:
+  - name: admin
+    port: 8001
+    protocol: TCP
+    targetPort: 0
+  - name: consumer
+    port: 8000
+    protocol: TCP
+    targetPort: 0
+  - name: status
+    port: 8100
+    protocol: TCP
+    targetPort: 0
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: api-gateway
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth
+    app.kubernetes.io/part-of: ilm
+  name: auth
+  namespace: ilm
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: auth
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: auth-opa-policies
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth-opa-policies
+    app.kubernetes.io/part-of: ilm
+  name: auth-opa-policies
+  namespace: ilm
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: auth-opa-policies
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: core
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: core
+    app.kubernetes.io/part-of: ilm
+  name: core
+  namespace: ilm
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: core
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: fe-administrator
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: fe-administrator
+    app.kubernetes.io/part-of: ilm
+  name: fe-administrator
+  namespace: ilm
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: fe-administrator
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: scheduler
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: scheduler
+    app.kubernetes.io/part-of: ilm
+  name: scheduler
+  namespace: ilm
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/name: scheduler
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: api-gateway
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: ilm
+  name: api-gateway
+  namespace: ilm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth
+    app.kubernetes.io/part-of: ilm
+  name: auth
+  namespace: ilm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: auth-opa-policies
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: auth-opa-policies
+    app.kubernetes.io/part-of: ilm
+  name: auth-opa-policies
+  namespace: ilm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: core
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: core
+    app.kubernetes.io/part-of: ilm
+  name: core
+  namespace: ilm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: fe-administrator
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: fe-administrator
+    app.kubernetes.io/part-of: ilm
+  name: fe-administrator
+  namespace: ilm
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: scheduler
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: scheduler
+    app.kubernetes.io/part-of: ilm
+  name: scheduler
+  namespace: ilm

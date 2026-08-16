@@ -70,7 +70,7 @@ func TestResolveBundleUnknownVersionFallsBackDefensively(t *testing.T) {
 // Core image when no per-component override is set (the default-version render).
 func TestResolveCoreImageUsesBundleTag(t *testing.T) {
 	c := ResolveCore(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.18.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.19.0", c.Image)
 }
 
 // TestResolveCoreComponentTagOverridesBundleTag proves a per-component image.tag override

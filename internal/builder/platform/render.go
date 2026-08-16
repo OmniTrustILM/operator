@@ -157,10 +157,13 @@ func ResolvePlatformServiceMonitors(p *otilmv1alpha1.Platform) []client.Object {
 // resolved component's WorkloadType: a StatefulSet when WorkloadType==StatefulSet, else a
 // Deployment (the default for the platform's stateless components). Both kinds enclose the
 // SAME hardened pod template (buildPodTemplateSpec) and carry the same name/labels/owner
-// refs, so the only difference is the apps/v1 kind. A kind switch on an existing component
-// is handled by the controller's apply+prune (the new kind is applied, the now-de-rendered
-// old kind is pruned) — a brief, safe restart since platform state lives in the
-// database/broker, not on the pod.
+// refs, so the only difference is the apps/v1 kind.
+//
+// A kind switch on an existing component is orchestrated STOP-BEFORE-START by the controller:
+// the superseded object is deleted with foreground propagation and the new kind is withheld
+// until its pods are gone, so the component is never running as two kinds at once. Expect a
+// brief outage across the switch. The switch is REFUSED outright while a messaging migration is
+// recorded — the fence and the switch move the same workloads and cannot see each other.
 func buildWorkload(c common.Component) client.Object {
 	if c.WorkloadType == otilmv1alpha1.WorkloadKindStatefulSet {
 		return common.BuildStatefulSet(c)

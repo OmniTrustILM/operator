@@ -389,6 +389,8 @@ spec:
           value: https://prov.example.com
         - name: PROXY_ENABLED
           value: "true"
+        - name: MESSAGING_TIME_QUALITY_ENABLED
+          value: "false"
         - name: JDBC_USERNAME
           valueFrom:
             secretKeyRef:

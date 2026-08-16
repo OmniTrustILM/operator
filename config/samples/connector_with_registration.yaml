@@ -19,7 +19,9 @@ spec:
 
   registration:
     name: "X.509 Compliance Provider"
-    platformUrl: "https://ilm-core.ilm-system.svc.cluster.local:8443"
+    # The platform's BASE API URL, /api prefix INCLUDED — the operator appends only
+    # /v2/connector/register. Without the /api this registration 404s.
+    platformUrl: "https://ilm-core.ilm-system.svc.cluster.local:8443/api"
     authType: none
     customAttributes:
       - name: description

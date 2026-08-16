@@ -137,6 +137,37 @@ func TestRenderPlatformWorkloadTypeStatefulSetOmitsReplicasUnderHPA(t *testing.T
 	assert.Nil(t, coreSTS.Spec.Replicas, "an HPA-owned StatefulSet must omit .spec.replicas")
 }
 
+// TestMultiReplicaCoreRendersAStatefulSet proves the shipped multi-replica shape: replicas > 1
+// with workloadType=StatefulSet renders a StatefulSet carrying that count (Flyway locking makes
+// concurrent Core start-up safe — the contract the core team confirmed), while a single-replica
+// Deployment Core keeps its Recreate strategy.
+func TestMultiReplicaCoreRendersAStatefulSet(t *testing.T) {
+	p := basePlatform()
+	p.Spec.Core.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
+	p.Spec.Core.Replicas = i32Ptr(3)
+
+	var sts *appsv1.StatefulSet
+	for _, obj := range RenderPlatformBase(p) {
+		if s, ok := obj.(*appsv1.StatefulSet); ok && s.Name == coreComponentName {
+			sts = s
+		}
+	}
+	require.NotNil(t, sts, "core must render as a StatefulSet")
+	require.NotNil(t, sts.Spec.Replicas)
+	assert.Equal(t, int32(3), *sts.Spec.Replicas)
+
+	single := basePlatform()
+	var dep *appsv1.Deployment
+	for _, obj := range RenderPlatformBase(single) {
+		if d, ok := obj.(*appsv1.Deployment); ok && d.Name == coreComponentName {
+			dep = d
+		}
+	}
+	require.NotNil(t, dep, "core must render as a Deployment by default")
+	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, dep.Spec.Strategy.Type,
+		"the single-replica Deployment path keeps Recreate: one core VERSION owns the schema at a time")
+}
+
 func TestRenderPlatformObjects(t *testing.T) {
 	// utils disabled (default); check core + scheduler + auth-opa-policies.
 	objs := RenderPlatform(basePlatform())

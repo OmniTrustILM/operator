@@ -412,8 +412,14 @@ spec:
                     description: Name is the registration name of the connector.
                     type: string
                   platformUrl:
-                    description: PlatformURL is the URL of the platform to register
-                      with.
+                    description: |-
+                      PlatformURL is the platform's BASE API URL — INCLUDING its /api prefix — that the
+                      operator posts the connector registration to, e.g. https://ilm.example.com/api.
+
+                      Core serves its REST API under /api and the operator appends ONLY the versioned endpoint
+                      (/v2/connector/register), so a platformUrl without the /api prefix produces a 404. A
+                      platform served under an additional path prefix carries that here too, e.g.
+                      https://gateway.example.com/ilm/api. A trailing slash is tolerated.
                     type: string
                 required:
                 - authType
@@ -861,6 +867,17 @@ spec:
               operator provisions Keycloak (keycloak.mode=managed). It lives here (not on
               RegisterAdminSpec) because keycloak.mode is in a sibling sub-tree the RegisterAdminSpec
               rule cannot see. The certificate method has no such requirement.
+
+              A fourth cross-field rule closes the HA hole in core.instanceId's own guards: the HA profile
+              gives a component that sets NEITHER replicas NOR autoscaling a multi-replica default, which
+              the CoreSpec rules cannot see (highAvailability is in a sibling sub-tree). With HA enabled,
+              an explicit instanceId therefore requires an explicit single-replica core.
+
+              A fifth cross-field rule gates the time-quality-monitor sidecar's credentials on the broker
+              mode: with a MANAGED broker the operator wires the topology-generated monitor-user Secret,
+              but with an EXTERNAL broker it manages no users and has nothing to wire, so the CR must name
+              a Secret. It lives here (not on TimeQualityMonitorSpec) because messaging.mode is in a
+              sibling sub-tree that rule cannot see.
             properties:
               additionalEnv:
                 description: |-
@@ -2725,6 +2742,25 @@ spec:
                       would bloat the CRD past the etcd object-size limit); the Go type stays
                       []corev1.Container so it marshals correctly and the kubelet validates it.
                     x-kubernetes-preserve-unknown-fields: true
+                  instanceId:
+                    description: |-
+                      InstanceID is Core's explicit platform instance id (0–65535), rendered as the selected
+                      platform version's instance-id env var (2.19.0+: PLATFORM_INSTANCE_ID). Core folds it
+                      into the certificate serial numbers it issues, so the value must be UNIQUE per running
+                      Core pod.
+
+                      Set it ONLY on a single-replica Core (the CEL rules on this type, and the HA-profile rule
+                      on PlatformSpec, reject every multi-replica combination). Leave it UNSET for the derived
+                      paths: workloadType=StatefulSet derives a unique id per pod from the pod ordinal, and a
+                      Deployment lets Core derive one from its pod IP (two pods sharing the last two IPv4
+                      octets then collide, which is why StatefulSet is the multi-replica shape).
+
+                      A bundle whose wiring does not name the instance-id variable (pre-2.19.0) renders
+                      nothing, so the same CR stays portable across platform versions.
+                    format: int32
+                    maximum: 65535
+                    minimum: 0
+                    type: integer
                   metrics:
                     description: |-
                       Metrics configures the component's metrics endpoint and an optional per-component
@@ -3077,6 +3113,167 @@ spec:
                       opaquely (x-kubernetes-preserve-unknown-fields) for the same CRD-size reason as
                       InitContainers; the Go type stays []corev1.Container.
                     x-kubernetes-preserve-unknown-fields: true
+                  timeQualityMonitor:
+                    description: |-
+                      TimeQualityMonitor configures the optional time-quality-monitor sidecar on the Core pod.
+                      It is INDEPENDENT of spec.messaging.timeQuality (Core's own integration): the two are
+                      separate controls, and either can be used without the other.
+
+                      Two behavioral couplings to know before enabling it: (1) it BLOCKS a messaging
+                      migration from starting — the sidecar rides Core's pod, which a migration's fence
+                      never stops, so an enabled monitor is an unfenced producer the drain cannot account
+                      for; disable it for the migration window (the spec.version move), then re-enable it
+                      once the move completes. (2) its readiness probe gates the CORE POD's readiness
+                      (chart parity) — Kubernetes requires every container in a pod to be Ready before the
+                      pod is, so a failing monitor takes Core out of its Service's endpoints along with it;
+                      disabling the sidecar is the escape hatch.
+                    properties:
+                      credentials:
+                        description: |-
+                          Credentials references the Secret holding the monitor's broker username/password, and
+                          lets the user map the in-Secret keys. REQUIRED when messaging.mode=external; ignored when
+                          messaging.mode=managed (the operator reads back the topology-generated monitor-user
+                          Secret, whose keys are the upstream operator's).
+                        properties:
+                          passwordKey:
+                            description: |-
+                              PasswordKey is the key in the referenced Secret holding the password. When empty it
+                              defaults to the operator's wiring-profile key ("password"). Set it to read a
+                              differently-named key (e.g. "POSTGRES_PASSWORD").
+                            type: string
+                          secretRef:
+                            description: |-
+                              SecretRef is the name of the Secret holding the credentials. It is required for
+                              external mode (the database/messaging XValidation enforces presence).
+                            type: string
+                          usernameKey:
+                            description: |-
+                              UsernameKey is the key in the referenced Secret holding the username. When empty it
+                              defaults to the operator's wiring-profile key ("username"), so a Secret already using
+                              that key needs no mapping. Set it to read a differently-named key (e.g. "POSTGRES_USER").
+                            type: string
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled deploys the time-quality-monitor sidecar
+                          on the Core pod.
+                        type: boolean
+                      image:
+                        description: |-
+                          Image overrides the sidecar's image settings per field. Unset fields fall back to the
+                          shared spec.common.image and then the version bundle (whose per-component repository —
+                          the private one this image ships from — wins over a stock shared repository). PullSecrets
+                          set here are unioned into the Core POD's imagePullSecrets, which is how a private sidecar
+                          image is pulled alongside public component images.
+                        properties:
+                          args:
+                            description: |-
+                              Args overrides the container's command arguments. When unset the image's own CMD
+                              is used.
+                            items:
+                              type: string
+                            type: array
+                          command:
+                            description: |-
+                              Command overrides the container entrypoint (the container's command). When unset
+                              the image's own ENTRYPOINT is used.
+                            items:
+                              type: string
+                            type: array
+                          digest:
+                            description: |-
+                              Digest pins the image by content digest (e.g. "sha256:abc123..."). When set it
+                              takes precedence over Tag and the reference is composed as
+                              registry/repository/name@digest, so the workload runs an immutable image.
+                            type: string
+                          name:
+                            description: Name is the image name (optional; defaults
+                              from the version bundle when applicable).
+                            type: string
+                          pullPolicy:
+                            default: IfNotPresent
+                            description: PullPolicy defines the image pull policy.
+                            type: string
+                          pullSecrets:
+                            description: PullSecrets is a list of secret names for
+                              pulling the image.
+                            items:
+                              type: string
+                            type: array
+                          registry:
+                            description: Registry is the image registry host (optional;
+                              for example, registry.example.com).
+                            type: string
+                          repository:
+                            description: Repository is the image repository or path.
+                            type: string
+                          tag:
+                            description: |-
+                              Tag is the image tag (optional; defaults from the version bundle when applicable).
+                              Ignored when Digest is set (a digest pins the image immutably).
+                            type: string
+                        type: object
+                      resources:
+                        description: Resources overrides the sidecar container's resource
+                          requirements (requests/limits).
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This field depends on the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    type: object
                   tolerations:
                     description: Tolerations allow the component's pods to schedule
                       onto tainted nodes.
@@ -3172,6 +3369,17 @@ spec:
                     - StatefulSet
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'core.instanceId requires a single-replica core: one explicit
+                    id is shared by every replica, which would emit identical certificate
+                    serial numbers — for multi-replica core use workloadType: StatefulSet
+                    and leave instanceId unset'
+                  rule: '!has(self.instanceId) || !has(self.replicas) || self.replicas
+                    <= 1'
+                - message: 'core.instanceId cannot be combined with core.autoscaling:
+                    an autoscaled core is multi-replica by definition — use workloadType:
+                    StatefulSet and leave instanceId unset'
+                  rule: '!has(self.instanceId) || !has(self.autoscaling)'
               database:
                 description: Database is the required database connection (external
                   or managed).
@@ -5289,6 +5497,20 @@ spec:
                     maximum: 65535
                     minimum: 1
                     type: integer
+                  timeQuality:
+                    description: |-
+                      TimeQuality toggles Core's time-quality messaging integration. The monitor SIDECAR is a
+                      separate, independent control (spec.core.timeQualityMonitor) — enabling one never
+                      enables the other.
+                    properties:
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns on Core's time-quality messaging integration. Core then publishes its
+                          time-quality configuration and consumes the monitor's request/result queues, which the
+                          managed topology provisions from 2.18.0 onward.
+                        type: boolean
+                    type: object
                   virtualHost:
                     description: |-
                       VirtualHost is the broker vhost. In MANAGED mode an empty value selects the platform
@@ -7626,6 +7848,20 @@ spec:
               rule: '!has(self.registerAdmin) || !has(self.registerAdmin.password)
                 || !has(self.registerAdmin.password.enabled) || !self.registerAdmin.password.enabled
                 || (has(self.keycloak) && self.keycloak.mode == ''managed'')'
+            - message: 'core.instanceId with highAvailability.enabled requires an
+                explicit single-replica core (set core.replicas: 1): the HA profile
+                would otherwise give core a multi-replica default, and one explicit
+                id shared by every replica emits identical certificate serial numbers'
+              rule: '!has(self.core) || !has(self.core.instanceId) || !has(self.highAvailability)
+                || !has(self.highAvailability.enabled) || !self.highAvailability.enabled
+                || (has(self.core.replicas) && self.core.replicas <= 1)'
+            - message: core.timeQualityMonitor.credentials.secretRef is required when
+                messaging.mode=external (with an external broker the operator has
+                no generated monitor-user Secret to wire)
+              rule: '!has(self.core) || !has(self.core.timeQualityMonitor) || !has(self.core.timeQualityMonitor.enabled)
+                || !self.core.timeQualityMonitor.enabled || self.messaging.mode ==
+                ''managed'' || (has(self.core.timeQualityMonitor.credentials) && has(self.core.timeQualityMonitor.credentials.secretRef)
+                && self.core.timeQualityMonitor.credentials.secretRef.size() > 0)'
           status:
             description: PlatformStatus is the observed state.
             properties:

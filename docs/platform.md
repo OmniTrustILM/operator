@@ -29,7 +29,7 @@ nothing but `kubectl`, and **cert-manager is not required to install the operato
 cert-managed edges, see step 2):
 
 ```bash
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
 ```
 
 Replace `<version>` with a [release tag](https://github.com/OmniTrustILM/operator/releases).
@@ -272,9 +272,9 @@ The list view shows `Phase`, `Version` (`status.observedVersion`), and `Ready` (
 
 ```text
 NAME   PHASE        VERSION   READY   AGE
-ilm    Progressing  2.18.0    False   20s
+ilm    Progressing  2.19.0    False   20s
 # …shortly after the Deployments report ready…
-ilm    Running      2.18.0    True    2m
+ilm    Running      2.19.0    True    2m
 ```
 
 The printer columns are: **Phase**, **Version** (`.status.observedVersion`), **Ready**
@@ -370,7 +370,7 @@ release. `spec.version` selects a bundle:
 
 ```yaml
 spec:
-  version: "2.18.0"   # omit / "" pins the operator's DEFAULT at creation (no auto-upgrade; bump to upgrade)
+  version: "2.19.0"   # omit / "" pins the operator's DEFAULT at creation (no auto-upgrade; bump to upgrade)
 ```
 
 - Empty (the default) = the operator's default version — not necessarily the newest bundle it
@@ -563,11 +563,24 @@ each managed block's own count (`database.managed.instances`, `messaging.managed
 
 Per component, `workloadType` selects the apps/v1 kind: `Deployment` (default, fits the
 stateless components — interchangeable pods, parallel rollout) or `StatefulSet` (stable
-per-pod identity under a headless Service, ordered one-at-a-time rollout). Switching the
-kind on a running component is **not** a seamless in-place mutation — the operator applies
-the new kind and prunes the old, so the component briefly restarts (safe: platform state
-lives in the database/broker, not the pod). The StatefulSet path carries no
-`volumeClaimTemplates` today (the components are stateless).
+per-pod identity under a headless Service, ordered one-at-a-time rollout).
+
+Switching the kind on a running component is **not** a seamless in-place mutation. A
+Deployment and a StatefulSet of the same name are different objects, so the operator
+orchestrates the change **stop-before-start**: it deletes the superseded workload first, with
+foreground propagation so the object outlives its pods, and withholds the new kind until that
+delete completes. The component is therefore down for the changeover rather than briefly
+doubled — no two Cores against one database, no two schedulers publishing the same jobs. It is
+safe because platform state lives in the database and the broker, not in the pod.
+
+While the switch is in flight the Platform carries a `WorkloadKindSwitch` condition (reason
+`WorkloadKindSwitch`, retired as `WorkloadKindSwitchSettled`). It is durable on purpose: in the
+window where neither kind's object exists, nothing else could tell that a component is
+mid-changeover. A messaging migration requested during that window is **refused** rather than
+started, because the fence would record the not-yet-created workload as stopped while the old
+one was still publishing.
+
+The StatefulSet path carries no `volumeClaimTemplates` today (the components are stateless).
 
 ### NetworkPolicy (default-on, opt-out)
 
@@ -700,7 +713,7 @@ Set `messaging.mode: managed` and describe the cluster:
 spec:
   messaging:
     mode: managed
-    # virtualHost: czertainly   # optional; the vhost the operator provisions (default "czertainly")
+    # virtualHost: czertainly   # optional; omit to use the bundle default ("/" on 2.19.0, "czertainly" on 2.18.0)
     managed:
       replicas: 3            # RabbitMQ nodes (a clustered broker)
       version: "4.3.1"       # RabbitMQ version (selects the RabbitmqCluster image); omit to use the bundle default
@@ -737,11 +750,14 @@ kubectl apply -f \
 
 **What the operator creates.** A `RabbitmqCluster` named `<platform>-messaging` (e.g.
 `ilm-messaging`) plus the full messaging topology the platform requires. The topology is
-**BOM-versioned** — for the default **2.18.0** bundle it is **1 vhost** (`czertainly` by
-default), **5 users** (administrator, provisioner, proxy, core, monitor), their
-**5 permission sets**, **2 exchanges** (`czertainly` direct, `czertainly-proxy` topic),
-**10 queues** (the 7 `core`/`core.*` queues + the 3 `time-quality.*` queues), and
-**9 bindings** (6 core + 3 time-quality). The legacy 2.17.0 bundle ships a single user. The
+**BOM-versioned** — for the default **2.19.0** bundle it is **1 vhost** (`/` by default),
+**5 users** (administrator, provisioner, proxy, core, monitor), their **5 permission sets**,
+**2 exchanges** (`ilm` direct, `ilm-proxy` topic), **11 queues** (the 7 `core`/`core.*` queues
++ `provider.status-poll` + the 3 `time-quality.*` queues), and **10 bindings** (7 core/provider
++ 3 time-quality). Every vhost-bound object name is scoped by the vhost (`<cluster>-default-…`
+for `/`); users are cluster-global and unscoped. The 2.18.0 bundle ships the `czertainly` vhost
+with unscoped names, 2 `czertainly*` exchanges, 10 queues and 9 bindings; the legacy 2.17.0
+bundle ships a single user. The
 Messaging Topology Operator generates one `<user>-user-credentials` Secret per user; the operator wires Core
 and scheduler to the `<platform>-messaging` Service and the **core-user** Secret via
 `secretKeyRef` — **exactly** as it wires an external broker. You create **no broker Secret**

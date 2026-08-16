@@ -154,12 +154,12 @@ func reconcileOnce(ns string) {
 // beginMigrationFixture brings a platform up on 2.18.0, points spec.version at 2.19.0 and
 // records a migration at the given phase.
 //
-// The two writes don't need to be atomic: resolving 2.19.0 (an unreleased/preview bundle)
-// never depended on a migration already being recorded — Bundle.Released only gates
-// advertising, not whether an explicit spec.version resolves. Between the two writes the
-// background reconciler may already start its own migration (beginMigration) from
-// spec.version alone; recordMigration's retry-until-succeeds Eventually simply pins
-// status.Upgrade to the exact phase the spec wants to start from.
+// The two writes don't need to be atomic: resolving 2.19.0 never depended on a migration
+// already being recorded — Bundle.Released only gates advertising, not whether an explicit
+// spec.version resolves. Between the two writes the background reconciler may already start
+// its own migration (beginMigration) from spec.version alone; recordMigration's
+// retry-until-succeeds Eventually simply pins status.Upgrade to the exact phase the spec
+// wants to start from.
 func beginMigrationFixture(ns string, phase otilmv1alpha1.MigrationPhase, mutate func(*otilmv1alpha1.Platform), fenced ...otilmv1alpha1.FencedWorkload) {
 	p := lifecyclePlatform(ns, func(p *otilmv1alpha1.Platform) {
 		p.Spec.Version = platformVersion218

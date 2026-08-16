@@ -166,7 +166,7 @@ func TestProvisioningDeployBrokerWiring(t *testing.T) {
 
 	// Bootstrap exchange/response-queue default from the bundle.
 	exch, _ := envValue(c.Env, pw.ProxyExchangeEnv)
-	assert.Equal(t, "czertainly-proxy", exch)
+	assert.Equal(t, testExchangeIlmProxy, exch)
 	rq, _ := envValue(c.Env, pw.ResponseQueueEnv)
 	assert.Equal(t, "core", rq)
 

@@ -47,7 +47,9 @@ import (
 // NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
 // (Bundle.Released), made whenever the operator is ready to change what a version-less
 // fresh install lands on — a newer released bundle can exist, reachable via an explicit
-// spec.version, before DefaultVersion moves to it.
+// spec.version, before DefaultVersion moves to it. Today it names 2.19.0, which is ALSO the
+// newest released bundle: the 2.19.0 release-day change marked the bundle Released and moved
+// DefaultVersion to it together, once the operator reached CR parity with the Helm chart.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
@@ -55,7 +57,7 @@ import (
 //
 // Every bundle is keyed by its OWN version const — never by DefaultVersion — so flipping
 // DefaultVersion can never relabel a bundle or retag its images (the "demotion trap").
-const DefaultVersion = "2.18.0"
+const DefaultVersion = "2.19.0"
 
 // DefaultImageRegistry and DefaultImageRepository are the registry host and
 // repository the ILM component images ship under (the public registry the
@@ -254,23 +256,13 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
 	},
-	// 2.19.0 — PREVIEW (Released: false): excluded from SupportedVersions() and never
-	// DefaultVersion-eligible, so it resolves ONLY via an explicit spec.version — on a
-	// fresh install or as an upgrade of a live platform (the messaging migration engine
-	// governs a managed-broker move; an external broker needs
-	// spec.messaging.migrationAcknowledgedForVersion). Image coordinates verified against
-	// the released helm-charts 2.19.0 tag.
-	//
-	// COMPLETENESS: this bundle stays preview because the operator has no Platform CR
-	// fields yet for parts of what it carries as version DATA. The wiring's
-	// TimeQualityEnabledEnv (MESSAGING_TIME_QUALITY_ENABLED) and PlatformInstanceIDEnv
-	// (PLATFORM_INSTANCE_ID), and the "time-quality-monitor" image below, are recorded here
-	// so the version contract is complete and reviewable — but no builder reads them and no
-	// CR field configures them. A platform pinned to 2.19.0 today therefore comes up
-	// WITHOUT the time-quality integration, WITHOUT the time-quality-monitor sidecar, and
-	// WITHOUT the instance-id env var. Adding those CR fields (and the builder wiring that
-	// reads them) is the remaining work; the release-day flip to Released: true happens in
-	// that same PR, once the operator reaches Helm-chart parity.
+	// 2.19.0 — the operator's DEFAULT and newest RELEASED bundle. Image coordinates verified
+	// against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
+	// operator now renders: the LOGGING_LEVEL_COM_OTILM rename, the time-quality integration
+	// env (spec.messaging.timeQuality), the platform instance id (spec.core.instanceId), the
+	// time-quality-monitor sidecar image (private repository, spec.core.timeQualityMonitor),
+	// the "/" virtual host with the ilm / ilm-proxy exchanges, and the provider.status-poll
+	// queue.
 	version2190: {
 		Components: map[string]Image{
 			"core":                   {Name: "core", Tag: version2190},
@@ -290,7 +282,7 @@ var bundles = map[string]Bundle{
 		Wiring:          wiring2190,
 		Messaging:       messagingTopology2190,
 		HasProvisioning: true,
-		Released:        false,
+		Released:        true,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
@@ -963,7 +955,9 @@ var messagingTopology2180 = MessagingTopology{
 		// access and Core crash-loops ("read access ... refused").
 		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^czertainly(-proxy)?$", Read: `^core(\..+|-.+)?$|^time-quality\.(config-request|results)$`},
 		// monitor (time-quality, new in 2.18.0): publish on the czertainly exchange; consume the
-		// time-quality.config queue. Provisioned for an external monitor; not deployed here.
+		// time-quality.config queue. This bundle carries no time-quality-monitor IMAGE (that
+		// component ships from 2.19.0), so the role serves an EXTERNAL monitor only — the
+		// operator renders no sidecar to consume it here.
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^czertainly$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{
@@ -1017,7 +1011,10 @@ var messagingTopology2190 = MessagingTopology{
 		// grant the broker denies access and Core crash-loops ("read access ... refused").
 		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.status-poll$|^time-quality\.(config-request|results)$`},
 		// monitor (time-quality): publish on the ilm exchange; consume the time-quality.config
-		// queue. Provisioned for an external monitor; not deployed here.
+		// queue. Serves the operator-rendered time-quality-monitor SIDECAR on Core's pod when
+		// spec.core.timeQualityMonitor.enabled (managed messaging wires this role's
+		// generated credentials automatically), or an external monitor when messaging is
+		// external.
 		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
 	},
 	Exchanges: []MessagingExchange{

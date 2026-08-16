@@ -120,10 +120,11 @@ func typedManagedLists() []client.ObjectList {
 	return []client.ObjectList{
 		&appsv1.DeploymentList{},
 		// StatefulSets: a component rendered as a StatefulSet (workloadType=StatefulSet) is
-		// pruned like a Deployment. This is also what reclaims the OLD workload on a kind
-		// switch: when a component flips Deployment->StatefulSet (or back), the new kind is
-		// applied and the now-de-rendered old kind (same name, different GVK — they do not
-		// collide) becomes an orphan and is pruned here.
+		// pruned like a Deployment. A workloadType FLIP (Deployment<->StatefulSet, same name,
+		// different GVK — they do not collide) is NOT reclaimed here: the controller stops the
+		// superseded kind itself, stop-before-start (see stopSupersededWorkload), and keeps it in
+		// the desired set for as long as the switch runs — so this list only ever prunes a
+		// workload that is genuinely de-rendered (the component removed, not merely re-kinded).
 		&appsv1.StatefulSetList{},
 		&corev1.ServiceList{},
 		&corev1.ServiceAccountList{},
@@ -277,6 +278,15 @@ func (r *Reconciler) pruneIfOrphan(ctx context.Context, p *otilmv1alpha1.Platfor
 	if !controllerOwnedBy(obj, p.UID) {
 		return nil // not ours — never delete (defense-in-depth)
 	}
+	if obj.GetDeletionTimestamp() != nil {
+		// Already terminating. Re-issuing DELETE here would re-evaluate its propagation policy
+		// and can strip a foregroundDeletion finalizer the deleter relies on to keep the object
+		// alive until its pods are gone. NOTE this is a BEST-EFFORT guard: the listed object
+		// comes from the manager's cache, so a very recent delete may not show a timestamp yet.
+		// The workload-kind switch does not depend on it — it keeps the superseded object in the
+		// desired set instead, which this function honours before it gets here.
+		return nil
+	}
 	key := r.keyForObject(obj)
 	if desired.has(key) {
 		return nil // still desired
@@ -286,7 +296,7 @@ func (r *Reconciler) pruneIfOrphan(ctx context.Context, p *otilmv1alpha1.Platfor
 	// Event/log message carries a real Kind even when a listed typed object has empty
 	// TypeMeta. Names/Kinds only — never any secret material.
 	kind := key.gvk.Kind
-	if err := r.Delete(ctx, obj); err != nil {
+	if err := r.Delete(ctx, obj, pruneDeleteOptions(obj)...); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -296,6 +306,29 @@ func (r *Reconciler) pruneIfOrphan(ctx context.Context, p *otilmv1alpha1.Platfor
 	r.eventf(p, corev1.EventTypeNormal, reasonPruned, "pruned %s %q (no longer in desired state)", kind, obj.GetName())
 	log.FromContext(ctx).Info("pruned orphaned child", "kind", kind, "name", obj.GetName())
 	return nil
+}
+
+// pruneDeleteOptions returns the delete options for one orphan: FOREGROUND propagation for the
+// two apps/v1 WORKLOAD kinds, and the apiserver's own default for everything else.
+//
+// The default for a Deployment or a StatefulSet is BACKGROUND — the workload object disappears
+// at once and its ReplicaSet and pods are reclaimed afterwards, on the garbage collector's own
+// schedule. For a plain de-render that is harmless. It is not harmless when the component comes
+// BACK: stopSupersededWorkload decides there is nothing to stop by asking whether the other
+// kind's object exists, so a component disabled and immediately re-enabled AS THE OTHER KIND
+// finds no object to wait on and starts the new workload beside pods the old one has not
+// finished terminating — two schedulers publishing the same jobs, two Cores against one
+// database. Foreground propagation keeps the object alive until its pods are gone, which is the
+// same guarantee stop-before-start already chose for itself, so both routes to a stopped
+// workload mean the same thing.
+//
+// It is scoped to workloads because they are the kinds that OWN pods: a Service or a ConfigMap
+// has no dependents whose lifetime the propagation policy could change.
+func pruneDeleteOptions(obj client.Object) []client.DeleteOption {
+	if workloadKindOf(obj) == "" {
+		return nil
+	}
+	return []client.DeleteOption{client.PropagationPolicy(metav1.DeletePropagationForeground)}
 }
 
 // controllerOwnedBy reports whether obj has a controller owner reference whose UID

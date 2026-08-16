@@ -144,4 +144,22 @@ const (
 	// testQueueArgHostile is the argument name the hostile queueArguments values are stored
 	// under, so the round-trip assertions read one key.
 	testQueueArgHostile = "x-hostile"
+	// testVerifyInstanceID is the name of Core's StatefulSet-derived-instance-id fail-fast init
+	// container, asserted both present (the derivation case) and absent (every other shape).
+	testVerifyInstanceID = "verify-instance-id"
+
+	// time_quality_test.go.
+	testTQMonitorSecretRef = "tq-monitor"
+	// testSharedCommand/testSharedArg are the shared image.command/image.args override the
+	// per-component override must beat, and the value that applies when the component sets none.
+	testSharedCommand = "/bin/shared"
+	testSharedArg     = "--shared"
+	// testTQMonitorUsernameKey/testTQMonitorPasswordKey are the CR-supplied credential-key
+	// overrides an external time-quality-monitor Credentials ref must honour.
+	testTQMonitorUsernameKey = "svc-user"
+	testTQMonitorPasswordKey = "svc-pass"
+	// testSharedPullSecret/testPrivatePullSecret are the shared and per-sidecar pull secrets the
+	// time-quality-monitor's pod-level imagePullSecrets union must carry.
+	testSharedPullSecret  = "shared-pull"
+	testPrivatePullSecret = "private-pull"
 )

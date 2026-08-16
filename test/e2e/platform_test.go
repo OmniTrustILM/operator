@@ -313,6 +313,11 @@ spec:
 			// Validates the end-to-end prune on a real cluster: flipping utils.enabled
 			// to false de-renders utils, and the post-apply prune (owner-ref + label
 			// scoped) deletes its Deployment/Service/ServiceAccount.
+			//
+			// The Deployment is pruned with FOREGROUND propagation, so it goes Terminating
+			// first and disappears only once its pods are reclaimed — this is the ONE
+			// assertion here that depends on a real garbage collector, and the generous
+			// window below covers the pod's termination grace period.
 			By("confirming the utils Deployment exists before the prune")
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "deployment", "utils",
@@ -941,7 +946,7 @@ spec:
 			}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
-		It("should have the Topology Operator ACCEPT and reconcile the FULL topology (vhost, 5 users, 5 permissions, 2 exchanges, 10 queues, 9 bindings)", func() {
+		It("should have the Topology Operator ACCEPT and reconcile the FULL topology (vhost, 5 users, 5 permissions, 2 exchanges, 11 queues, 10 bindings)", func() {
 			// The core VERIFY validation for the topology. The Topology Operator's webhooks +
 			// controllers refute any wrong field shape: a rejected apply leaves the CR absent, and
 			// a CR whose spec the operator cannot apply to the broker never reaches its Ready
@@ -951,53 +956,57 @@ spec:
 			// spec.rabbitmqClusterReference, etc.) against the real operator.
 			By("listing every topology CR the operator should have rendered")
 			// metadata.name of each rendered topology CR (see managed_messaging.go's naming).
-			// This Platform runs on the LEGACY "czertainly" vhost (the default bundle's), which
-			// renders UNSCOPED — the exact names live 2.17.0/2.18.0 platforms already carry. Any
-			// other vhost inserts a "-<vhostSlug>" scope after <cluster> (see topology_naming.go).
-			//   Vhost:       <cluster>-vhost
+			// This Platform pins NO spec.version and NO virtualHost, so it runs the operator's
+			// DEFAULT bundle — 2.19.0, whose "/" virtual host scopes every VHOST-BOUND CR name
+			// with "-default" (verified: topologyScope("/") == "-default"; only the legacy
+			// "czertainly" vhost and a user-pinned one render unscoped). Users are deliberately
+			// NOT vhost-scoped (broker users are cluster-global); Permissions ARE.
+			//   Vhost:       <cluster>-default-vhost
 			//   User:        <cluster>-<role>
-			//   Permission:  <cluster>-<role>-permission
-			//   Exchange:    <cluster>-exchange-<sanitized name>
-			//   Queue:       <cluster>-queue-<sanitized name>
-			//   Binding:     <cluster>-binding-<sanitized source-destination>
+			//   Permission:  <cluster>-default-<role>-permission
+			//   Exchange:    <cluster>-default-exchange-<sanitized name>
+			//   Queue:       <cluster>-default-queue-<sanitized name>
+			//   Binding:     <cluster>-default-binding-<sanitized source-destination>
 			roles := []string{"administrator", "provisioner", "proxy", "core", "monitor"}
 			users := make([]string, 0, len(roles))
 			permissions := make([]string, 0, len(roles))
 			for _, role := range roles {
 				users = append(users, userName(role))
-				permissions = append(permissions, userName(role)+"-permission")
+				permissions = append(permissions, clusterName+"-default-"+role+"-permission")
 			}
 			exchanges := []string{
-				clusterName + "-exchange-czertainly",
-				clusterName + "-exchange-czertainly-proxy",
+				clusterName + "-default-exchange-ilm",
+				clusterName + "-default-exchange-ilm-proxy",
 			}
 			queues := []string{
-				clusterName + "-queue-core",
-				clusterName + "-queue-core-audit-logs",
-				clusterName + "-queue-core-notifications",
-				clusterName + "-queue-core-scheduler",
-				clusterName + "-queue-core-actions",
-				clusterName + "-queue-core-validation",
-				clusterName + "-queue-core-events",
-				clusterName + "-queue-time-quality-config",
-				clusterName + "-queue-time-quality-config-request",
-				clusterName + "-queue-time-quality-results",
+				clusterName + "-default-queue-core",
+				clusterName + "-default-queue-core-audit-logs",
+				clusterName + "-default-queue-core-notifications",
+				clusterName + "-default-queue-core-scheduler",
+				clusterName + "-default-queue-core-actions",
+				clusterName + "-default-queue-core-validation",
+				clusterName + "-default-queue-core-events",
+				clusterName + "-default-queue-provider-status-poll",
+				clusterName + "-default-queue-time-quality-config",
+				clusterName + "-default-queue-time-quality-config-request",
+				clusterName + "-default-queue-time-quality-results",
 			}
 			bindings := []string{
-				clusterName + "-binding-czertainly-core-audit-logs",
-				clusterName + "-binding-czertainly-core-notifications",
-				clusterName + "-binding-czertainly-core-actions",
-				clusterName + "-binding-czertainly-core-scheduler",
-				clusterName + "-binding-czertainly-core-validation",
-				clusterName + "-binding-czertainly-core-events",
-				clusterName + "-binding-czertainly-time-quality-config",
-				clusterName + "-binding-czertainly-time-quality-config-request",
-				clusterName + "-binding-czertainly-time-quality-results",
+				clusterName + "-default-binding-ilm-core-audit-logs",
+				clusterName + "-default-binding-ilm-core-notifications",
+				clusterName + "-default-binding-ilm-core-actions",
+				clusterName + "-default-binding-ilm-core-scheduler",
+				clusterName + "-default-binding-ilm-core-validation",
+				clusterName + "-default-binding-ilm-core-events",
+				clusterName + "-default-binding-ilm-provider-status-poll",
+				clusterName + "-default-binding-ilm-time-quality-config",
+				clusterName + "-default-binding-ilm-time-quality-config-request",
+				clusterName + "-default-binding-ilm-time-quality-results",
 			}
 
 			By("verifying the Vhost CR exists and reconciles to Ready")
 			Eventually(func(g Gomega) {
-				g.Expect(topologyObjectReady(g, "vhost", clusterName+"-vhost")).To(BeTrue(),
+				g.Expect(topologyObjectReady(g, "vhost", clusterName+"-default-vhost")).To(BeTrue(),
 					"Vhost CR should be accepted and reach Ready (spec.name + spec.rabbitmqClusterReference)")
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
@@ -1025,7 +1034,7 @@ spec:
 				}
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying all 10 Queue CRs exist and reconcile to Ready")
+			By("verifying all 11 Queue CRs exist and reconcile to Ready")
 			Eventually(func(g Gomega) {
 				for _, q := range queues {
 					g.Expect(topologyObjectReady(g, "queue", q)).To(BeTrue(),
@@ -1033,7 +1042,7 @@ spec:
 				}
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying all 9 Binding CRs exist and reconcile to Ready")
+			By("verifying all 10 Binding CRs exist and reconcile to Ready")
 			Eventually(func(g Gomega) {
 				for _, b := range bindings {
 					g.Expect(topologyObjectReady(g, "binding", b)).To(BeTrue(),
@@ -1132,7 +1141,7 @@ spec:
 				_, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(),
 					"RabbitmqCluster must remain after Platform deletion under the default Retain policy")
-				cmd = exec.Command("kubectl", "get", "vhost.rabbitmq.com", clusterName+"-vhost",
+				cmd = exec.Command("kubectl", "get", "vhost.rabbitmq.com", clusterName+"-default-vhost",
 					"-n", platformManagedMQNamespace)
 				_, err = utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(),
@@ -2220,6 +2229,11 @@ spec:
   messaging:
     mode: managed
     brokerType: rabbitmq
+    # PINNED to the legacy vhost ON PURPOSE, now that 2.19.0 is the default. This is the only
+    # e2e that proves an explicit virtualHost still renders the UNSCOPED topology names live
+    # 2.17.0/2.18.0 platforms carry, on the NEW default bundle — i.e. that pinning a vhost
+    # survives a version move. The managed-rabbitmq block covers the unpinned path (vhost "/",
+    # "-default"-scoped names); between them both naming regimes stay asserted.
     virtualHost: czertainly
     managed:
       replicas: 1
@@ -2410,6 +2424,35 @@ spec:
 			}, 5*time.Minute, 15*time.Second).Should(Succeed())
 		})
 
+		It("routes the registration endpoint composed from a base-API platformUrl", func() {
+			// SCOPE, stated plainly: this proves ROUTING and nothing else. The operator posts
+			// <platformUrl>/v2/connector/register, and platformUrl is the platform's BASE API URL
+			// (/api included). So this asserts the LIVE Core image routes the path that
+			// composition produces, and does NOT route the one a platformUrl MISSING its /api
+			// would produce. It does NOT prove a registration succeeds, that the body is accepted,
+			// or that the response matches internal/registration's Response — all of those need an
+			// authenticated admin this suite cannot obtain. The assertion is on the status-code
+			// CLASS: the bare-origin path returns 404, the base-API path returns anything else
+			// (401/403/400/415 — whatever Core's security chain answers first).
+			By("POSTing both compositions from inside the Core pod")
+			script := `set -e
+for p in /api/v2/connector/register /v2/connector/register; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+    --data '{"name":"e2e-probe","url":"http://example.invalid","authType":"none"}' \
+    "http://localhost:8080$p")
+  echo "PATH:$p CODE:$code"
+done
+`
+			out, err := utils.Run(exec.Command("kubectl", "exec", "deploy/core", "-c", "core", "-n", ns,
+				"--", "sh", "-c", script))
+			Expect(err).NotTo(HaveOccurred(), "the registration-path probe should run from the Core pod")
+
+			Expect(out).NotTo(MatchRegexp(`PATH:/api/v2/connector/register CODE:404`),
+				"a platformUrl ending in /api composes a path Core MUST route (any non-404 status)")
+			Expect(out).To(MatchRegexp(`PATH:/v2/connector/register CODE:404`),
+				"a platformUrl MISSING its /api composes an unrouted path — this is why the sample fix mattered")
+		})
+
 		It("should create the first-admin Keycloak realm user with the superadmin attribute (registerAdmin.password)", func() {
 			// THE PASSWORD-ADMIN BOOTSTRAP, CLOSED END-TO-END: registerAdmin.password is enabled on
 			// the Platform (cert method disabled). Once Keycloak is Ready the operator reads the admin
@@ -2530,11 +2573,12 @@ spec:
 			// PHASE-2 PROVISIONING SURFACE on a real cluster: provisioning.mode=deploy renders the
 			// bundled provisioning-rabbitmq Deployment, wired to the managed RabbitMQ provisioner/proxy
 			// users (defaulted from the Topology Secrets) + its bootstrap Secret, with Core's
-			// PROVISIONING_API_URL pointing at its in-cluster Service. The 2.18.0 bundle pins the
-			// provisioning image to the released 1.0.0 tag, so the pod actually PULLS and RUNS —
-			// we therefore assert the workload reaches Available, not merely that it schedules. We
-			// also keep the operator-side contract checks: the Deployment is rendered and the
-			// bootstrap Secret is consumed by reference (never inlined).
+			// PROVISIONING_API_URL pointing at its in-cluster Service. This block pins no
+			// spec.version, so it runs the operator's default bundle (2.19.0), which — like 2.18.0
+			// before it — pins the provisioning image to the released 1.0.0 tag, so the pod actually
+			// PULLS and RUNS: we therefore assert the workload reaches Available, not merely that it
+			// schedules. We also keep the operator-side contract checks: the Deployment is rendered
+			// and the bootstrap Secret is consumed by reference (never inlined).
 			By("verifying the provisioning-rabbitmq Deployment exists")
 			Eventually(func(g Gomega) {
 				out, err := utils.Run(exec.Command("kubectl", "get", "deployment", "provisioning-rabbitmq",
@@ -3113,11 +3157,11 @@ spec:
 // (plus the auth/scheduler images of that bundle, each actually rolled out), the renamed
 // LOGGING_LEVEL_COM_OTILM env, and, read back THROUGH the Messaging Topology Operator, the
 // default "/" vhost, the renamed ilm / ilm-proxy exchanges and the new provider.status-poll
-// queue. spec.version resolves an unreleased (preview) bundle exactly like a released one — on
-// a fresh install (here) or as an upgrade of a live platform (platformVersionMatrixUpgradeSpecs
-// and platformVersionMatrixMigrationSpecs cover that half): Released only gates whether the
-// version is ADVERTISED (SupportedVersions()/DefaultVersion), never whether an explicit
-// spec.version is honored.
+// queue. It is the EXPLICITLY PINNED fresh install: 2.19.0 is now the operator's default, so
+// this block proves that naming the version outright (the GitOps form) resolves and reports the
+// same contract a version-less install lands on — a distinct path from the default install the
+// managed blocks cover, and from an upgrade of a live platform
+// (platformVersionMatrixUpgradeSpecs and platformVersionMatrixMigrationSpecs cover that half).
 //
 // Labelled "matrix-preview" so CI runs it in its OWN job on its OWN fresh cluster, in parallel
 // with platformVersionMatrixUpgradeSpecs — the two bring-ups used to run serially in one Context
@@ -3126,7 +3170,7 @@ spec:
 // FULL block it runs in the Keycloak Operator's namespace (managed Keycloak is namespace-scoped)
 // and installs its own upstream operators in BeforeAll.
 func platformVersionMatrixPreviewSpecs() {
-	Context("Platform VERSION MATRIX — fresh managed 2.19.0 install (core:2.19.0, vhost /, ilm exchanges, provider.status-poll)",
+	Context("Platform VERSION MATRIX — fresh managed 2.19.0 install, EXPLICITLY PINNED (core:2.19.0, vhost /, ilm exchanges, provider.status-poll)",
 		Ordered, Label("managed", "matrix", "matrix-preview"), func() {
 			ns := utils.KeycloakOperatorNamespace
 			var ops matrixUpstreamOperators
@@ -3138,7 +3182,7 @@ func platformVersionMatrixPreviewSpecs() {
 			AfterEach(func() { dumpMatrixDiagnosticsOnFailure(ns, previewPlatformName) })
 
 			It("deploys a FRESH managed 2.19.0 Platform that reaches Available (core:2.19.0, vhost /, ilm exchanges, provider.status-poll)", func() {
-				By("creating a FRESH managed Platform pinned to 2.19.0 (a fresh install MAY name a preview bundle)")
+				By("creating a FRESH managed Platform with spec.version pinned explicitly to 2.19.0")
 				// The same shape as the upgrade block's CR — managed database + messaging + Keycloak,
 				// edge enabled with an internal (cert-manager) issuer, small footprint — with its own
 				// names and NO spec.messaging.virtualHost, so the vhost comes from the 2.19.0 bundle
@@ -3188,7 +3232,7 @@ spec:
 				Eventually(func(g Gomega) {
 					ver, _ := utils.Run(exec.Command("kubectl", "get", "platform", previewPlatformName, "-n", ns,
 						"-o", "jsonpath={.status.observedVersion}"))
-					g.Expect(strings.TrimSpace(ver)).To(Equal("2.19.0"), "observedVersion pins the explicitly requested preview")
+					g.Expect(strings.TrimSpace(ver)).To(Equal("2.19.0"), "observedVersion pins the explicitly requested version")
 					avail, _ := utils.Run(exec.Command("kubectl", "get", "platform", previewPlatformName, "-n", ns,
 						"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`))
 					g.Expect(strings.TrimSpace(avail)).To(Equal(conditionStatusTrue), "the 2.19.0 platform must reach Available")

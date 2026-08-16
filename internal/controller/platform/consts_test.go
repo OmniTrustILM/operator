@@ -97,10 +97,9 @@ const (
 	keycloakVersion    = "26.4.0"
 	platformVersion217 = "2.17.0"
 	platformVersion218 = "2.18.0"
-	// platformVersion219 is the 2.19.0 fixture version: the PREVIEW (unreleased) bundle this
-	// operator build carries — resolvable only via an explicit spec.version, never advertised
-	// or DefaultVersion-eligible (see bom.go) — used to exercise the messaging migration
-	// engine and the running-vs-requested version split on deletion.
+	// platformVersion219 is the 2.19.0 fixture version: the operator's newest RELEASED bundle
+	// and its DefaultVersion — used to exercise the messaging migration engine and the
+	// running-vs-requested version split on deletion.
 	platformVersion219 = "2.19.0"
 
 	// Repeated Ginkgo step descriptions.
@@ -110,4 +109,8 @@ const (
 
 	// rejectsManagedWithoutBlock is a repeated CEL-validation spec description.
 	rejectsManagedWithoutBlock = "rejects mode=managed without the managed block"
+
+	// steadyStateNotFailure is the assertion message the migration suites repeat wherever a
+	// refusal/steady-state path must not be reported as a reconcile error.
+	steadyStateNotFailure = "a refusal is a steady state, not a reconcile failure"
 )
