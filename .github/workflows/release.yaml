@@ -130,6 +130,10 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v4.1.1
+        with:
+          # Pinned so the signing invocation below and the binary cannot drift apart —
+          # the flags are cosign v3 flags, verified against exactly this release.
+          cosign-release: 'v3.0.2'
 
       - name: Checksum and sign manifests
         working-directory: dist
@@ -139,8 +143,15 @@ jobs:
         run: |
           set -euo pipefail
           sha256sum ilm-operator.yaml ilm-operator.crds.yaml > checksums.txt
+          # cosign v3 defaults to the TUF signing-config path and the new bundle format,
+          # both of which demand --bundle; the stdout-redirect form fails with
+          # "create bundle file: open : no such file or directory". The plain detached
+          # .sig assets (verifiable with `cosign verify-blob --key ... --signature`) need
+          # both defaults switched off and an explicit output path.
           for f in ilm-operator.yaml ilm-operator.crds.yaml checksums.txt; do
-            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY "$f" > "$f.sig"
+            cosign sign-blob --yes --key env://COSIGN_PRIVATE_KEY \
+              --use-signing-config=false --new-bundle-format=false \
+              --output-signature "$f.sig" "$f"
           done
 
       - name: Create release and upload manifests
