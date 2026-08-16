@@ -126,34 +126,36 @@ automates either one, and **they are not the same string**:
   helper is `{{- $tag := default .Chart.AppVersion .Values.image.tag -}}`
   (`templates/_helpers.tpl`), and `values.yaml` ships `image.tag: ""`, so out of the box the
   rendered image is `hub.omnitrustregistry.com/ilm/operator:<appVersion>`. **`appVersion` must
-  therefore be the literal tag the registry carries, not the SemVer.**
+  therefore be the literal tag the registry carries.**
 
-The image is pushed by the organisation's shared workflow, which this repository does not
-contain, so the published tag format cannot be read from here. What the repository *does*
-assert is `release.yaml`: it pins the install manifests to
-`hub.omnitrustregistry.com/ilm/operator:${VERSION}` where `VERSION` is the **git tag verbatim**
-(`v`-prefixed, validated by its `v[0-9]*` case), and it fails the release if that exact image is
-not pullable. So `v${version}` is the format to use — and step 4 confirms it against the real
-registry before you tag for real.
+Images carry the **plain SemVer, no `v`** — the registry convention every other ILM image
+follows (`core:2.19.0`, `scheduler:1.1.1`). `publish_docker.yaml` overrides the org workflow's
+default tag rules with the `v`-stripping semver pattern for exactly this reason, and
+`release.yaml` pins the install manifests to
+`hub.omnitrustregistry.com/ilm/operator:${image_version}` (the git tag with the `v` stripped)
+and fails the release if that exact image is not pullable. Only the **git tag** and the GitHub
+release keep the `v` prefix — Go modules require `vX.Y.Z` tags, and the CLI pins this module by
+them. So for a release `1.0.0`: git tag `v1.0.0`, chart `version: 1.0.0`,
+`appVersion: "1.0.0"`, image `operator:1.0.0`.
 
 ```bash
 git switch main
 git pull
 git switch -c "release/${tag}"
 
-# Chart version: plain SemVer. appVersion: the image tag (confirm the format in step 4).
-CHART_VERSION="$version" IMAGE_TAG="$tag" yq -i \
-  '.version = strenv(CHART_VERSION) | .appVersion = strenv(IMAGE_TAG)' \
+# Chart version and appVersion are both the plain SemVer — the image tag carries no "v".
+CHART_VERSION="$version" yq -i \
+  '.version = strenv(CHART_VERSION) | .appVersion = strenv(CHART_VERSION)' \
   deploy/charts/ilm-operator/Chart.yaml
 
 grep -E '^(version|appVersion):' deploy/charts/ilm-operator/Chart.yaml
 # version: 1.0.0
-# appVersion: v1.0.0
+# appVersion: "1.0.0"
 
-# The image reference the chart will actually render:
+# The image reference that the chart will actually render:
 helm template ilm-operator deploy/charts/ilm-operator \
   | grep -oE 'hub\.omnitrustregistry\.com/[^"]*' | sort -u
-# hub.omnitrustregistry.com/ilm/operator:v1.0.0
+# hub.omnitrustregistry.com/ilm/operator:1.0.0
 
 git commit -am "chore(release): ilm-operator ${tag}"
 git push -u origin "release/${tag}"
@@ -172,12 +174,19 @@ non-`-develop` version — it makes a release PR *reviewable*, not mergeable.
 If a fix has to be made during the release, land it on `main` first as a normal PR and
 cherry-pick it onto the release branch. The release branch is not a place to develop.
 
-## 4. Rehearse the tag chain
+## 4. Rehearse the tag chain (optional)
 
-Do this the **first** time you release from this repository, and again after any change to
-`publish_docker.yaml`, `release.yaml` or `publish_chart.yaml`. The tag chain has three links
-that only ever fire on a tag, so a mistake in any of them is invisible until the moment it
-matters.
+This step is **optional** — a disposable dry run of the tag chain, worth considering after any
+change to `publish_docker.yaml`, `release.yaml` or `publish_chart.yaml`, because those links
+only ever fire on a tag, so a mistake in any of them is invisible until the moment it matters.
+The alternative is tagging directly (section 5) and accepting that a failed link means deleting
+and re-cutting the release tag.
+
+One trap to know either way: a `workflow_run`-triggered workflow (the manifests publish) always
+executes the definition from the **default branch**, not from the tagged commit — so a
+`release.yaml` change that is only on the release branch does not take effect. Land workflow
+changes on `main` first; a manifests run that failed for this reason is recovered with
+`workflow_dispatch` against the existing tag after the fix merges, no re-tag needed.
 
 Push a scratch pre-release tag from the release branch:
 
@@ -202,18 +211,18 @@ Watch the chain end to end in GitHub Actions:
 
 ### Confirm the published image tag format, then fix `appVersion`
 
-This is the whole reason the rehearsal is worth its cost. The shared workflow that pushes the
-image is not in this repository, so the **only** way to know what tag the registry actually
-carries is to look at what the rehearsal published:
+The rehearsal proves the tag rules end to end: `publish_docker.yaml`'s override strips the `v`,
+so the rehearsal must have published the **plain** form:
 
 ```bash
-docker pull "hub.omnitrustregistry.com/ilm/operator:${tag}-rc.1"    # expected: v-prefixed
-docker pull "hub.omnitrustregistry.com/ilm/operator:${version}-rc.1" # the non-v alternative
+docker pull "hub.omnitrustregistry.com/ilm/operator:${version}-rc.1" # expected: plain SemVer
+docker pull "hub.omnitrustregistry.com/ilm/operator:${tag}-rc.1"     # must NOT exist
 ```
 
-Exactly one of those should succeed. Whichever format wins is the format `appVersion` must use —
-strip the `-rc.1` and set `appVersion` to the remainder. If the winner is the `v`-prefixed form,
-step 3 already had it right; if not, amend the release commit before tagging for real:
+The first must succeed and the second must fail. If it is the other way around, the tag-rules
+override in `publish_docker.yaml` has regressed — fix that rather than `appVersion`. If
+`appVersion` disagrees with what was actually published, amend the release commit before tagging
+for real:
 
 ```bash
 git switch "release/${tag}"

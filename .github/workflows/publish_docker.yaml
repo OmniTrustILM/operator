@@ -25,5 +25,16 @@ jobs:
     with:
       image: ilm/operator
       cache-scope: operator
+      # Registry convention: images carry the plain SemVer (1.0.0), no "v" — consistent
+      # with every other ILM image. The org default would publish the git tag verbatim
+      # (type=ref,event=tag), so the tag rule is replaced with the v-stripping semver
+      # pattern; the branch rules reproduce the org defaults unchanged.
+      tag-rules: |
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=semver,pattern={{major}}
+        type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+        type=raw,value=develop-latest,enable=${{ startsWith(github.ref, 'refs/heads/') }}
+        type=sha,prefix=develop-,format=long,enable=${{ startsWith(github.ref, 'refs/heads/') }}
       build-args: |
         VERSION=${{ github.ref_name }}
