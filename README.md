@@ -150,7 +150,7 @@ manager Deployment, with the operator image pinned to that release. No cluster t
 prerequisite for cert-managed *platform* edges):
 
 ```bash
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
 ```
 
 Replace `<version>` with a [release tag](https://github.com/OmniTrustILM/operator/releases)
@@ -161,7 +161,7 @@ For GitOps or CRD-first installs (e.g. applying the CRDs ahead of the controller
 `--server-side` on upgrades), apply the CRDs-only manifest:
 
 ```bash
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.crds.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.crds.yaml
 ```
 
 > This flat manifest is the quick, opinionated install. For configurable installs (custom

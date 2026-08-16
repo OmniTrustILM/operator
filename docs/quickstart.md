@@ -15,7 +15,7 @@ Pick one path (the CRDs install with the operator):
 
 ```bash
 # kubectl apply — self-contained release manifest (installs into ilm-operator-system)
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
 
 # …or Helm (configurable; pick your own namespace)
 helm install ilm-operator deploy/charts/ilm-operator \

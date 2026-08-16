@@ -29,7 +29,7 @@ nothing but `kubectl`, and **cert-manager is not required to install the operato
 cert-managed edges, see step 2):
 
 ```bash
-kubectl apply -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
+kubectl apply --server-side -f https://github.com/OmniTrustILM/operator/releases/download/<version>/ilm-operator.yaml
 ```
 
 Replace `<version>` with a [release tag](https://github.com/OmniTrustILM/operator/releases).
