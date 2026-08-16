@@ -152,7 +152,7 @@ grep -E '^(version|appVersion):' deploy/charts/ilm-operator/Chart.yaml
 # version: 1.0.0
 # appVersion: "1.0.0"
 
-# The image reference the chart will actually render:
+# The image reference that the chart will actually render:
 helm template ilm-operator deploy/charts/ilm-operator \
   | grep -oE 'hub\.omnitrustregistry\.com/[^"]*' | sort -u
 # hub.omnitrustregistry.com/ilm/operator:1.0.0
