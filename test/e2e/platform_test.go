@@ -3847,10 +3847,24 @@ func brokerManagementRequest(g Gomega, ns, mqCluster, method, path, body string)
 	}
 	// The body and path are test-owned literals; the credentials are the only runtime values and
 	// they are referenced through shell variables, never interpolated.
-	script := fmt.Sprintf(`set -e
-MQU=$(printf %%s '%s' | base64 -d)
+	//
+	// The call stays ONE-SHOT at the API level: any HTTP response, whatever its status, is
+	// returned immediately. Only curl exit codes 6 (DNS resolution) and 7 (connect) retry —
+	// both mean the request never reached the broker, and a CI runner's CoreDNS can blip for
+	// a few seconds under load, which must not fail the release gate.
+	script := fmt.Sprintf(`MQU=$(printf %%s '%s' | base64 -d)
 MQP=$(printf %%s '%s' | base64 -d)
-curl -sS -u "$MQU:$MQP" -X %s -H 'content-type: application/json'%s -w '\n%s%%{http_code}' --url 'http://%s.%s.svc:15672%s'
+for attempt in 1 2 3 4 5; do
+  out=$(curl -sS -u "$MQU:$MQP" -X %s -H 'content-type: application/json'%s -w '\n%s%%{http_code}' --url 'http://%s.%s.svc:15672%s')
+  rc=$?
+  case "$rc" in
+    0) printf '%%s' "$out"; exit 0 ;;
+    6|7) [ "$attempt" -lt 5 ] && sleep 3 ;;
+    *) printf '%%s' "$out" >&2; exit "$rc" ;;
+  esac
+done
+echo 'transport failure persisted after 5 attempts' >&2
+exit 6
 `, userB64, passB64, method, data, brokerHTTPCodeMarker, mqCluster, ns, path)
 
 	out, err := utils.Run(exec.Command("kubectl", "exec", "deploy/core", "-c", "core", "-n", ns,

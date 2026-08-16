@@ -9,6 +9,10 @@ The ILM Operator is a standalone Kubernetes operator that manages the ILM platfo
 - **Tooling:** Operator SDK v1.42.2, Kubebuilder v4, controller-runtime
 - **Language:** Go 1.26+
 
+## Contributing & releases
+
+`main` is the development line (the chart stays `X.Y.Z-develop`; releases exist only as tags cut from `release/*`). The contributor workflow is in [CONTRIBUTING.md](CONTRIBUTING.md); the release runbook is in [docs/release-process.md](docs/release-process.md).
+
 ## Quick Start Commands
 
 ```bash

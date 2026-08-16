@@ -136,6 +136,8 @@ See the [samples index](config/samples/README.md) for more Connector, Platform, 
 | [Proxy design specification](docs/design/proxy-operator.md) | The `Proxy` CRD: config-token contract, credential delivery, reconciliation. |
 | [Platform CR field reference](docs/design/examples/platform-cr-reference.yaml) | Annotated full-surface reference (implemented vs. design-target). |
 | [Operator install paths](deploy/README.md) | Installing the operator itself — `kubectl apply` release manifest, Helm chart, or OLM. |
+| [Contributor guide](CONTRIBUTING.md) | The development model, how to make a change end to end, and what CI enforces. |
+| [Release process](docs/release-process.md) | The release runbook — pre-release gate, release branch, tagging, verification. |
 | [CLAUDE.md](CLAUDE.md) | Development guide. |
 
 ## Installation
@@ -214,6 +216,11 @@ Requires Go 1.26+, Docker (or a compatible runtime), and Kind for local testing.
 
 The inner development loop is `make test` (envtest + unit tests) and `make lint`. The Kind
 end-to-end suite is a pre-release / nightly **gate**, not the iteration loop.
+
+Before your first change, read the [contributor guide](CONTRIBUTING.md) — it covers the
+development model (`main` is the development line, releases are tags cut from `release/*`), the
+full quality sequence to run before a PR, and what CI checks. Cutting a release is a separate
+runbook: [docs/release-process.md](docs/release-process.md).
 
 | Target | Description |
 |--------|-------------|

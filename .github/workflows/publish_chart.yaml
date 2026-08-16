@@ -44,7 +44,14 @@ jobs:
             echo "ℹ️ Last tag: $last_tag"
             echo "last_tag=$last_tag" >> $GITHUB_ENV
 
-            changed=$(ct list-changed --target-branch main --since "$last_tag" --chart-dirs deploy/charts)
+            if [[ -n "$last_tag" ]]; then
+              changed=$(ct list-changed --target-branch main --since "$last_tag" --chart-dirs deploy/charts)
+            else
+              # First tag ever: there is no previous tag to diff against, so every chart
+              # in the repository is a release candidate.
+              echo "ℹ️ No previous tag — treating every chart as changed"
+              changed=$(ls -d deploy/charts/*/)
+            fi
           else
             echo "🔀 Detected branch push (likely a merge)"
             changed=$(ct list-changed --target-branch main --since HEAD^1 --chart-dirs deploy/charts)
@@ -102,7 +109,15 @@ jobs:
           last_tag: ${{ env.last_tag }}
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            ct lint --target-branch main --since $last_tag --chart-dirs deploy/charts --check-version-increment=false
+            if [[ -n "$last_tag" ]]; then
+              ct lint --target-branch main --since "$last_tag" --chart-dirs deploy/charts --check-version-increment=false
+            else
+              # First tag ever: no previous tag to diff against. Mirror the same fallback used
+              # by "Detect Changed Charts" and lint every chart — an empty --since would swallow
+              # the next flag as its value and make ct fail on a malformed command line.
+              echo "ℹ️ No previous tag — linting every chart"
+              ct lint --all --chart-dirs deploy/charts --check-version-increment=false
+            fi
           else
             ct lint --target-branch main --since HEAD^1 --chart-dirs deploy/charts --check-version-increment=false
           fi

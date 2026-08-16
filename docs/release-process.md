@@ -1,0 +1,388 @@
+# Releasing the ILM Operator
+
+This is the repeatable runbook for cutting an operator release. It assumes you have read
+[CONTRIBUTING.md](../CONTRIBUTING.md) — in particular that `main` is the development line, that
+the chart on `main` stays at `X.Y.Z-develop`, and that a release exists only as a **tag**.
+
+Two version lines are in play and they are independent:
+
+- the **operator** version — `vX.Y.Z`, the git tag, the image tag, and the chart version;
+- the **platform** version — `2.19.0` and friends, the ILM release a BOM bundle in
+  `pkg/bom/bom.go` describes. One operator build supports a range of them.
+
+An operator release usually — but not necessarily — ships a newly released platform bundle. The
+ordering rules for platform versions themselves live in
+[docs/design/platform-versioning.md](design/platform-versioning.md) and in the `DefaultVersion`
+doc comment in `pkg/bom/bom.go`; this page covers the operator's own release mechanics.
+
+## Set these once
+
+Every command below uses these variables. Set them in the shell you run the release from.
+
+```bash
+version=1.0.0                      # the operator release version, no leading "v"
+tag="v${version}"
+platform_version=2.19.0            # the ILM platform version this release must support
+charts=/path/to/helm-charts        # a local checkout of OmniTrustILM/helm-charts
+```
+
+## 1. Pre-release checklist
+
+**`main` must be green before anything else happens.** The release branch itself is watched by
+no workflow — pushing it triggers nothing — so `main` is the last point at which CI validates
+the code you are about to tag.
+
+Run the full quality sequence on a clean checkout of `main`:
+
+```bash
+git switch main
+git pull
+make lint
+make coverage                          # runs make test, then enforces the 80% threshold
+helm lint deploy/charts/ilm-operator
+make bundle
+make trivy
+```
+
+Then run the **gate** tier — the managed e2e, with the real CloudNativePG, RabbitMQ and Keycloak
+operators:
+
+```bash
+make test-e2e-managed
+```
+
+Locally that runs all seven managed blocks serially and takes hours; the suite is
+`ContinueOnFailure`, so one run reports every failure rather than stopping at the first. To
+narrow a re-run, pass a single block:
+
+```bash
+make test-e2e-managed E2E_MANAGED_LABEL=matrix-migration
+```
+
+The blocks are `managed-postgres`, `managed-rabbitmq`, `managed-keycloak`, `full`,
+`matrix-upgrade`, `matrix-preview` and `matrix-migration`. The faster option for a release gate
+is to dispatch the **E2E Managed** workflow on GitHub Actions, which runs all seven in parallel,
+each on its own Kind cluster.
+
+**Verify the BOM against the tagged charts release.** The per-version contract in
+`pkg/bom/bom.go` — image coordinates, wiring env-var names, Secret keys, managed messaging
+topology — must match what the platform actually ships. Take that from the **rendered** output
+of the **tagged** chart, never from eyeballed `values.yaml` defaults, which do not show what the
+templates compose:
+
+```bash
+git -C "$charts" fetch --tags
+git -C "$charts" worktree add "/tmp/ilm-charts-${platform_version}" "$platform_version"
+helm dependency update "/tmp/ilm-charts-${platform_version}/charts/ilm"
+helm template ilm "/tmp/ilm-charts-${platform_version}/charts/ilm" \
+  > "/tmp/ilm-${platform_version}.rendered.yaml"
+
+# The contract matrix: every image the release ships, and the env names Core consumes.
+grep -E '^[[:space:]]+image:' "/tmp/ilm-${platform_version}.rendered.yaml" | sort -u
+grep -E '^[[:space:]]+- name: [A-Z_]+$' "/tmp/ilm-${platform_version}.rendered.yaml" | sort -u
+```
+
+Compare that against the bundle for `$platform_version` and against the operator's own golden
+renders under `test/golden/testdata`. Clean up the worktree when you are done:
+
+```bash
+git -C "$charts" worktree remove "/tmp/ilm-charts-${platform_version}"
+```
+
+This is the same method the version model was derived from — see
+[docs/design/platform-versioning.md](design/platform-versioning.md), sections 1 and 6a.
+
+## 2. The platform-release trigger
+
+The charts release **first**. `OmniTrustILM/helm-charts` tags `$platform_version`, which is what
+publishes the platform's own artifacts; only then can the operator advertise that version.
+
+The flip itself is an ordinary PR to `main`, not part of the release branch:
+
+1. In `pkg/bom/bom.go`, set `Released: true` on the bundle for `$platform_version`.
+2. Move `DefaultVersion` to it in the **same** PR. The convention is that release day sets both
+   together, so a version-less fresh install lands on the version you just released.
+   `DefaultVersion` must always name a released bundle — `TestDefaultVersionIsReleased` enforces
+   that much mechanically. Leaving the default trailing on an older release is *possible* (the
+   two flags are independent, so a released bundle can be reachable by explicit `spec.version`
+   before the default moves) but it is the **exception**: do it only deliberately, and say why in
+   the PR description.
+3. Update the supported-version table and the default marker in
+   [docs/versions.md](versions.md), and drop the preview wording from any sample that pinned the
+   bundle while it was a preview.
+4. `make test` — the BOM tests, the samples specs and the golden renders all move with this.
+
+Merge that PR to `main` and let CI go green before cutting the release branch.
+
+## 3. The release commit
+
+Cut the release branch from `main` and set the chart's `version` **and** `appVersion`. Nothing
+automates either one, and **they are not the same string**:
+
+- **`version`** is the chart's own SemVer — plain `X.Y.Z`, no `v`. This is what
+  `publish_chart.yaml` checks (it must not end in `-develop`) and what the chart is published
+  under.
+- **`appVersion`** is what the chart resolves the operator **image tag** from. The chart's
+  helper is `{{- $tag := default .Chart.AppVersion .Values.image.tag -}}`
+  (`templates/_helpers.tpl`), and `values.yaml` ships `image.tag: ""`, so out of the box the
+  rendered image is `hub.omnitrustregistry.com/ilm/operator:<appVersion>`. **`appVersion` must
+  therefore be the literal tag the registry carries, not the SemVer.**
+
+The image is pushed by the organisation's shared workflow, which this repository does not
+contain, so the published tag format cannot be read from here. What the repository *does*
+assert is `release.yaml`: it pins the install manifests to
+`hub.omnitrustregistry.com/ilm/operator:${VERSION}` where `VERSION` is the **git tag verbatim**
+(`v`-prefixed, validated by its `v[0-9]*` case), and it fails the release if that exact image is
+not pullable. So `v${version}` is the format to use — and step 4 confirms it against the real
+registry before you tag for real.
+
+```bash
+git switch main
+git pull
+git switch -c "release/${tag}"
+
+# Chart version: plain SemVer. appVersion: the image tag (confirm the format in step 4).
+CHART_VERSION="$version" IMAGE_TAG="$tag" yq -i \
+  '.version = strenv(CHART_VERSION) | .appVersion = strenv(IMAGE_TAG)' \
+  deploy/charts/ilm-operator/Chart.yaml
+
+grep -E '^(version|appVersion):' deploy/charts/ilm-operator/Chart.yaml
+# version: 1.0.0
+# appVersion: v1.0.0
+
+# The image reference the chart will actually render:
+helm template ilm-operator deploy/charts/ilm-operator \
+  | grep -oE 'hub\.omnitrustregistry\.com/[^"]*' | sort -u
+# hub.omnitrustregistry.com/ilm/operator:v1.0.0
+
+git commit -am "chore(release): ilm-operator ${tag}"
+git push -u origin "release/${tag}"
+```
+
+If you get this wrong the chart installs cleanly and then fails at pull time with
+`ImagePullBackOff` on a tag that was never published — which is exactly the failure the
+rehearsal below is designed to catch before real users see it.
+
+**Never merge this branch into `main`.** The merge would push a non-`-develop` chart version to
+`main`, and `publish_chart.yaml`'s development-version check fails exactly that. The escape
+hatch that lets a release branch exist at all is in `test_chart.yaml`, which skips the
+`-develop` requirement for PRs whose head branch starts with `release` and instead requires a
+non-`-develop` version — it makes a release PR *reviewable*, not mergeable.
+
+If a fix has to be made during the release, land it on `main` first as a normal PR and
+cherry-pick it onto the release branch. The release branch is not a place to develop.
+
+## 4. Rehearse the tag chain
+
+Do this the **first** time you release from this repository, and again after any change to
+`publish_docker.yaml`, `release.yaml` or `publish_chart.yaml`. The tag chain has three links
+that only ever fire on a tag, so a mistake in any of them is invisible until the moment it
+matters.
+
+Push a scratch pre-release tag from the release branch:
+
+```bash
+git switch "release/${tag}"
+git tag -a "${tag}-rc.1" -m "ilm-operator ${tag}-rc.1"
+git push origin "${tag}-rc.1"
+```
+
+Watch the chain end to end in GitHub Actions:
+
+1. **Publish Docker image** builds and pushes `hub.omnitrustregistry.com/ilm/operator:${tag}-rc.1`.
+2. **Publish release manifests** starts only after that workflow *succeeds* for a tag. It
+   regenerates `ilm-operator.yaml` and `ilm-operator.crds.yaml` from `config/` with the image
+   pinned to the tag, re-verifies that the image is pullable (retrying for registry propagation),
+   cosign-signs both manifests and `checksums.txt`, and creates the GitHub release. Recognised
+   pre-release suffixes — `rc`, `alpha`, `beta`, `preview`, `develop`, `dev`, `pre` — are marked
+   as GitHub pre-releases automatically.
+3. **Publish Chart** runs its release-version check (the chart must not be `-develop`, which the
+   release commit already handled), `ct lint`, then packages, pushes and cosign-signs the chart
+   to `oci://hub.omnitrustregistry.com/ilm-helm`.
+
+### Confirm the published image tag format, then fix `appVersion`
+
+This is the whole reason the rehearsal is worth its cost. The shared workflow that pushes the
+image is not in this repository, so the **only** way to know what tag the registry actually
+carries is to look at what the rehearsal published:
+
+```bash
+docker pull "hub.omnitrustregistry.com/ilm/operator:${tag}-rc.1"    # expected: v-prefixed
+docker pull "hub.omnitrustregistry.com/ilm/operator:${version}-rc.1" # the non-v alternative
+```
+
+Exactly one of those should succeed. Whichever format wins is the format `appVersion` must use —
+strip the `-rc.1` and set `appVersion` to the remainder. If the winner is the `v`-prefixed form,
+step 3 already had it right; if not, amend the release commit before tagging for real:
+
+```bash
+git switch "release/${tag}"
+APP_VERSION="$version" yq -i '.appVersion = strenv(APP_VERSION)' \
+  deploy/charts/ilm-operator/Chart.yaml
+git commit --amend --no-edit -a
+git push --force-with-lease
+```
+
+Then re-render and confirm the chart points at an image that exists:
+
+```bash
+helm template ilm-operator deploy/charts/ilm-operator \
+  | grep -oE 'hub\.omnitrustregistry\.com/[^"]*' | sort -u
+```
+
+### Then clean up the rehearsal
+
+Three things to know before you delete the rehearsal tag:
+
+- The rehearsal tag publishes the chart at the **final** version `$version`, because the release
+  commit already stripped `-develop`. That is expected.
+- Chart change detection on a tag diffs against the *previous* tag. If the rehearsal tag is
+  still present when you push the real tag and no chart file changed between them, the chart
+  push is skipped as "no changes" — the artifact is already in the registry at the right
+  version, but the real tag's run will not show a chart push.
+- **Deleting the git tag does not undo what was published.** The rc image, the rc chart and any
+  floating registry tag the publish moved (a `latest`-style tag, if the shared workflow maintains
+  one for tag builds) all stay as the rehearsal left them. Check the registry after a rehearsal
+  and, if a floating tag was moved to the rc image, re-point it once the real release is out —
+  git has no way to restore it for you.
+
+With that understood, delete the rehearsal tag and its GitHub pre-release before the real tag.
+That keeps the release list clean and restores the change-detection baseline:
+
+```bash
+git push origin ":refs/tags/${tag}-rc.1"
+git tag -d "${tag}-rc.1"
+gh release delete "${tag}-rc.1" --yes
+```
+
+## 5. Tag the release
+
+```bash
+git switch "release/${tag}"
+git tag -a "$tag" -m "ilm-operator ${tag}"
+git push origin "$tag"
+```
+
+The same three workflows run, this time producing a full (non-pre-release) GitHub release with
+notes generated from the merged PRs' labels (`.github/release.yml`). Verify all three artifacts
+before announcing anything:
+
+```bash
+# The image the manifests pin.
+docker manifest inspect "hub.omnitrustregistry.com/ilm/operator:${tag}"
+
+# The install manifests and their checksums.
+base="https://github.com/OmniTrustILM/operator/releases/download/${tag}"
+curl -fsSLO "${base}/ilm-operator.yaml"
+curl -fsSLO "${base}/ilm-operator.crds.yaml"
+curl -fsSLO "${base}/checksums.txt"
+shasum -a 256 -c checksums.txt          # GNU coreutils: sha256sum -c checksums.txt
+
+# The chart (run `helm registry login hub.omnitrustregistry.com` first if the pull is refused).
+helm pull "oci://hub.omnitrustregistry.com/ilm-helm/ilm-operator" --version "$version"
+
+# The image the PUBLISHED chart resolves must itself be pullable — this is the check that
+# catches an appVersion that does not match the registry's tag format.
+tar -xzf "ilm-operator-${version}.tgz"
+helm template ilm-operator ./ilm-operator \
+  | grep -oE 'hub\.omnitrustregistry\.com/[^"]*' | sort -u \
+  | xargs -n1 docker manifest inspect >/dev/null && echo "chart image OK"
+```
+
+Each manifest also ships a `.sig`; verify with the organisation's cosign public key if you have
+it locally:
+
+```bash
+cosign verify-blob --key cosign.pub --signature ilm-operator.yaml.sig ilm-operator.yaml
+```
+
+## 6. After the tag
+
+`main` stays on `-develop`. The release branch is **not** merged back — the tag pins its commit
+permanently, so the branch has no further purpose once the tag is pushed:
+
+```bash
+git switch main                          # you cannot delete the branch you are standing on
+git push origin --delete "release/${tag}"
+git branch -D "release/${tag}"
+```
+
+Nothing else on `main` changes. The next merge to `main` publishes a develop image again, and
+the chart there is still `X.Y.Z-develop`.
+
+## 7. CLI follow-up
+
+`ilmctl` (`OmniTrustILM/cli`) depends on this repository as an ordinary published Go module,
+pinned in its `go.mod`. Once the operator tag exists, pin it **exactly** — never `@latest`, which
+would let the CLI's rendered CRs drift away from the operator version it targets:
+
+```bash
+cd /path/to/cli
+go get "github.com/OmniTrustILM/operator@${tag}"
+go mod tidy
+make test
+```
+
+Commit that on a normal PR to the CLI's `main`, then tag the CLI release.
+
+## 8. Post-release verification
+
+Verify the published artifacts on a **clean** cluster, and install the operator from the
+**published release assets** — not with `make deploy` from the working tree, which would test a
+locally built image rather than the one you just shipped.
+
+**Fresh install of the new default:**
+
+```bash
+kind create cluster --name ilm-release-check
+
+kubectl apply --server-side -f \
+  "https://github.com/OmniTrustILM/operator/releases/download/${tag}/ilm-operator.yaml"
+kubectl -n ilm-operator-system rollout status \
+  deploy/ilm-operator-controller-manager --timeout=180s
+
+make install-upstream-operators        # CloudNativePG, RabbitMQ, Keycloak, cert-manager
+kubectl create namespace ilm
+kubectl apply -f config/samples/platform_quickstart.yaml
+kubectl -n ilm get platform -w
+```
+
+The `VERSION` printer column must show the bundle you just released — that is the check that
+`DefaultVersion` moved and that a version-less CR lands on it.
+
+**A live upgrade from the previous version**, whenever the new bundle migrates rather than just
+rolling images — a renamed managed vhost, exchanges or queues means the messaging-migration
+phase machine runs (fence, drain, cut over, clean up). Bring up a platform on the previous
+version, move `spec.version`, and watch `status.upgrade` walk the phases to completion. The
+procedure and what to expect are in [docs/upgrades.md](upgrades.md); the same path is covered
+automatically by the `matrix-migration` e2e block.
+
+```bash
+kind delete cluster --name ilm-release-check
+```
+
+## 9. Patch releases
+
+A patch is the same procedure with a shorter start. Land the fix on `main` first as a normal PR,
+then cut a release branch **at the released tag** — not at `main`, which by then carries
+unreleased work — and cherry-pick:
+
+Identify the merged fix by its **exact commit SHA**. Do not reach for a branch name: `git fetch
+--tags` updates tags and remote-tracking refs, *not* your local `main`, so `git rev-parse main`
+can silently resolve to a stale commit and cherry-pick the wrong thing — or nothing you meant.
+
+```bash
+git fetch origin --tags
+
+# Take the SHA from the merged PR, or read it off the up-to-date remote-tracking ref:
+git log --oneline -5 origin/main
+fix_commit=REPLACE_WITH_THE_MERGED_FIX_SHA
+
+git switch -c release/v1.0.1 v1.0.0
+git cherry-pick "$fix_commit"
+git show --stat HEAD          # confirm you picked what you meant to pick
+```
+
+Then set the chart's `version` to `1.0.1` and `appVersion` to the matching image tag (step 3),
+rehearse only if the workflows changed (step 4), tag `v1.0.1` (step 5), and clean up (step 6).
+Patch tags are plain semver — there is no separate channel and no suffix.
