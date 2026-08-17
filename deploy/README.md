@@ -44,12 +44,11 @@ never drift from the CRDs/RBAC in `config/`. Do not edit them by hand. Release a
 built from the same kustomizations by the release workflow, with the image pinned to the
 release tag instead.
 
-These flat manifests are **not committed** to the repository — they are generated at release
-time from `config/` (the same kustomize bases as `make deploy`) so they can never drift from
-the operator code, and uploaded by [`.github/workflows/release.yaml`](../.github/workflows/release.yaml)
-once the matching operator image has been published.
+The release assets are generated from the same `config/` kustomize bases and uploaded by
+[`.github/workflows/release.yaml`](../.github/workflows/release.yaml) once the matching
+operator image has been published.
 
-To produce them locally (e.g. to install a development build):
+To produce a manifest locally against your own image:
 
 ```bash
 make build-installer      IMG=<your-registry>/ilm/operator:<tag>   # -> dist/install.yaml
