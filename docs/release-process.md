@@ -92,6 +92,88 @@ git -C "$charts" worktree remove "/tmp/ilm-charts-${platform_version}"
 This is the same method the version model was derived from — see
 [docs/design/platform-versioning.md](design/platform-versioning.md), sections 1 and 6a.
 
+### The documentation-site pre-flight (a pre-tag gate)
+
+**This runs before the tag, and it is a gate, not a formality.** The pages under `docs/site/` are
+pulled into https://docs.otilm.com at an **immutable ref** — the tag you are about to push (step
+9). A page that fails the site build, or carries a broken link, cannot be repaired by a later
+commit on `main`: the pinned tag keeps serving the broken page. The only remedy after the fact is
+a **patch tag** (step 10). So prove the set builds while a tag can still be moved — that is, while
+it does not exist yet.
+
+Two checks, in order. First the link rule: within the synced set only relative links that stay
+inside `docs/site/` — one level deep — are legal (`./upgrading.md` or
+`./custom-resources/platform.md` from a top-level page, `../installation.md` or `./platform.md`
+from a CR guide, `#anchor`), because a relative link that leaves the set resolves on GitHub and
+breaks on the site.
+
+```bash
+SRC=docs/site python3 - <<'PY'
+import os, re, sys
+src = os.path.abspath(os.environ["SRC"])
+pat = re.compile(r'\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+files = sorted(os.path.join(r, n) for r, _, ns in os.walk(src)
+               for n in ns if n.endswith(".md"))
+bad = []
+for f in files:
+    rel = os.path.relpath(f, src)
+    text = open(f, encoding="utf-8").read()
+    for m in pat.finditer(text):
+        t = m.group(1)
+        if t.startswith("https://") or t.startswith("#") or t.startswith("%"):
+            continue
+        base = t.split("#")[0]
+        if not (base.startswith("./") or base.startswith("../")):
+            bad.append((rel, t, "not a relative link"))
+            continue
+        target = os.path.normpath(os.path.join(os.path.dirname(f), base))
+        if not target.startswith(src + os.sep):
+            bad.append((rel, t, "leaves the synced set"))
+        elif not os.path.exists(target):
+            bad.append((rel, t, "target does not exist"))
+        elif target not in files:
+            bad.append((rel, t, "target is not part of the synced set"))
+for b in bad:
+    print("VIOLATION:", *b)
+print(f"files: {len(files)}  violations: {len(bad)}")
+sys.exit(1 if bad else 0)
+PY
+```
+
+Then the real site build, against a throwaway copy of the set in the site's own target directory.
+A checkout of `OmniTrustILM/documentation` and a running Docker daemon (PlantUML rendering) are
+prerequisites:
+
+```bash
+site=~/Development/GitHub/documentation
+target="$site/docs/certificate-key/installation-guide/deployment/deployment-operator"
+
+mkdir -p "$target/custom-resources"
+cp docs/site/*.md "$target/"
+cp docs/site/custom-resources/*.md "$target/custom-resources/"
+(cd "$site" && node scripts/render-diagrams.mjs \
+   && NODE_OPTIONS="--max_old_space_size=10240" yarn build)
+```
+
+`onBrokenLinks: 'throw'` makes a bad route-level link a hard build failure, and the site sets
+`markdown.hooks.onBrokenMarkdownLinks: 'throw'` as well, so a bad **markdown** link fails the
+build the same way — there are no ignorable warnings. Fix whatever appears in **this**
+repository under `docs/site/`, then re-run. Fixing it on the site is never correct: the next sync
+overwrites it.
+
+One warning is expected and harmless — *"Cannot infer the update date for some files, as they are
+not tracked by git"* — because the pre-flight copies are untracked in the site checkout.
+
+Restore the site checkout **byte-identical** when you are done — the pre-flight must leave no
+trace:
+
+```bash
+rm -rf "$target"
+(cd "$site" && git status --short)     # must print nothing
+```
+
+Only once this is clean do you proceed to the release commit and the tag.
+
 ## 2. The platform-release trigger
 
 The charts release **first**. `OmniTrustILM/helm-charts` tags `$platform_version`, which is what
@@ -107,9 +189,12 @@ The flip itself is an ordinary PR to `main`, not part of the release branch:
    two flags are independent, so a released bundle can be reachable by explicit `spec.version`
    before the default moves) but it is the **exception**: do it only deliberately, and say why in
    the PR description.
-3. Update the supported-version table and the default marker in
-   [docs/versions.md](versions.md), and drop the preview wording from any sample that pinned the
-   bundle while it was a preview.
+3. Update the supported-version table (the engine matrix) and the default marker in the
+   **canonical** user guide — [docs/site/upgrading.md](site/upgrading.md), under its
+   *Supported versions* heading — and drop the preview wording from any sample that pinned the
+   bundle while it was a preview. `docs/site/` is the canonical source for every end-user fact;
+   `docs/versions.md` and `docs/upgrades.md` are pre-absorption originals awaiting reduction to
+   stubs, so do not add or correct facts there.
 4. `make test` — the BOM tests, the samples specs and the golden renders all move with this.
 
 Merge that PR to `main` and let CI go green before cutting the release branch.
@@ -363,14 +448,46 @@ The `VERSION` printer column must show the bundle you just released — that is 
 rolling images — a renamed managed vhost, exchanges or queues means the messaging-migration
 phase machine runs (fence, drain, cut over, clean up). Bring up a platform on the previous
 version, move `spec.version`, and watch `status.upgrade` walk the phases to completion. The
-procedure and what to expect are in [docs/upgrades.md](upgrades.md); the same path is covered
-automatically by the `matrix-migration` e2e block.
+procedure and what to expect are in [docs/site/upgrading.md](site/upgrading.md), under *Worked
+example: 2.18.0 to 2.19.0 (the messaging migration)*; the same path is covered automatically by
+the `matrix-migration` e2e block.
 
 ```bash
 kind delete cluster --name ilm-release-check
 ```
 
-## 9. Patch releases
+## 9. Bump the documentation-site pin
+
+The user guide under `docs/site/` is synced into https://docs.otilm.com by
+`docusaurus-plugin-remote-content` at an immutable ref. Move it to this release:
+
+1. In `OmniTrustILM/documentation`, open `docusaurus.config.js` and set
+   `operatorDocsRef` to the tag you just pushed (`vX.Y.Z`) and `operatorVersion` to
+   `X.Y.Z`.
+2. Run `yarn docusaurus download-remote-operator-docs` and commit the refreshed pages
+   under `docs/certificate-key/installation-guide/deployment/deployment-operator/`.
+3. Run `NODE_OPTIONS="--max_old_space_size=10240" yarn build`.
+4. Open the PR against the `documentation` branch with screenshots of the changed pages
+   (the site has no PR preview).
+
+This step is a **pin bump only**. It pulls the pages the tag already froze; it cannot change them.
+That is why the [pre-flight in step 1](#the-documentation-site-pre-flight-a-pre-tag-gate) runs
+before the tag, and why it is not optional.
+
+**If the build fails here, or a page is wrong on the site**, do **not** try to fix it by
+committing to `docs/site/` on `main`. `operatorDocsRef` points at
+`vX.Y.Z`, and a tag pins its commit permanently (the same immutability the branch cleanup in step
+6 relies on) — the sync will keep pulling the broken page no matter what lands on `main`
+afterwards. Retagging is not an option either: the tag has published images, manifests and a chart
+under that name.
+
+A documentation defect discovered after the tag is therefore a **patch release**, exactly like a
+code defect: land the fix on `main`, cut `release/vX.Y.Z+1` at the released tag, cherry-pick, tag,
+and then repeat this step against the new tag ([10. Patch releases](#10-patch-releases)). The one
+thing you can do in the meantime is hold the pin at the previous tag, so the site keeps serving
+the last good copy of the guide rather than the broken one.
+
+## 10. Patch releases
 
 A patch is the same procedure with a shorter start. Land the fix on `main` first as a normal PR,
 then cut a release branch **at the released tag** — not at `main`, which by then carries
@@ -395,3 +512,8 @@ git show --stat HEAD          # confirm you picked what you meant to pick
 Then set the chart's `version` to `1.0.1` and `appVersion` to the matching image tag (step 3),
 rehearse only if the workflows changed (step 4), tag `v1.0.1` (step 5), and clean up (step 6).
 Patch tags are plain semver — there is no separate channel and no suffix.
+
+**A documentation-only patch is still a full patch release**, because the site pin can only point
+at a tag. Run the site pre-flight in step 1 before tagging — it is the check that would have caught
+the defect — and finish with step 9 against the new tag, so `operatorDocsRef` moves off the broken
+one.

@@ -67,10 +67,11 @@ type DatabaseConnection struct {
 	// under. For external mode they are the user's spec.database.credentials key overrides
 	// when set, else the wiring-profile defaults (username/password). For managed mode they
 	// are ALWAYS the wiring-profile defaults — the keys are the upstream CNPG operator's
-	// generated-Secret convention (which matches username/password), NOT user-mappable. Both
-	// the secretKeyRef wiring (sharedCredSecretEnv) AND the operator-side read for the
-	// composed auth connection string (reconcileAuthDBSecret) source these keys, so a
-	// single mapping feeds both paths.
+	// generated-Secret convention (which matches username/password), NOT user-mappable. The
+	// secretKeyRef wiring (sharedCredSecretEnv), the operator-side read for the composed
+	// auth connection string (reconcileAuthDBSecret), AND the managed Keycloak CR's
+	// spec.db.{usernameSecret,passwordSecret} (keycloakDBBlock) all source these keys, so a
+	// single mapping feeds every path.
 	UsernameKey string
 	PasswordKey string
 }

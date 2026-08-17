@@ -716,7 +716,7 @@ spec:
     # virtualHost: czertainly   # optional; omit to use the bundle default ("/" on 2.19.0, "czertainly" on 2.18.0)
     managed:
       replicas: 3            # RabbitMQ nodes (a clustered broker)
-      version: "4.3.1"       # RabbitMQ version (selects the RabbitmqCluster image); omit to use the bundle default
+      version: "4.3.1"       # RabbitMQ version (selects the RabbitmqCluster image); omitted, the Cluster Operator applies its own, older default — not the validated version
       storage:
         size: 20Gi
         # storageClass: fast-ssd   # optional; omit for the cluster default
@@ -815,7 +815,7 @@ spec:
     realm: ilm                  # the platform realm name (default "ilm")
     managed:
       instances: 1              # Keycloak instances (>1 = clustered/HA)
-      version: "26.6.3"         # Keycloak version (selects the Keycloak CR image); omit to use the bundle default
+      version: "26.6.3"         # Keycloak version (selects the Keycloak CR image); omitted, the Keycloak Operator applies its own default (already 26.6.3, pre-optimized)
       # realmImport:            # optional, create-only import from a user ConfigMap
       #   configMapRef: ilm-realm
       #   key: ilm_realm.json

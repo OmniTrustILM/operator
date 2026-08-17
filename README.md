@@ -125,6 +125,7 @@ See the [samples index](config/samples/README.md) for more Connector, Platform, 
 
 | Document | What it covers |
 |---|---|
+| [User guide](docs/site/overview.md) | Nine synced pages, entered through a router: the operator install, the `Platform` CR (first run to full configuration) and its field index, the `Connector` and `Proxy` CRs, upgrading, migration from Helm, and troubleshooting — kept in sync with the public docs site. |
 | [Quickstart](docs/quickstart.md) | The everything-managed apply-and-go path. |
 | [Platform getting-started guide](docs/platform.md) | Install, prerequisites, Secret keys, conditions, the full customization surface, teardown. |
 | [Configuration reference & scenario cookbook](docs/configuration.md) | Every Platform option explained, mapped to the matching sample. |

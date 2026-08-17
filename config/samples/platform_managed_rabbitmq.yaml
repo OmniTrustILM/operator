@@ -67,7 +67,8 @@ spec:
     # virtualHost: "/"          # optional; omit to use the 2.19.0 bundle default "/"
     managed:
       replicas: 1
-      # version omitted → the RabbitMQ Cluster Operator uses its matched default server image.
+      # version omitted → the RabbitMQ Cluster Operator applies its own default, which is
+      # OLDER than the validated version — pin it deliberately (platform_managed_pinned_versions.yaml).
       storage:
         size: 20Gi
         # storageClass: fast-ssd   # optional; omit to use the cluster default

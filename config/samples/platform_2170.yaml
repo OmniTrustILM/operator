@@ -27,7 +27,7 @@ spec:
   messaging:
     mode: managed                     # the Topology Operator mints the (single) user Secret
     brokerType: rabbitmq
-    managed: { replicas: 1, storage: { size: 10Gi } }   # version omitted → operator's matched default
+    managed: { replicas: 1, storage: { size: 10Gi } }   # version omitted → the Cluster Operator's own default, not the 2.17.0-validated 4.2.0
   keycloak:
     mode: managed                     # the Keycloak Operator mints the admin Secret; OIDC relayed
     realm: ilm

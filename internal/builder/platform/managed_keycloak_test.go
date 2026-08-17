@@ -486,6 +486,90 @@ func TestResolveManagedKeycloakDBFromConnectionManaged(t *testing.T) {
 	assert.Equal(t, "ilm-db-app", secretName, "managed DB readback references the CNPG-generated app Secret")
 }
 
+// TestResolveManagedKeycloakDBCredentialKeyMappings asserts the Keycloak CR's
+// spec.db.{usernameSecret,passwordSecret}.key honor the external database's
+// spec.database.credentials.{usernameKey,passwordKey} mappings — the SAME mapping the
+// platform components' secretKeyRef wiring honors — with the wiring-profile defaults
+// (username/password) applying per key when a mapping is unset. A user bringing an
+// External-Secrets / Vault-shaped Secret (e.g. POSTGRES_USER/POSTGRES_PASSWORD) must get a
+// managed Keycloak reading those keys, not the hard-coded defaults. For a MANAGED database
+// the mappings must be IGNORED: the keys are the CNPG operator's generated-Secret
+// convention (username/password), and the referenced Secret is the CNPG-generated
+// <cluster>-app Secret — a stray credentials block (admission allows one in managed mode)
+// must not steer Keycloak onto keys the generated Secret does not carry.
+func TestResolveManagedKeycloakDBCredentialKeyMappings(t *testing.T) {
+	tests := []struct {
+		name            string
+		managedDB       bool // switch the database to managed mode (mappings must be ignored)
+		usernameKey     string
+		passwordKey     string
+		wantUsernameKey string
+		wantPasswordKey string
+	}{
+		{
+			name:            "unmapped defaults to the wiring-profile keys",
+			wantUsernameKey: "username",
+			wantPasswordKey: "password",
+		},
+		{
+			name:            "mapped both keys",
+			usernameKey:     "POSTGRES_USER",
+			passwordKey:     "POSTGRES_PASSWORD",
+			wantUsernameKey: "POSTGRES_USER",
+			wantPasswordKey: "POSTGRES_PASSWORD",
+		},
+		{
+			name:            "mapped username only keeps the password default",
+			usernameKey:     "db-user",
+			wantUsernameKey: "db-user",
+			wantPasswordKey: "password",
+		},
+		{
+			name:            "mapped password only keeps the username default",
+			passwordKey:     "db-pass",
+			wantUsernameKey: "username",
+			wantPasswordKey: "db-pass",
+		},
+		{
+			name:            "managed database ignores the mappings (CNPG generated-Secret convention)",
+			managedDB:       true,
+			usernameKey:     "POSTGRES_USER",
+			passwordKey:     "POSTGRES_PASSWORD",
+			wantUsernameKey: "username",
+			wantPasswordKey: "password",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := managedKCPlatform(func(p *otilmv1alpha1.Platform) {
+				p.Spec.Database.Credentials.UsernameKey = tt.usernameKey
+				p.Spec.Database.Credentials.PasswordKey = tt.passwordKey
+				if tt.managedDB {
+					p.Spec.Database.Mode = "managed"
+					p.Spec.Database.Managed = &otilmv1alpha1.ManagedDatabaseSpec{
+						Instances: 1, Storage: otilmv1alpha1.StorageSpec{Size: "10Gi"},
+					}
+				}
+			})
+			kc := findManagedObj(ResolveManagedKeycloak(p), keycloakKind)
+			require.NotNil(t, kc)
+
+			wantSecret := testILMDB // external: the user's credentials Secret
+			if tt.managedDB {
+				wantSecret = "ilm-db-app" // managed: the CNPG-generated <cluster>-app Secret
+			}
+			uName, _, _ := unstructured.NestedString(kc.Object, "spec", "db", "usernameSecret", "name")
+			assert.Equal(t, wantSecret, uName, "the referenced Secret follows the resolved connection")
+			uKey, _, _ := unstructured.NestedString(kc.Object, "spec", "db", "usernameSecret", "key")
+			assert.Equal(t, tt.wantUsernameKey, uKey)
+			pName, _, _ := unstructured.NestedString(kc.Object, "spec", "db", "passwordSecret", "name")
+			assert.Equal(t, wantSecret, pName, "the referenced Secret follows the resolved connection")
+			pKey, _, _ := unstructured.NestedString(kc.Object, "spec", "db", "passwordSecret", "key")
+			assert.Equal(t, tt.wantPasswordKey, pKey)
+		})
+	}
+}
+
 // TestResolveManagedKeycloakSCCPodTemplate asserts the SCC-clean pod security (restricted-v2):
 // runAsNonRoot, drop ALL caps, seccomp RuntimeDefault, no privilege escalation, NO hard-coded
 // runAsUser.
