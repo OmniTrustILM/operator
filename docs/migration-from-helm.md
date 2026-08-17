@@ -211,8 +211,9 @@ The connector subcharts are **not** part of the `Platform` CR — they are manag
 `# TODO(customization)`; convert each to a `Connector` (see
 [`design/connector-operator.md`](design/connector-operator.md)).
 
-`commonCredentialProvider`, `ejbcaNgConnector`, `pyAdcsConnector`,
-`hashicorpVaultConnector`, `x509ComplianceProvider`, `cryptosenseDiscoveryProvider`,
+`commonCredentialProvider`, `ejbcaNgConnector`, `externalAuthorityProvider`,
+`pyAdcsConnector`, `otpkiConnector`, `hashicorpVaultConnector`,
+`timestampFormattingConnector`, `x509ComplianceProvider`, `cryptosenseDiscoveryProvider`,
 `ctLogsDiscoveryProvider`, `networkDiscoveryProvider`, `keystoreEntityProvider`,
 `softwareCryptographyProvider`, `emailNotificationProvider` (its `smtp.*` credentials stay
 inline-secrets *there*), `webhookNotificationProvider`, `registerConnectors`.

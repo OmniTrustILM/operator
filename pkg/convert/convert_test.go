@@ -579,3 +579,49 @@ func TestConvertMessagingBlockIsReportedPerSubKey(t *testing.T) {
 	assert.NotContains(t, out, "messaging.timeQuality",
 		"a sub-key that WAS consumed must not be reported")
 }
+
+// TestConvertChartConnectorBlocksRouteToConnectorCRD pins the connector routing for the
+// umbrella chart's full per-connector subchart surface — including the three aliases the
+// converter previously did not know (externalAuthorityProvider, otpkiConnector,
+// timestampFormattingConnector): before they were added to connectorKeys, a values.yaml
+// enabling one of them rendered a bare "# UNMAPPED: <key>" footer line instead of the
+// Connector-CRD customization guidance every other connector block gets. Each case asserts
+// both halves: the key appears in the "Connector CRD" TODO, and the bare top-level UNMAPPED
+// report is gone.
+func TestConvertChartConnectorBlocksRouteToConnectorCRD(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "externalAuthorityProvider was unmapped", key: "externalAuthorityProvider"},
+		{name: "otpkiConnector was unmapped", key: "otpkiConnector"},
+		{name: "timestampFormattingConnector was unmapped", key: "timestampFormattingConnector"},
+		{name: "ejbcaNgConnector already mapped (regression guard)", key: "ejbcaNgConnector"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Convert(vals{tt.key: vals{"enabled": true}}, "ilm", testNamespace)
+			out, err := r.Render()
+			require.NoError(t, err)
+
+			joinedCustom := strings.Join(r.customization, "\n")
+			assert.Contains(t, joinedCustom, tt.key,
+				"the connector block must be named in the Connector-CRD customization TODO")
+			assert.Contains(t, joinedCustom, "Connector CRD",
+				"the guidance must route the user to the separate Connector CRD")
+			assert.NotContains(t, out, "# UNMAPPED: "+tt.key+"\n",
+				"a chart connector block must not fall through to the bare unmapped footer")
+		})
+	}
+
+	// All chart connector aliases together produce ONE sorted customization line naming each.
+	values := vals{}
+	for _, tt := range tests {
+		values[tt.key] = vals{"enabled": true}
+	}
+	r := Convert(values, "ilm", testNamespace)
+	joinedCustom := strings.Join(r.customization, "\n")
+	assert.Contains(t, joinedCustom,
+		"ejbcaNgConnector, externalAuthorityProvider, otpkiConnector, timestampFormattingConnector",
+		"the connector TODO lists every found connector block, sorted")
+}
