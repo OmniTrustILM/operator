@@ -142,9 +142,19 @@ doc comment in `pkg/bom/bom.go`. A sample that pins a preview bundle must say so
 ## Docs, samples, and generated files
 
 - **Docs** live in `docs/` and are linked from the table in [README.md](README.md). User-facing
-  behaviour changes belong in the matching guide — `docs/versions.md` for the supported-version
-  matrix, `docs/upgrades.md` for upgrade procedure and guards, `docs/configuration.md` for CR
-  fields — not only in a design document.
+  behavior changes belong in the matching guide — `docs/site/upgrading.md` for the
+  supported-version matrix and upgrade procedure, `docs/site/custom-resources/platform.md`
+  (plus the field index in `docs/site/custom-resources/platform-options.md`) for `Platform`
+  surface changes, `docs/site/custom-resources/connector.md` or
+  `docs/site/custom-resources/proxy.md` for the other two CRDs, and `docs/site/installation.md`
+  for install-path changes — not only in a design document.
+- Pages under `docs/site/` are synced verbatim into https://docs.otilm.com by
+  `docusaurus-plugin-remote-content` at a pinned ref. Two rules make that safe: every page
+  carries `sidebar_position` front matter, and **links may only be relative links within
+  `docs/site/`, one level deep** (`./upgrading.md` and `./custom-resources/platform.md` from a
+  top-level page, `../installation.md` and `./platform.md` from a CR guide, `#anchor`) — every
+  other target is an absolute URL. A relative link that leaves `docs/site/` resolves on GitHub
+  and breaks on the site, and the site's build treats it as a hard failure.
 - **Samples are tested, not decorative.** The samples spec in each controller package applies
   every matching `config/samples/` file to the envtest apiserver, so a sample that violates a CEL
   validation rule fails `make test`. The globs differ: Platform and Proxy use `*platform*.yaml`

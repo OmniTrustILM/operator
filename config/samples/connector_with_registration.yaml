@@ -21,7 +21,9 @@ spec:
     name: "X.509 Compliance Provider"
     # The platform's BASE API URL, /api prefix INCLUDED — the operator appends only
     # /v2/connector/register. Without the /api this registration 404s.
-    platformUrl: "https://ilm-core.ilm-system.svc.cluster.local:8443/api"
+    # In-cluster form: the operator renders Core under the clean Service name `core`
+    # on port 8080 (plain HTTP, ClusterIP) in the PLATFORM's namespace.
+    platformUrl: "http://core.ilm.svc.cluster.local:8080/api"
     authType: none
     customAttributes:
       - name: description
