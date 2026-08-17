@@ -498,7 +498,9 @@ type HighAvailabilitySpec struct {
 
 // LoggingSpec configures platform logging.
 type LoggingSpec struct {
-	// Level is the log level for the com.czertainly logger (defaults to "INFO").
+	// Level is the log level for the platform's own components (defaults to "INFO").
+	// It is delivered through the logging environment variable the selected version's
+	// bill of materials names, so the underlying logger differs across platform versions.
 	// +kubebuilder:default=INFO
 	Level string `json:"level,omitempty"`
 }
