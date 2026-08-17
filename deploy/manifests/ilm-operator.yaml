@@ -4577,7 +4577,9 @@ spec:
                       origins:
                         description: |-
                           Origins is the list of allowed origins for Access-Control-Allow-Origin
-                          (defaults to ["*"] when empty and cors is enabled).
+                          (when empty and cors is enabled, defaults to the platform's own origin,
+                          https://<host> using the edge host or common.hostName, falling back to
+                          ["*"] only when no host is known).
                         items:
                           type: string
                         type: array

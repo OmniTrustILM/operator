@@ -813,7 +813,9 @@ type GatewayCorsSpec struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 	// Origins is the list of allowed origins for Access-Control-Allow-Origin
-	// (defaults to ["*"] when empty and cors is enabled).
+	// (when empty and cors is enabled, defaults to the platform's own origin,
+	// https://<host> using the edge host or common.hostName, falling back to
+	// ["*"] only when no host is known).
 	Origins []string `json:"origins,omitempty"`
 	// ExposedHeaders is the list of values for Access-Control-Expose-Headers
 	// (defaults to ["X-Auth-Token"] when empty and cors is enabled).

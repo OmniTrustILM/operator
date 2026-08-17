@@ -194,7 +194,7 @@ spec:
     #   virtualHost: czertainly        # optional; omit to use the bundle default ("/" on 2.19.0, "czertainly" on 2.18.0)
     #   managed:
     #     replicas: 3
-    #     version: "4.3.1"             # selects the RabbitmqCluster image (bundle default for 2.19.0)
+    #     version: "4.3.1"             # selects the RabbitmqCluster image (the 2.19.0-validated version; omitted → the Cluster Operator's own, older default)
     #     upgradeAcknowledged: false   # set true to OPT IN to a MAJOR RabbitMQ upgrade of a running cluster
     #     storage: { size: 20Gi }
     #     resources: {}                # per-node requests/limits
@@ -216,7 +216,7 @@ spec:
     realm: ilm                         # the platform realm name (default "ilm")
     # managed:
     #   instances: 2
-    #   version: "26.6.3"              # selects the Keycloak CR image (bundle default for 2.19.0)
+    #   version: "26.6.3"              # selects the Keycloak CR image (the 2.19.0-validated version; omitted → the Keycloak Operator's own default, already 26.6.3)
     #   logLevel: info                 # managed Keycloak root log level (KC_LOG_LEVEL); empty = Keycloak default (info)
     #   upgradeAcknowledged: false     # set true to OPT IN to a MAJOR Keycloak upgrade of a running instance
     #   realmImport:                   # optional, create-only import from a user ConfigMap
