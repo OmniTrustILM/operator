@@ -10,12 +10,14 @@
 #       database.managed.version   → the CloudNativePG PostgreSQL major (e.g. "18")
 #       messaging.managed.version  → the RabbitMQ server version (e.g. "4.3.1")
 #       keycloak.managed.version   → the Keycloak server version (e.g. "26.6.3")
-#   OMIT a `version` to let the operator use the DEFAULT pinned by the selected platform
-#   version bundle (spec.version) — that default is the latest version VALIDATED with this
-#   platform release. Pinning here lets you choose a different supported version, or simply
-#   record the exact one you run. The values below match the default bundle's validated
-#   set; see docs/versions.md for the supported matrix and docs/configuration.md
-#   (Managed engine versions) for the full explanation.
+#   The operator sends an image ONLY when `version` is set. OMIT it and the choice passes to
+#   the upstream operator's OWN default — for PostgreSQL and RabbitMQ that default is older
+#   than this platform release validated, so PIN a `version`, as this sample does, to get the
+#   exact BOM-validated engine. Keycloak is the exception: the Keycloak Operator's own default
+#   already IS the validated version and starts faster (a pinned version composes the stock
+#   community image, which builds at boot) — pin it only to deliberately diverge. The values
+#   below are the validated set; see docs/versions.md for the supported matrix and
+#   docs/configuration.md (Managed engine versions) for the full explanation.
 #
 # MAJOR-VERSION UPGRADES ARE GUARDED
 #   Bumping a `version` is fine for a fresh deploy and for patch/minor changes. A MAJOR bump
@@ -50,7 +52,7 @@ spec:
     mode: managed
     managed:
       instances: 3
-      version: "18"                  # pin the PostgreSQL major (omit → bundle default)
+      version: "18"                  # pin the PostgreSQL major (omit → CloudNativePG's own, older default)
       # upgradeAcknowledged: true    # set ONLY to perform a MAJOR upgrade of a running cluster
       storage:
         size: 100Gi
@@ -59,7 +61,7 @@ spec:
     brokerType: rabbitmq
     managed:
       replicas: 3
-      version: "4.3.1"               # pin the RabbitMQ server version (omit → bundle default)
+      version: "4.3.1"               # pin the RabbitMQ server version (omit → the Cluster Operator's own, older default)
       # upgradeAcknowledged: true    # set ONLY for a MAJOR (3.x→4.x) upgrade of a running broker
       storage:
         size: 20Gi
@@ -68,5 +70,5 @@ spec:
     realm: ilm
     managed:
       instances: 1
-      version: "26.6.3"              # pin the Keycloak server version (omit → bundle default)
+      version: "26.6.3"              # pin the Keycloak server version (omit → operator's own default, already 26.6.3, with faster startup)
       # upgradeAcknowledged: true    # set ONLY for a MAJOR (25→26) upgrade of a running instance
