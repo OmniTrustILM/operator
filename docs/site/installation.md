@@ -139,7 +139,7 @@ make docker-push  IMG=<registry>/ilm-operator:<tag>   # push it where the cluste
 make deploy       IMG=<registry>/ilm-operator:<tag>   # CRDs + RBAC + Deployment, into ilm-operator-system
 ```
 
-`IMG` is the same value in all three, and it must name an image the cluster can pull: `make docker-build` only builds it locally, so push it first — or, on a local Kind cluster, load it in with `make kind-load IMG=<tag>` instead of pushing.
+`IMG` is the same value in all three, and it must name an image the cluster can pull: `make docker-build` only builds it locally, so push it first — or, on a local Kind cluster, load it in with `make kind-load IMG=<registry>/ilm-operator:<tag>`, passing that same value, instead of pushing.
 
 You can also run the operator **outside** the cluster against your current context, which is the fastest edit-and-retry loop (the CRDs must already be installed):
 
