@@ -9,7 +9,8 @@
 #   - UPGRADE. Setting spec.version: "2.19.0" on a running platform upgrades it: a managed
 #     broker is moved by the operator's own messaging migration engine (fencing/drain/cutover),
 #     an external broker requires you to migrate it yourself and acknowledge the move via
-#     spec.messaging.migrationAcknowledgedForVersion. See docs/upgrades.md for the procedure.
+#     spec.messaging.migrationAcknowledgedForVersion. See docs/site/upgrading.md for the
+#     procedure (Worked example: 2.18.0 to 2.19.0).
 #
 # WHAT 2.19.0 CHANGES (the operator wires all of it — you configure no env-var names):
 #   - images: core and frontend-administrator 2.19.0, auth 1.7.0, scheduler 1.1.1,

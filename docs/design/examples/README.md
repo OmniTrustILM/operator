@@ -10,7 +10,8 @@ tagged `[IMPLEMENTED]` or `[NOT IMPLEMENTED]` (a clearly-marked design target).
 > [`config/samples/`](../../../config/samples/)** — `platform_quickstart.yaml`
 > (everything-managed, apply-and-go), `platform_minimal_external.yaml` (the smoke test),
 > `platform_full.yaml` (the kitchen-sink of shipped fields), and the per-feature variants.
-> The end-user walkthrough is the [getting-started guide](../../platform.md).
+> The end-user walkthrough is
+> [Run your first platform](../../site/custom-resources/platform.md#run-your-first-platform).
 
 **Rules of the road:** required = `database` + `messaging` (each `external` *or* `managed`).
 Secrets are always a `…SecretRef` to a `Secret` — never inline. `external` = you bring the
@@ -94,5 +95,6 @@ The operator **detects** these CRDs and gates the dependent feature gracefully: 
 operator surfaces a non-fatal `…NotInstalled` reason on that dependency's adjunct condition
 (`DatabaseReady` / `MessagingReady` / `KeycloakReady`) and the platform waits — it never fails,
 and self-heals once the operator is installed. cert-manager + an ingress controller are needed
-for a cert-managed `edge` regardless of mode. See the
-[getting-started guide](../../platform.md) for the exact install commands.
+for a cert-managed `edge` regardless of mode. See
+[Upstream operator prerequisites](../../site/installation.md#upstream-operator-prerequisites)
+for the exact install commands.

@@ -6,11 +6,14 @@ read its header comment (purpose / prerequisites / secrets / what it creates), a
 `kubectl apply -f`.
 
 - **New here?** Start with [`platform_minimal_external.yaml`](./platform_minimal_external.yaml)
-  (bring-your-own infra; general guide: [`docs/platform.md`](../../docs/platform.md)) or
+  (bring-your-own infra; general guide:
+  [The Platform CR](../../docs/site/custom-resources/platform.md)) or
   [`platform_quickstart.yaml`](./platform_quickstart.yaml) (everything managed, apply-and-go —
-  the demo; walkthrough: [`docs/quickstart.md`](../../docs/quickstart.md)).
+  the demo; walkthrough:
+  [Run your first platform](../../docs/site/custom-resources/platform.md#run-your-first-platform)).
 - **Want every option explained, and "which sample fits which need"?** See
-  [`docs/configuration.md`](../../docs/configuration.md) — the configuration reference + scenario cookbook.
+  [The Platform CR](../../docs/site/custom-resources/platform.md) — the scenario cookbook — and
+  [Platform options](../../docs/site/custom-resources/platform-options.md) — the field index.
 - **Want the annotated every-field reference?** See
   [`docs/design/examples/platform-cr-reference.yaml`](../../docs/design/examples/platform-cr-reference.yaml).
 
@@ -30,7 +33,7 @@ same way. Mix them per dependency — see [`platform_mixed_infra.yaml`](./platfo
 A missing operator is non-fatal: the platform reports `…Ready=False`/`…NotInstalled` and
 self-heals once you install it. `external` mode needs none of these (a cert-managed `edge`
 needs cert-manager + an ingress controller regardless). Install commands are in
-[`docs/platform.md`](../../docs/platform.md).
+[Upstream operator prerequisites](../../docs/site/installation.md#upstream-operator-prerequisites).
 
 ## Pick a Platform sample by need
 
@@ -57,7 +60,7 @@ needs cert-manager + an ingress controller regardless). Install commands are in
 | [`platform_managed_postgres_no_pooler.yaml`](./platform_managed_postgres_no_pooler.yaml) | Pooler **OFF** (`pgBouncer.managed: false`) — direct connection to `…-rw`. |
 
 The switch is `database.pgBouncer.managed`. Full explanation:
-[`docs/configuration.md` → Connection pooling](../../docs/configuration.md#connection-pooling-pgbouncer).
+[The Platform CR → Connection pooling](../../docs/site/custom-resources/platform.md#connection-pooling-pgbouncer).
 
 ### Versions & upgrades
 | Sample | Shows |
@@ -66,8 +69,8 @@ The switch is `database.pgBouncer.managed`. Full explanation:
 | [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0 — the operator's current default; pinning it explicitly is the GitOps-recommended form. |
 | [`platform_managed_pinned_versions.yaml`](./platform_managed_pinned_versions.yaml) | Pin each **managed engine** version (PostgreSQL / RabbitMQ / Keycloak) + the major-upgrade guard. |
 
-See [`docs/versions.md`](../../docs/versions.md) for the supported matrix and
-[`docs/upgrades.md`](../../docs/upgrades.md) for upgrade procedures.
+See [Supported versions](../../docs/site/upgrading.md#supported-versions) for the supported
+matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 
 ### High availability & scale
 | Sample | Shows |

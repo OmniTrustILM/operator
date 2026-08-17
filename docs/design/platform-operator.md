@@ -5,7 +5,8 @@ CRD (`otilm.com/v1alpha1`), which deploys and wires the ILM platform itself.
 
 > This document describes the **current** design of the platform side of the ILM operator
 > as a standalone product. For the end-user getting-started walkthrough see
-> [`docs/platform.md`](../platform.md); for the connector side see
+> [Run your first platform](../site/custom-resources/platform.md#run-your-first-platform) and
+> [The Platform CR](../site/custom-resources/platform.md); for the connector side see
 > [`connector-operator.md`](connector-operator.md).
 
 ## Overview
@@ -349,8 +350,8 @@ exactly **one `Platform` per namespace** (the operator renders children under cl
 names, so a second one would collide). To run more than one platform, use **separate
 namespaces**; the operator manages a **fleet of namespace-scoped singletons**, each pinned to
 its own `spec.version` within the range this operator build supports. (See
-[`docs/versions.md`](../versions.md) for the version model and [`docs/upgrades.md`](../upgrades.md)
-for the upgrade procedure.) **GitOps:** **pin the operator image tag** (do not track a floating
+[How a version is resolved](../site/upgrading.md#how-a-version-is-resolved) for the version model
+and [The basic upgrade](../site/upgrading.md#the-basic-upgrade) for the upgrade procedure.) **GitOps:** **pin the operator image tag** (do not track a floating
 `latest`) and set `spec.version` explicitly.
 
 ## High availability
@@ -423,7 +424,8 @@ External entry — TLS and passing a client cert to Core as a header:
 
 The operator detects available edge APIs and renders accordingly. `edge.host` is the external
 FQDN; it overrides `common.hostName` for that edge (see the PlatformHost precedence in
-[`docs/platform.md`](../platform.md)). Client-cert forwarding is configured via
+[The public hostname and its precedence](../site/custom-resources/platform.md#the-public-hostname-and-its-precedence)).
+Client-cert forwarding is configured via
 `spec.core.clientCertHeader` (default `ssl-client-cert`).
 
 #### Edge upstream-operator / CRD prerequisites (detected, not assumed)
@@ -507,7 +509,8 @@ version straight through to the upstream operator: it **blocks** it until that m
 (it re-pins the running engine image on the rendered CR so the apply does not bump it). **Patch/
 minor changes and the FIRST creation** (no running version yet) apply freely regardless of the
 flag. Reset `upgradeAcknowledged` to `false` after the upgrade completes. See
-[`docs/upgrades.md`](../upgrades.md) for the full procedure.
+[Managed-infrastructure major-version upgrades](../site/upgrading.md#managed-infrastructure-major-version-upgrades)
+for the full procedure.
 
 **Credential rotation.** The `Watches(Secret)` predicate covers operator-owned infra Secrets (by
 owner/label); rotation triggers a rolling restart of consumers. The mechanism differs by backend:

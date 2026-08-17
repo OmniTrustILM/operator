@@ -3,7 +3,8 @@
 # ROLE: the DEPLOYABLE "what can I set" for the shipped otilm.com/v1alpha1 Platform.
 # Every field below is implemented, validated, and applies as-is. It is NOT a recommended
 # config — it just exercises the whole surface with example values. Companions:
-#   - docs/configuration.md ............... what each option MEANS + which sample fits a need
+#   - docs/site/custom-resources/platform.md ......... what each option MEANS + which sample
+#       fits a need (the field index is platform-options.md alongside it)
 #   - config/samples/platform_production.yaml  a RECOMMENDED production-tuned shape
 #   - docs/design/examples/platform-cr-reference.yaml  the annotated field-by-field reference
 #       (also marks the few design-target fields NOT yet in the shipped CRD)

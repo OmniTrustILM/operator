@@ -23,7 +23,7 @@
 #     pgBouncer: { managed: false} → pooler OFF  (this sample; direct -rw connection)
 #   NOTE: an EMPTY block (pgBouncer: {}) leaves managed at its false default and turns the
 #   pooler OFF — so to keep the pooler while customizing it, set managed: true explicitly.
-#   See docs/configuration.md (Connection pooling) for the full explanation.
+#   See docs/site/custom-resources/platform.md (Connection pooling) for the full explanation.
 #
 # PREREQUISITES & SECRETS: identical to platform_managed_postgres.yaml — the CloudNativePG
 # operator installed, and the messaging credentials Secret (the DB credentials are generated

@@ -15,8 +15,9 @@
 #    • platform_managed_postgres.yaml   (managed PostgreSQL via CloudNativePG)
 #    • platform_managed_rabbitmq.yaml   (managed RabbitMQ via the RabbitMQ operators)
 #    • platform_managed_keycloak.yaml   (managed Keycloak via the Keycloak Operator)
-#  the getting-started guide at  ../../platform.md , and — for what every option MEANS plus a
-#  scenario-to-sample cookbook — the configuration reference at  ../../configuration.md .
+#  the user guide at  ../../site/custom-resources/platform.md  — which carries both the
+#  first-run walkthrough and, for what every option MEANS, the scenario-to-sample cookbook —
+#  and the field index alongside it at  ../../site/custom-resources/platform-options.md .
 #
 #  Below, every block is tagged:
 #    [IMPLEMENTED]      — shipped today; safe to use (see the matching sample).
@@ -37,7 +38,7 @@ spec:
   # [IMPLEMENTED] version — selects the platform version bundle (tested component images +
   # env wiring + managed-RabbitMQ topology) the operator reconciles this Platform against.
   # Empty (the default) = the operator's DEFAULT shipped version — not necessarily the newest
-  # bundle it carries, see docs/versions.md — so an existing CR keeps today's behaviour. One
+  # bundle it carries, see docs/site/upgrading.md — so an existing CR keeps today's behaviour. One
   # operator build carries a supported RANGE of versions (run a canary version in one
   # namespace, or take an operator fix without moving the platform). NOT a CEL enum (the
   # supported set grows over time): an unknown version degrades with an actionable
