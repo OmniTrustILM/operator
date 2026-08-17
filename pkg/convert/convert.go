@@ -850,10 +850,15 @@ func (r *Result) flagUnmappedMonitorKeys(tqm vals) {
 
 // connectorKeys are the umbrella values keys that are CONNECTORS, not platform components.
 // They are managed by the Connector CRD (a separate resource), not the Platform CR, so the
-// converter flags them rather than mapping them into the Platform.
+// converter flags them rather than mapping them into the Platform. The list mirrors the
+// umbrella chart's per-connector subchart aliases (Chart.yaml dependencies), so every
+// connector block a chart install can carry is routed to the Connector-CRD guidance instead
+// of falling through to a bare "# UNMAPPED" footer line.
 var connectorKeys = []string{
-	"commonCredentialProvider", "ejbcaNgConnector", "pyAdcsConnector",
-	"hashicorpVaultConnector", "x509ComplianceProvider", "cryptosenseDiscoveryProvider",
+	"commonCredentialProvider", "ejbcaNgConnector", "externalAuthorityProvider",
+	"pyAdcsConnector", "otpkiConnector",
+	"hashicorpVaultConnector", "timestampFormattingConnector",
+	"x509ComplianceProvider", "cryptosenseDiscoveryProvider",
 	"ctLogsDiscoveryProvider", "networkDiscoveryProvider", "keystoreEntityProvider",
 	"softwareCryptographyProvider", "emailNotificationProvider", "webhookNotificationProvider",
 	"registerConnectors",
