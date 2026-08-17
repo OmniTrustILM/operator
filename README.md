@@ -41,7 +41,7 @@ helm install ilm-operator deploy/charts/ilm-operator \
 
 # 2. Install the upstream operators (the only prerequisites) and cert-manager —
 #    run `make install-upstream-operators` (pinned, validated versions) or
-#    see docs/quickstart.md for the manual apply commands.
+#    see docs/site/installation.md for the manual apply commands.
 
 # 3. Apply the everything-managed Platform (edit common.hostName / edge.host first)
 kubectl create namespace ilm
@@ -51,10 +51,10 @@ kubectl apply -f config/samples/platform_quickstart.yaml
 kubectl get platform -n ilm -w
 ```
 
-**See the full [Quickstart](docs/quickstart.md)** for the prerequisite install commands and a
-walkthrough, or the [Platform getting-started guide](docs/platform.md) for external
-infrastructure, edge variants, the exact Secret keys, all status conditions, and the full
-customization surface.
+**See [Installation](docs/site/installation.md)** for the prerequisite install commands and
+[Run your first platform](docs/site/custom-resources/platform.md#run-your-first-platform) for the
+walkthrough, or [The Platform CR](docs/site/custom-resources/platform.md) for external
+infrastructure, edge variants, the exact Secret keys, and the full customization surface.
 
 ### Create a Connector
 
@@ -126,12 +126,14 @@ See the [samples index](config/samples/README.md) for more Connector, Platform, 
 | Document | What it covers |
 |---|---|
 | [User guide](docs/site/overview.md) | Nine synced pages, entered through a router: the operator install, the `Platform` CR (first run to full configuration) and its field index, the `Connector` and `Proxy` CRs, upgrading, migration from Helm, and troubleshooting — kept in sync with the public docs site. |
-| [Quickstart](docs/quickstart.md) | The everything-managed apply-and-go path. |
-| [Platform getting-started guide](docs/platform.md) | Install, prerequisites, Secret keys, conditions, the full customization surface, teardown. |
-| [Configuration reference & scenario cookbook](docs/configuration.md) | Every Platform option explained, mapped to the matching sample. |
-| [Platform versions](docs/versions.md) | Deploying a specific ILM release via `spec.version`. |
-| [Platform upgrades](docs/upgrades.md) | The upgrade procedure and the managed-infra upgrade guard. |
-| [Migrating from the Helm umbrella chart](docs/migration-from-helm.md) | Translating chart values to a `Platform` CR (the `values2platform` aid). |
+| [Installation](docs/site/installation.md) | Installing the operator: requirements, the upstream prerequisites, install channels, verification, removal. |
+| [The Platform CR](docs/site/custom-resources/platform.md) | [Run your first platform](docs/site/custom-resources/platform.md#run-your-first-platform), then every option explained — infrastructure modes, edge, Secret keys, scaling, teardown — mapped to the matching sample. |
+| [Platform options](docs/site/custom-resources/platform-options.md) | The field index: every `spec` field, its default, and what it is for. |
+| [The Connector CR](docs/site/custom-resources/connector.md) | Deploying a connector and registering it with a running platform. |
+| [The Proxy CR](docs/site/custom-resources/proxy.md) | Deploying a proxy from a provisioning-issued config token. |
+| [Upgrading](docs/site/upgrading.md) | Deploying a specific ILM release via `spec.version`, the upgrade procedure, and the managed-infra upgrade guard. |
+| [Migrating from the Helm umbrella chart](docs/site/migration-from-helm.md) | Translating chart values to a `Platform` CR (the `values2platform` aid). |
+| [Troubleshooting](docs/site/troubleshooting.md) | Watching a platform converge, its status conditions, and diagnosing one that will not become ready. |
 | [Platform design specification](docs/design/platform-operator.md) | Architecture, security model, infra delegation, reconciliation. |
 | [Connector design specification](docs/design/connector-operator.md) | The `Connector` CRD: schema, reconciliation flow, architecture. |
 | [Proxy design specification](docs/design/proxy-operator.md) | The `Proxy` CRD: config-token contract, credential delivery, reconciliation. |
@@ -199,7 +201,8 @@ operator-sdk run bundle <registry>/ilm-operator-bundle:v0.0.1
 - For **managed** platform infrastructure: the relevant upstream operators (CloudNativePG,
   the RabbitMQ Cluster + Messaging Topology operators, the Keycloak Operator) and, for
   cert-managed edges or a generated admin cert, cert-manager. The operator **detects** these
-  and waits for them — it never installs them. See [docs/quickstart.md](docs/quickstart.md).
+  and waits for them — it never installs them. See
+  [Upstream operator prerequisites](docs/site/installation.md#upstream-operator-prerequisites).
 
 ### OpenShift
 
@@ -209,7 +212,7 @@ capabilities dropped, `seccompProfile: RuntimeDefault` — so no custom SCC or e
 required. Install via OperatorHub (the OLM bundle) or Helm. For the edge use `edge.type: ingress`
 (the OpenShift router reconciles the Ingress and publishes the Route) or `gatewayAPI`; a native
 OpenShift `Route` edge type is not yet supported. See
-[docs/platform.md → Running on OpenShift](docs/platform.md#running-on-openshift).
+[The Platform CR → Running on OpenShift](docs/site/custom-resources/platform.md#running-on-openshift).
 
 ## Development
 

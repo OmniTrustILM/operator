@@ -15,6 +15,7 @@ resources:
 # would give kustomize duplicate resource ids (Platform.../ilm.ilm) and break
 # `make bundle`/`kubectl apply -k`. The variant samples — every other platform_*.yaml in this
 # directory — live as standalone files and are applied individually with
-# `kubectl apply -f config/samples/<file>` (see config/samples/README.md and docs/platform.md);
+# `kubectl apply -f config/samples/<file>` (see config/samples/README.md and
+# docs/site/custom-resources/platform.md);
 # the sample-validation test exercises every file directly.
 # +kubebuilder:scaffold:manifestskustomizesamples

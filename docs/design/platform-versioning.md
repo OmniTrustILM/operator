@@ -2,11 +2,11 @@
 
 > Status: **all five steps implemented (committed, green)**. Three released bundles ship —
 > 2.17.0, 2.18.0 and 2.19.0, the last of which is `DefaultVersion` — with per-version
-> wiring/feature-gating, the downgrade guard, the `docs/upgrades.md` procedures, and the Kind
+> wiring/feature-gating, the downgrade guard, the `docs/site/upgrading.md` procedures, and the Kind
 > e2e version matrix (`matrix-upgrade`, `matrix-migration`). The 2.18.0 → 2.19.0 move renames
 > the managed messaging virtual host, so it is carried out by the **messaging-migration engine**
 > (fence → drain → cut over → clean up) rather than by a plain apply; that engine is documented
-> in `docs/upgrades.md` and lives in `internal/controller/platform/messaging_migration_*.go`.
+> in `docs/site/upgrading.md` and lives in `internal/controller/platform/messaging_migration_*.go`.
 > This file captures the version-management architecture for the `Platform` CRD: how the
 > operator wires each supported ILM platform version, how the default version is chosen, and how
 > upgrades/downgrades are handled. Sections 1 and 6a record the ORIGINAL 2.17.0 → 2.18.0
@@ -118,7 +118,7 @@ bundle data:
    provisioning/proxy, 2.17.0 images + registry, 2.17.0 topology/DB naming; feature-gate
    `provisioning`/components in the builders. Builder unit tests assert per-version env output.
 4. **Migrations.** Migration-descriptor framework + the 2.17.0→2.18.0 transition + an
-   `docs/upgrades.md` procedure (incl. the CZERTAINLY→ILM data/topology notes).
+   `docs/site/upgrading.md` procedure (incl. the CZERTAINLY→ILM data/topology notes).
 5. **e2e version matrix.** 2.17.0-on-2.17.0, 2.18.0-on-2.18.0, and an upgrade test, plus the fast
    envtest assertions that lock the wiring/feature-gating + downgrade guard (so the inner loop
    catches a version-contract regression, not the Kind gate).
@@ -167,7 +167,7 @@ bundle data:
    core:2.17.0, and that `ProvisioningDeploy` is version-gated; bom tests cover the new bundle.
    (A dedicated 2.17.0 golden snapshot is optional follow-up.)
 7. ✅ **Upgrade + e2e** (steps 4–5) — `config/samples/platform_2170.yaml` + the
-   `docs/upgrades.md` worked examples (2.17.0→2.18.0 and the 2.18.0→2.19.0 managed-broker
+   `docs/site/upgrading.md` worked examples (2.17.0→2.18.0 and the 2.18.0→2.19.0 managed-broker
    runbook), plus the Kind e2e version matrix: `matrix-upgrade` walks a managed platform
    2.17.0 → 2.18.0 → 2.19.0, and `matrix-migration` exercises the messaging migration end to
    end (fence, drain hold, drain timeout + abort, and a full run to completion with the source

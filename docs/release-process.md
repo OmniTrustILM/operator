@@ -193,8 +193,8 @@ The flip itself is an ordinary PR to `main`, not part of the release branch:
    **canonical** user guide — [docs/site/upgrading.md](site/upgrading.md), under its
    *Supported versions* heading — and drop the preview wording from any sample that pinned the
    bundle while it was a preview. `docs/site/` is the canonical source for every end-user fact;
-   `docs/versions.md` and `docs/upgrades.md` are pre-absorption originals awaiting reduction to
-   stubs, so do not add or correct facts there.
+   `docs/versions.md` and `docs/upgrades.md` are stubs that redirect there, so do not add or
+   correct facts in them.
 4. `make test` — the BOM tests, the samples specs and the golden renders all move with this.
 
 Merge that PR to `main` and let CI go green before cutting the release branch.
