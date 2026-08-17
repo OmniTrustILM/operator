@@ -102,14 +102,6 @@ const (
 	// platform's tables in the same database.
 	keycloakDBSchema = "keycloak"
 
-	// keycloakDBCredUsernameKey / keycloakDBCredPasswordKey are the keys inside the platform
-	// DB-credentials Secret the Keycloak CR's spec.db.{usernameSecret,passwordSecret}
-	// reference. They match the wiring profile's DatabaseCred keys (username/password), which
-	// the CNPG-generated <cluster>-app Secret and an external basic-auth Secret both carry.
-	// spec.db.usernameSecret/passwordSecret each take {name,key}.
-	keycloakDBCredUsernameKey = "username"
-	keycloakDBCredPasswordKey = "password" //nolint:gosec // G101: a Secret KEY name, not a credential value
-
 	// keycloakDefaultRealm is the default realm name when keycloak.realm is empty.
 	keycloakDefaultRealm = "ilm"
 	// keycloakDefaultRealmImportKey is the default ConfigMap key holding the realm JSON.
@@ -469,14 +461,18 @@ func keycloakDBBlock(p *otilmv1alpha1.Platform) map[string]interface{} {
 		"schema":   keycloakDBSchema,
 		// usernameSecret / passwordSecret reference the platform DB-credentials Secret by name
 		// + key (each takes {name,key}), so Keycloak authenticates to the shared DB by
-		// reference.
+		// reference. The keys are the connection's EFFECTIVE resolved keys — the user's
+		// spec.database.credentials.{usernameKey,passwordKey} mappings for an external database
+		// (falling back to the wiring-profile defaults username/password), the CNPG-generated
+		// Secret convention for managed — so the SAME mapping that feeds the platform
+		// components' secretKeyRef wiring feeds Keycloak, and they can never drift.
 		"usernameSecret": map[string]interface{}{
 			"name": conn.CredentialsSecretName,
-			"key":  keycloakDBCredUsernameKey,
+			"key":  conn.UsernameKey,
 		},
 		"passwordSecret": map[string]interface{}{
 			"name": conn.CredentialsSecretName,
-			"key":  keycloakDBCredPasswordKey,
+			"key":  conn.PasswordKey,
 		},
 	}
 }
