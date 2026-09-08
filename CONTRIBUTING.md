@@ -88,6 +88,10 @@ conventional-commit type prefix (`feat`, `fix`, `docs`, `chore`, `refactor`, opt
 `feat(platform):`) is the prevailing style in the log; CI does not enforce it. Nothing in this
 repository parses commit messages, so clarity beats ceremony.
 
+**Sign off every commit** with `git commit -s` — see
+[Sign your commits](https://github.com/OmniTrustILM/.github/blob/main/CONTRIBUTING.md#sign-your-commits)
+in the organization contribution guide.
+
 Label the PR (`new-feature`, `enhancement`, `bug`) — `.github/release.yml` groups the
 auto-generated release notes by those labels, so an unlabelled PR lands under "Other".
 
