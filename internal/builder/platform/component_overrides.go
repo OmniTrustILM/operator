@@ -175,6 +175,8 @@ func applySecurityContextOverride(c *common.Component, spec otilmv1alpha1.Compon
 	if spec.SecurityContext.RunAsNonRoot != nil {
 		sc.RunAsNonRoot = spec.SecurityContext.RunAsNonRoot
 	}
+	// FSGroup is pod-level, so it bypasses the container context and rides on the Component.
+	c.FSGroup = spec.SecurityContext.FSGroup
 	// ReadOnlyRootFilesystem from the CR is intentionally NOT applied here: c.ReadOnlyRootFilesystem
 	// (set by the Resolve* function) is the validated per-component value and wins in BuildDeployment.
 	c.SecurityContext = sc

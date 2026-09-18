@@ -110,6 +110,9 @@ func component(px *otilmv1alpha1.Proxy, configChecksum string) common.Component 
 		c.Command = px.Spec.Image.Command
 		c.Args = px.Spec.Image.Args
 	}
+	if px.Spec.SecurityContext != nil {
+		c.FSGroup = px.Spec.SecurityContext.FSGroup
+	}
 	c.InitContainers = px.Spec.InitContainers
 	c.Sidecars = px.Spec.Sidecars
 	c.Affinity = px.Spec.Affinity

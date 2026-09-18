@@ -539,6 +539,17 @@ spec:
                 description: SecurityContext defines the security context for the
                   connector pod.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups and becomes the group owner
+                      of the pod's mounted volumes, which is what a container whose contract names a fixed
+                      gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                      the namespace's allocated range and rejects a value outside it, so whether to pin one
+                      is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container
@@ -1449,6 +1460,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -2093,6 +2115,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -3107,6 +3140,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -4330,6 +4374,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -5023,6 +5078,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -6268,6 +6334,17 @@ spec:
                           RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                           can never silently weaken pod security.
                         properties:
+                          fsGroup:
+                            description: |-
+                              FSGroup is added to every container's supplementary groups and becomes the group owner
+                              of the pod's mounted volumes, which is what a container whose contract names a fixed
+                              gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                              the namespace's allocated range and rejects a value outside it, so whether to pin one
+                              is the deployment's decision.
+                            format: int64
+                            maximum: 2147483647
+                            minimum: 0
+                            type: integer
                           readOnlyRootFilesystem:
                             default: true
                             description: ReadOnlyRootFilesystem indicates that the
@@ -7077,6 +7154,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -7715,6 +7803,17 @@ spec:
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups and becomes the group owner
+                          of the pod's mounted volumes, which is what a container whose contract names a fixed
+                          gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                          the namespace's allocated range and rejects a value outside it, so whether to pin one
+                          is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -8614,11 +8713,22 @@ spec:
                 type: array
               securityContext:
                 description: |-
-                  SecurityContext tunes the per-workload runtime decisions of the container
-                  security context (readOnlyRootFilesystem). The SCC-critical fields
+                  SecurityContext tunes the per-workload runtime decisions of the pod and container
+                  security context (readOnlyRootFilesystem, fsGroup). The SCC-critical fields
                   (runAsNonRoot, no privilege escalation, dropped capabilities, seccomp) are
                   hardened by the shared builders and cannot be weakened from the CR.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups and becomes the group owner
+                      of the pod's mounted volumes, which is what a container whose contract names a fixed
+                      gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                      the namespace's allocated range and rejects a value outside it, so whether to pin one
+                      is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container

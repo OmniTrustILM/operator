@@ -39,6 +39,9 @@ spec:
   securityContext:
     runAsNonRoot: true
     readOnlyRootFilesystem: true
+    # Supplementary group for every container, and group owner of the pod's volumes.
+    # On OpenShift the namespace range must admit this value.
+    fsGroup: 10001
 
   probes:
     liveness:

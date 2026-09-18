@@ -155,6 +155,19 @@ func TestBuildDeploymentPodLevelSecurityContext(t *testing.T) {
 	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, podSC.SeccompProfile.Type)
 }
 
+func TestBuildDeploymentFSGroup(t *testing.T) {
+	assert.Nil(t, BuildDeployment(newProxy(), "x").Spec.Template.Spec.SecurityContext.FSGroup,
+		"no fsGroup unless the CR asks for one")
+
+	px := newProxy()
+	px.Spec.SecurityContext = &otilmv1alpha1.SecurityContextSpec{FSGroup: ptr.To(int64(10001))}
+
+	podSC := BuildDeployment(px, "x").Spec.Template.Spec.SecurityContext
+	require.NotNil(t, podSC.FSGroup)
+	assert.Equal(t, int64(10001), *podSC.FSGroup)
+	assert.Nil(t, podSC.RunAsUser, "restricted-v2 still assigns the UID")
+}
+
 func TestBuildDeploymentExposesBothPorts(t *testing.T) {
 	c := BuildDeployment(newProxy(), "x").Spec.Template.Spec.Containers[0]
 	require.Len(t, c.Ports, 2)

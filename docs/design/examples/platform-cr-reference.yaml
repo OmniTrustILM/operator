@@ -288,7 +288,7 @@ spec:
       liveness: { path: "", initialDelaySeconds: 0, periodSeconds: 0, failureThreshold: 0 }
       readiness: {}
       startup: {}
-    securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true }  # always SCC-hardened (fill-don't-replace)
+    securityContext: { runAsNonRoot: true, readOnlyRootFilesystem: true, fsGroup: 10001 }  # always SCC-hardened (fill-don't-replace); fsGroup has no default
     podAnnotations: {}                 # merged onto the pod template (e.g. Vault/Istio annotations)
     podLabels: {}                      # merged onto the pod template (operator labels win)
     nodeSelector: {}

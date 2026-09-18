@@ -132,6 +132,9 @@ func component(conn *otilmv1alpha1.Connector, configChecksum string) common.Comp
 		c.TerminationGracePeriodSeconds = conn.Spec.Lifecycle.TerminationGracePeriodSeconds
 	}
 	c.Strategy = common.BuildDeploymentStrategy(conn.Spec.Strategy)
+	if conn.Spec.SecurityContext != nil {
+		c.FSGroup = conn.Spec.SecurityContext.FSGroup
+	}
 	c.InitContainers = conn.Spec.InitContainers
 	c.Sidecars = conn.Spec.Sidecars
 	c.Affinity = conn.Spec.Affinity

@@ -528,6 +528,17 @@ spec:
                 description: SecurityContext defines the security context for the
                   connector pod.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups and becomes the group owner
+                      of the pod's mounted volumes, which is what a container whose contract names a fixed
+                      gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
+                      the namespace's allocated range and rejects a value outside it, so whether to pin one
+                      is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container

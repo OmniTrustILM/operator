@@ -76,6 +76,34 @@ func TestBuildDeploymentRestrictedV2Compliant(t *testing.T) {
 		SecretEnv: []SecretEnvRef{{EnvVar: "PW", SecretName: "s", SecretKey: "password"}},
 	})
 	requireRestrictedV2(t, d)
+	assert.Nil(t, d.Spec.Template.Spec.SecurityContext.FSGroup,
+		"no fsGroup by default; restricted-v2 assigns one from the namespace range")
+}
+
+func TestBuildDeploymentFSGroup(t *testing.T) {
+	fsGroup := int64(10001)
+	d := BuildDeployment(Component{
+		Name: "connector", Namespace: "ilm", Image: "x:1", Port: 8080,
+		FSGroup: &fsGroup,
+	})
+
+	podSC := d.Spec.Template.Spec.SecurityContext
+	require.NotNil(t, podSC.FSGroup)
+	assert.Equal(t, int64(10001), *podSC.FSGroup)
+	assert.True(t, *podSC.RunAsNonRoot)
+	assert.Nil(t, podSC.RunAsUser, "a pinned fsGroup must not pin a UID with it")
+	require.NotNil(t, podSC.SeccompProfile)
+	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, podSC.SeccompProfile.Type)
+	requireRestrictedV2(t, d)
+}
+
+func TestBuildDeploymentFSGroupCopiesValue(t *testing.T) {
+	fsGroup := int64(10001)
+	d := BuildDeployment(Component{Name: "connector", Namespace: "ilm", Image: "x:1", Port: 8080, FSGroup: &fsGroup})
+
+	*d.Spec.Template.Spec.SecurityContext.FSGroup = 20002
+
+	assert.Equal(t, int64(10001), fsGroup, "rendering must not reach back into the CR")
 }
 
 // TestBuildDeploymentHardensInitAndSidecarContainers verifies the SCC contract is
