@@ -19,6 +19,11 @@ spec:
     port: 8443
     type: ClusterIP
 
+  # This connector is the sole writer of an appliance-side resource, so a rollout must
+  # never run two of its pods at once. Only Recreate holds that line.
+  strategy:
+    type: Recreate
+
   resources:
     requests:
       cpu: 200m

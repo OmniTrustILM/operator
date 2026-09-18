@@ -583,6 +583,58 @@ spec:
                   agent or log shipper). They are SCC-hardened like every other container. The
                   schema is preserved opaquely for the same CRD-size reason as InitContainers.
                 x-kubernetes-preserve-unknown-fields: true
+              strategy:
+                description: |-
+                  Strategy selects how a rollout replaces this connector's pods. Unset, the apps/v1
+                  default RollingUpdate applies, which overlaps the old and new pod.
+                properties:
+                  rollingUpdate:
+                    description: RollingUpdate bounds a RollingUpdate rollout and
+                      belongs to that type alone.
+                    properties:
+                      maxSurge:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: MaxSurge is how many pods may exist above the
+                          desired replica count.
+                        x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must be a non-negative integer or percentage
+                          rule: 'type(self) == int ? self >= 0 : self.matches(''^[0-9]+%$'')'
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is how many of the desired pods may be unavailable during the
+                          rollout. It renders as 1 when maxSurge is 0 and this is left unset.
+                        x-kubernetes-int-or-string: true
+                        x-kubernetes-validations:
+                        - message: must be a non-negative integer or percentage
+                          rule: 'type(self) == int ? self >= 0 : self.matches(''^[0-9]+%$'')'
+                    type: object
+                  type:
+                    description: |-
+                      Type is Recreate — every old pod terminates before the new one starts — or
+                      RollingUpdate, which replaces them gradually within the RollingUpdate bounds.
+                    enum:
+                    - Recreate
+                    - RollingUpdate
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: 'rollingUpdate is valid only with type: RollingUpdate'
+                  rule: '!has(self.rollingUpdate) || self.type == ''RollingUpdate'''
+                - message: maxSurge and maxUnavailable may not both be zero
+                  rule: '!(has(self.rollingUpdate) && has(self.rollingUpdate.maxSurge)
+                    && has(self.rollingUpdate.maxUnavailable) && (type(self.rollingUpdate.maxSurge)
+                    == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge
+                    in [''0'', ''0%'']) && (type(self.rollingUpdate.maxUnavailable)
+                    == int ? self.rollingUpdate.maxUnavailable == 0 : self.rollingUpdate.maxUnavailable
+                    in [''0'', ''0%'']))'
               tolerations:
                 description: Tolerations allow the connector pods to schedule onto
                   tainted nodes.

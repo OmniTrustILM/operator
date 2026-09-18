@@ -127,6 +127,11 @@ type ConnectorSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Strategy selects how a rollout replaces this connector's pods. Unset, the apps/v1
+	// default RollingUpdate applies, which overlaps the old and new pod.
+	// +optional
+	Strategy *DeploymentStrategySpec `json:"strategy,omitempty"`
+
 	// Resources defines the compute resource requirements.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`

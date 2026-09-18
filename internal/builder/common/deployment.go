@@ -304,11 +304,15 @@ func BuildDeployment(c Component) *appsv1.Deployment {
 		replicas := c.Replicas
 		dep.Spec.Replicas = &replicas
 	}
-	// Recreate strategy for DB-migrating components: fully terminate the old pod before starting
-	// the new one, so a roll never runs two schema-migrating pods concurrently (which would race
-	// their Flyway migrations through the transaction-mode pooler and corrupt the schema). When
-	// false (the default), the apps/v1 default RollingUpdate is used.
-	if c.Recreate {
+	// Rollout strategy: a CR-supplied strategy wins; failing that, Recreate for DB-migrating
+	// components fully terminates the old pod before starting the new one, so a roll never runs
+	// two schema-migrating pods concurrently (which would race their Flyway migrations through
+	// the transaction-mode pooler and corrupt the schema). With neither, the apps/v1 default
+	// RollingUpdate is used.
+	switch {
+	case c.Strategy != nil:
+		dep.Spec.Strategy = *c.Strategy
+	case c.Recreate:
 		dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 	}
 	return dep

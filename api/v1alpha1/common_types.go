@@ -313,6 +313,42 @@ type PDBSpec struct {
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
+// DeploymentStrategySpec selects how a rollout replaces a workload's pods. It exists for
+// single-writer components: under the apps/v1 default the old pod stays Running until the
+// new one is Ready, so two pods briefly share whatever the component alone may write — an
+// HSM token, a client slot on an appliance.
+// +kubebuilder:validation:XValidation:rule="!has(self.rollingUpdate) || self.type == 'RollingUpdate'",message="rollingUpdate is valid only with type: RollingUpdate"
+// +kubebuilder:validation:XValidation:rule="!(has(self.rollingUpdate) && has(self.rollingUpdate.maxSurge) && has(self.rollingUpdate.maxUnavailable) && (type(self.rollingUpdate.maxSurge) == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge in ['0', '0%']) && (type(self.rollingUpdate.maxUnavailable) == int ? self.rollingUpdate.maxUnavailable == 0 : self.rollingUpdate.maxUnavailable in ['0', '0%']))",message="maxSurge and maxUnavailable may not both be zero"
+type DeploymentStrategySpec struct {
+	// Type is Recreate — every old pod terminates before the new one starts — or
+	// RollingUpdate, which replaces them gradually within the RollingUpdate bounds.
+	// +kubebuilder:validation:Enum=Recreate;RollingUpdate
+	Type string `json:"type"`
+
+	// RollingUpdate bounds a RollingUpdate rollout and belongs to that type alone.
+	// +optional
+	RollingUpdate *RollingUpdateSpec `json:"rollingUpdate,omitempty"`
+}
+
+// RollingUpdateSpec bounds a RollingUpdate rollout, each bound a count or a percentage of
+// the desired replicas. maxSurge: 0 is what holds a single-writer component to one pod
+// across a rollout; it buys that with a gap in availability, so maxUnavailable must then
+// be at least 1 — Kubernetes rejects a rollout free to move in neither direction.
+type RollingUpdateSpec struct {
+	// MaxSurge is how many pods may exist above the desired replica count.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 0 : self.matches('^[0-9]+%$')",message="must be a non-negative integer or percentage"
+	// +optional
+	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
+
+	// MaxUnavailable is how many of the desired pods may be unavailable during the
+	// rollout. It renders as 1 when maxSurge is 0 and this is left unset.
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 0 : self.matches('^[0-9]+%$')",message="must be a non-negative integer or percentage"
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+}
+
 // AutoscalingSpec configures a HorizontalPodAutoscaler (autoscaling/v2) for a component.
 // When set on a component the operator renders an HPA targeting that component's
 // Deployment and MUST omit .spec.replicas on the Deployment, so the HPA owns scaling and

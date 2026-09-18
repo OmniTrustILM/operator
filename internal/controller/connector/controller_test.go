@@ -959,6 +959,85 @@ var _ = Describe("Connector Controller", func() {
 	})
 
 	// ---------------------------------------------------------------
+	// Rollout strategy: a CR that names one reaches the LIVE Deployment, which the
+	// pod-template-only update path would never have carried.
+	// ---------------------------------------------------------------
+	Context("TestStrategyReachesExistingDeployment", func() {
+		var ns string
+		const connName = "strategy-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-strategy-live")
+		})
+
+		It("should set the Deployment strategy when the Connector gains one", func() {
+			conn := newConnector(connName, ns)
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+
+			By("waiting for the Deployment to carry the apiserver's default strategy")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				g.Expect(dep.Spec.Strategy.Type).To(Equal(appsv1.RollingUpdateDeploymentStrategyType))
+			}, timeout, interval).Should(Succeed())
+
+			By("asking for Recreate on the existing Connector")
+			Eventually(func(g Gomega) {
+				var latest otilmv1alpha1.Connector
+				g.Expect(k8sClient.Get(ctx, key, &latest)).To(Succeed())
+				latest.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{Type: "Recreate"}
+				g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying the live Deployment switched to Recreate")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				g.Expect(dep.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+				g.Expect(dep.Spec.Strategy.RollingUpdate).To(BeNil())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	Context("TestRollingUpdateDefaultsRemainStable", func() {
+		var ns string
+		const connName = "rolling-defaults-conn"
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-rolling-defaults-stable")
+		})
+
+		It("should not rewrite API-defaulted RollingUpdate bounds", func() {
+			conn := newConnector(connName, ns)
+			conn.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{Type: "RollingUpdate"}
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+
+			key := types.NamespacedName{Name: connName, Namespace: ns}
+			var resourceVersion string
+
+			By("waiting for the Deployment to carry explicit default bounds")
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				g.Expect(dep.Spec.Strategy.Type).To(Equal(appsv1.RollingUpdateDeploymentStrategyType))
+				g.Expect(dep.Spec.Strategy.RollingUpdate).NotTo(BeNil())
+				g.Expect(dep.Spec.Strategy.RollingUpdate.MaxSurge).To(HaveValue(Equal(intstr.FromString("25%"))))
+				g.Expect(dep.Spec.Strategy.RollingUpdate.MaxUnavailable).To(HaveValue(Equal(intstr.FromString("25%"))))
+				resourceVersion = dep.ResourceVersion
+			}, timeout, interval).Should(Succeed())
+
+			By("verifying subsequent owned-object events do not rewrite the Deployment")
+			Consistently(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+				g.Expect(dep.ResourceVersion).To(Equal(resourceVersion))
+			}, 2*time.Second, interval).Should(Succeed())
+		})
+	})
+
+	// ---------------------------------------------------------------
 	// Test 17: Deployment all replicas ready → phase=Running
 	// ---------------------------------------------------------------
 	Context("TestDeploymentAllReplicasReady", func() {

@@ -14,6 +14,7 @@ import (
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/pkg/bom"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -236,7 +237,11 @@ type Component struct {
 	// transaction-mode pooler (whose pooled connections don't preserve Flyway's session-scoped
 	// advisory lock) and corrupt the schema. Recreate guarantees a single migrating pod per
 	// generation. Ignored for a StatefulSet (which has its own update strategy).
-	Recreate    bool
+	Recreate bool
+	// Strategy, when set, is the rollout strategy the Deployment carries. It comes from a
+	// CR asking for one (a single-writer component that must never overlap two pods) and
+	// wins over Recreate.
+	Strategy    *appsv1.DeploymentStrategy
 	Port        int32
 	ServiceType corev1.ServiceType
 	Env         []EnvPair

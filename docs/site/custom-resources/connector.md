@@ -169,6 +169,37 @@ Values are projected by reference — through `secretKeyRef` or a volume mount �
 
 Referenced objects are watched. The operator recomputes a checksum over every referenced `Secret` and `ConfigMap` on each reconcile and stamps it on the pod template, so editing a referenced object rolls the connector automatically; `status.configChecksum` is the value it last stamped. A reference that does not resolve is not a silent failure either: the connector goes `Failed`, `Degraded` becomes `True` with reason `MissingSecret` or `MissingConfigMap`, `Available` goes `False` with the same reason, and a `Warning` event names the object. The operator then requeues and self-heals as soon as the object appears — no restart, no reapply.
 
+## Rolling out a change
+
+A new image tag, an edited `Secret`, an edited `ConfigMap` — each of them rolls the pod. Under the apps/v1 default the old pod keeps serving until the new one reports Ready, so for the length of that handover two connector pods run at once.
+
+That overlap is a hazard for a connector that is the sole writer of something outside the cluster. Two pods sharing one HSM token can each find a key missing and each create it, which leaves two keys under one identifier. Where the device limits how many clients may connect, the new pod cannot connect at all while the old one holds the slot, and the rollout stalls until someone breaks the cycle by hand. `spec.replicas: 1` does not avoid this: with a single replica the default bounds resolve to "start the new pod, keep the old one", which is the overlap itself.
+
+`spec.strategy` is how a connector says it cannot overlap. `Recreate` terminates the old pod before the new one starts:
+
+```yaml
+spec:
+  strategy:
+    type: Recreate
+```
+
+A zero-surge rolling update narrows the overlap rather than removing it:
+
+```yaml
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+```
+
+Kubernetes counts a pod as unavailable the moment it begins terminating, so it creates the replacement while the old pod is still shutting down and still holding whatever it holds. The overlap lasts as long as that shutdown. Zero surge suits a connector that wants a shorter window, or one that runs above a single replica; a sole writer needs `Recreate`.
+
+Zero surge costs a gap in service, so Kubernetes requires `maxUnavailable` to be at least 1; the operator fills that in when you set `maxSurge: 0` and leave `maxUnavailable` out. Left unset, `spec.strategy` renders nothing and the connector rolls the apps/v1 way — the right choice for a connector that holds nothing exclusively.
+
+The operator writes the strategy only when the custom resource names one, so deleting the field later leaves the running Deployment with the strategy it already has. Set `type: RollingUpdate` with no bounds to return to the apps/v1 default.
+
 ## The shipped samples
 
 Five ready-to-edit `Connector` samples ship with the operator:
