@@ -13,6 +13,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/builder/connector"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -636,4 +637,38 @@ func TestBuildDeploymentSchedulingSidecarsAndSA(t *testing.T) {
 	sa := connector.BuildServiceAccount(conn)
 	assert.Equal(t, saName, sa.Name)
 	assert.Equal(t, "kms@proj.iam", sa.Annotations["iam.gke.io/gcp-service-account"])
+}
+
+func TestBuildDeploymentStrategy(t *testing.T) {
+	t.Run("unset leaves the apps/v1 default", func(t *testing.T) {
+		dep := connector.BuildDeployment(newTestConnector(), testChecksum)
+
+		assert.Empty(t, string(dep.Spec.Strategy.Type))
+		assert.Nil(t, dep.Spec.Strategy.RollingUpdate)
+	})
+
+	t.Run("Recreate reaches the Deployment", func(t *testing.T) {
+		conn := newTestConnector()
+		conn.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{Type: "Recreate"}
+
+		dep := connector.BuildDeployment(conn, testChecksum)
+
+		assert.Equal(t, appsv1.RecreateDeploymentStrategyType, dep.Spec.Strategy.Type,
+			"a single-writer connector must never overlap two pods on one token")
+	})
+
+	t.Run("zero surge renders with maxUnavailable 1", func(t *testing.T) {
+		conn := newTestConnector()
+		surge := intstr.FromInt32(0)
+		conn.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{
+			Type:          "RollingUpdate",
+			RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{MaxSurge: &surge},
+		}
+
+		dep := connector.BuildDeployment(conn, testChecksum)
+
+		require.NotNil(t, dep.Spec.Strategy.RollingUpdate)
+		assert.Equal(t, intstr.FromInt32(0), *dep.Spec.Strategy.RollingUpdate.MaxSurge)
+		assert.Equal(t, intstr.FromInt32(1), *dep.Spec.Strategy.RollingUpdate.MaxUnavailable)
+	})
 }

@@ -329,6 +329,12 @@ func (r *Reconciler) reconcileDeployment(ctx context.Context, conn *otilmv1alpha
 		deploy.Labels = desiredDeploy.Labels
 		deploy.Spec.Replicas = desiredDeploy.Spec.Replicas
 		deploy.Spec.Template = desiredDeploy.Spec.Template
+		// Strategy is written only when the CR names one. Writing the empty value back over
+		// the apps/v1 defaults the apiserver filled in would differ from the live object on
+		// every pass, and each write would wake this reconciler again.
+		if desiredDeploy.Spec.Strategy.Type != "" {
+			deploy.Spec.Strategy = desiredDeploy.Spec.Strategy
+		}
 		// Selector is immutable; only set on create.
 		if deploy.Spec.Selector == nil {
 			deploy.Spec.Selector = desiredDeploy.Spec.Selector
