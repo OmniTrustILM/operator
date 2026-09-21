@@ -65,6 +65,62 @@ var _ = Describe("Connector CEL validation", func() {
 		})
 	})
 
+	Context("TestStrategyPaddedZeroBounds", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-cel-padded-zero")
+		})
+
+		It("should reject a zero pair spelled with leading zeros", func() {
+			zeroSpellings := []struct {
+				name           string
+				maxSurge       *intstr.IntOrString
+				maxUnavailable *intstr.IntOrString
+			}{
+				{name: "padded-surge", maxSurge: bound(intstr.FromString("00%")), maxUnavailable: bound(intstr.FromInt32(0))},
+				{name: "padded-unavailable", maxSurge: bound(intstr.FromInt32(0)), maxUnavailable: bound(intstr.FromString("000%"))},
+				{name: "both-padded", maxSurge: bound(intstr.FromString("00%")), maxUnavailable: bound(intstr.FromString("00%"))},
+			}
+
+			for _, tt := range zeroSpellings {
+				conn := newConnector("cel-"+tt.name, ns)
+				conn.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{
+					Type: "RollingUpdate",
+					RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{
+						MaxSurge:       tt.maxSurge,
+						MaxUnavailable: tt.maxUnavailable,
+					},
+				}
+
+				err := k8sClient.Create(ctx, conn)
+				Expect(err).To(HaveOccurred(), tt.name+" must not reach the Deployment API")
+				Expect(err.Error()).To(ContainSubstring("maxSurge and maxUnavailable may not both be zero"))
+			}
+		})
+	})
+
+	Context("TestStrategyPaddedNonZeroBound", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-cel-padded-nonzero")
+		})
+
+		It("should accept a leading zero on a non-zero bound", func() {
+			conn := newConnector("cel-padded-nonzero", ns)
+			conn.Spec.Strategy = &otilmv1alpha1.DeploymentStrategySpec{
+				Type: "RollingUpdate",
+				RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{
+					MaxSurge:       bound(intstr.FromString("00%")),
+					MaxUnavailable: bound(intstr.FromString("025%")),
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+		})
+	})
+
 	Context("TestStrategyZeroSurgeAccepted", func() {
 		var ns string
 

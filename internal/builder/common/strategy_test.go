@@ -81,6 +81,36 @@ func TestBuildDeploymentStrategy(t *testing.T) {
 			wantUnavailable: intOrStr(intstr.FromInt32(1)),
 		},
 		{
+			name: "a leading-zero percentage counts as zero surge",
+			spec: &otilmv1alpha1.DeploymentStrategySpec{
+				Type:          "RollingUpdate",
+				RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{MaxSurge: intOrStr(intstr.FromString("00%"))},
+			},
+			wantType:        appsv1.RollingUpdateDeploymentStrategyType,
+			wantSurge:       intOrStr(intstr.FromString("00%")),
+			wantUnavailable: intOrStr(intstr.FromInt32(1)),
+		},
+		{
+			name: "a zero percentage of any width counts as zero surge",
+			spec: &otilmv1alpha1.DeploymentStrategySpec{
+				Type:          "RollingUpdate",
+				RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{MaxSurge: intOrStr(intstr.FromString("000%"))},
+			},
+			wantType:        appsv1.RollingUpdateDeploymentStrategyType,
+			wantSurge:       intOrStr(intstr.FromString("000%")),
+			wantUnavailable: intOrStr(intstr.FromInt32(1)),
+		},
+		{
+			name: "a leading zero on a non-zero percentage is not zero surge",
+			spec: &otilmv1alpha1.DeploymentStrategySpec{
+				Type:          "RollingUpdate",
+				RollingUpdate: &otilmv1alpha1.RollingUpdateSpec{MaxSurge: intOrStr(intstr.FromString("025%"))},
+			},
+			wantType:        appsv1.RollingUpdateDeploymentStrategyType,
+			wantSurge:       intOrStr(intstr.FromString("025%")),
+			wantUnavailable: intOrStr(intstr.FromString("25%")),
+		},
+		{
 			name: "a non-zero surge gains the default maxUnavailable",
 			spec: &otilmv1alpha1.DeploymentStrategySpec{
 				Type:          "RollingUpdate",

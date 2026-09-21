@@ -642,10 +642,9 @@ spec:
                 - message: maxSurge and maxUnavailable may not both be zero
                   rule: '!(has(self.rollingUpdate) && has(self.rollingUpdate.maxSurge)
                     && has(self.rollingUpdate.maxUnavailable) && (type(self.rollingUpdate.maxSurge)
-                    == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge
-                    in [''0'', ''0%'']) && (type(self.rollingUpdate.maxUnavailable)
-                    == int ? self.rollingUpdate.maxUnavailable == 0 : self.rollingUpdate.maxUnavailable
-                    in [''0'', ''0%'']))'
+                    == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge.matches(''^0+%?$''))
+                    && (type(self.rollingUpdate.maxUnavailable) == int ? self.rollingUpdate.maxUnavailable
+                    == 0 : self.rollingUpdate.maxUnavailable.matches(''^0+%?$'')))'
               tolerations:
                 description: Tolerations allow the connector pods to schedule onto
                   tainted nodes.

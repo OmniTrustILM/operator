@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package common
 
 import (
+	"strconv"
+	"strings"
+
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -58,7 +61,9 @@ func copyIntOrString(v *intstr.IntOrString) *intstr.IntOrString {
 	return &copied
 }
 
-// isZeroBound reports whether a rollout bound means zero in any of its spellings.
+// isZeroBound reports whether a rollout bound means zero in any of its spellings. The
+// comparison is numeric because the CRD's ^[0-9]+%$ regex admits leading zeros, which
+// Kubernetes parses as zero just as it parses "0%".
 func isZeroBound(v *intstr.IntOrString) bool {
 	if v == nil {
 		return false
@@ -66,5 +71,6 @@ func isZeroBound(v *intstr.IntOrString) bool {
 	if v.Type == intstr.Int {
 		return v.IntValue() == 0
 	}
-	return v.StrVal == "0" || v.StrVal == "0%"
+	percent, err := strconv.Atoi(strings.TrimSuffix(v.StrVal, "%"))
+	return err == nil && percent == 0
 }

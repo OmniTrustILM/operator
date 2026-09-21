@@ -318,7 +318,7 @@ type PDBSpec struct {
 // new one is Ready, so two pods briefly share whatever the component alone may write — an
 // HSM token, a client slot on an appliance.
 // +kubebuilder:validation:XValidation:rule="!has(self.rollingUpdate) || self.type == 'RollingUpdate'",message="rollingUpdate is valid only with type: RollingUpdate"
-// +kubebuilder:validation:XValidation:rule="!(has(self.rollingUpdate) && has(self.rollingUpdate.maxSurge) && has(self.rollingUpdate.maxUnavailable) && (type(self.rollingUpdate.maxSurge) == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge in ['0', '0%']) && (type(self.rollingUpdate.maxUnavailable) == int ? self.rollingUpdate.maxUnavailable == 0 : self.rollingUpdate.maxUnavailable in ['0', '0%']))",message="maxSurge and maxUnavailable may not both be zero"
+// +kubebuilder:validation:XValidation:rule="!(has(self.rollingUpdate) && has(self.rollingUpdate.maxSurge) && has(self.rollingUpdate.maxUnavailable) && (type(self.rollingUpdate.maxSurge) == int ? self.rollingUpdate.maxSurge == 0 : self.rollingUpdate.maxSurge.matches('^0+%?$')) && (type(self.rollingUpdate.maxUnavailable) == int ? self.rollingUpdate.maxUnavailable == 0 : self.rollingUpdate.maxUnavailable.matches('^0+%?$')))",message="maxSurge and maxUnavailable may not both be zero"
 type DeploymentStrategySpec struct {
 	// Type is Recreate — every old pod terminates before the new one starts — or
 	// RollingUpdate, which replaces them gradually within the RollingUpdate bounds.
