@@ -33,7 +33,7 @@ spec:
       type: string
     - jsonPath: .status.readyReplicas
       name: Ready
-      type: string
+      type: integer
     - jsonPath: .status.endpoint
       name: Endpoint
       type: string
