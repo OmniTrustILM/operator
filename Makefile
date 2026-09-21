@@ -38,6 +38,12 @@ BUNDLE_IMG ?= $(IMAGE_TAG_BASE)-bundle:v$(VERSION)
 # BUNDLE_GEN_FLAGS are the flags passed to the operator-sdk generate bundle command
 BUNDLE_GEN_FLAGS ?= -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
 
+# BUNDLE_CREATED_AT pins the CSV's createdAt annotation. operator-sdk stamps it with the
+# current time on every run and honors no pinned input (a value in the CSV base is
+# overwritten), so without this the regenerated bundle always differs from the committed
+# one and `make verify-generated` could never pass.
+BUNDLE_CREATED_AT ?= 2026-09-21T21:00:00Z
+
 # USE_IMAGE_DIGESTS defines if images are resolved via tags or digests
 # You can enable this value if you would like to use SHA Based Digests
 # To enable set flag to true
@@ -467,7 +473,16 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(OPERATOR_SDK) generate kustomize manifests -q
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/manifests | $(OPERATOR_SDK) generate bundle $(BUNDLE_GEN_FLAGS)
+	@sed -i.bak -E 's|^([[:space:]]*createdAt: ).*|\1"$(BUNDLE_CREATED_AT)"|' bundle/manifests/*.clusterserviceversion.yaml
+	@rm -f bundle/manifests/*.clusterserviceversion.yaml.bak
 	$(OPERATOR_SDK) bundle validate ./bundle
+
+.PHONY: verify-generated
+verify-generated: generate manifests bundle ## Fail if the committed generated artifacts are stale (assumes a clean tree).
+	@git diff --exit-code -- api config deploy bundle || { \
+		echo "::error::generated artifacts are stale — run 'make generate manifests bundle' and commit the result"; \
+		exit 1; \
+	}
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
