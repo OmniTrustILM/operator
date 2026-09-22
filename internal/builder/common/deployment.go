@@ -91,6 +91,10 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 		Affinity:     c.Affinity,
 		Tolerations:  c.Tolerations,
 	}
+	if c.FSGroup != nil {
+		fsGroup := *c.FSGroup
+		podSpec.SecurityContext.FSGroup = &fsGroup
+	}
 	if len(initContainers) > 0 {
 		podSpec.InitContainers = initContainers
 	}

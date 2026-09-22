@@ -258,6 +258,16 @@ type SecurityContextSpec struct {
 	// +kubebuilder:default=true
 	// +optional
 	ReadOnlyRootFilesystem *bool `json:"readOnlyRootFilesystem,omitempty"`
+
+	// FSGroup is added to every container's supplementary groups. The kubelet also applies it
+	// as the group owner of mounted volumes, but only for volume types and CSI drivers that
+	// support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+	// assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+	// whether to pin one is the deployment's decision.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2147483647
+	// +optional
+	FSGroup *int64 `json:"fsGroup,omitempty"`
 }
 
 // ProbeConfig defines the configuration for a single probe.
@@ -548,7 +558,8 @@ type ComponentSpec struct {
 	// +optional
 	Probes *ProbeSpec `json:"probes,omitempty"`
 
-	// SecurityContext overrides the main container's security context. It is always
+	// SecurityContext tunes the per-workload runtime decisions of the pod and container
+	// security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
 	// merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
 	// (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
 	// RuntimeDefault) are guaranteed even if the user omits them, so a partial context

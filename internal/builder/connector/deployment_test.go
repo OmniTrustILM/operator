@@ -462,6 +462,26 @@ func TestBuildDeploymentEphemeralVolumes(t *testing.T) {
 	assert.Equal(t, "/tmp", vm.MountPath)
 }
 
+func TestBuildDeploymentFSGroup(t *testing.T) {
+	t.Run("unset leaves the pod without one", func(t *testing.T) {
+		dep := connector.BuildDeployment(newTestConnector(), testChecksum)
+
+		assert.Nil(t, dep.Spec.Template.Spec.SecurityContext.FSGroup)
+	})
+
+	t.Run("a CR value reaches the pod", func(t *testing.T) {
+		conn := newTestConnector()
+		conn.Spec.SecurityContext = &otilmv1alpha1.SecurityContextSpec{FSGroup: ptr.To(int64(10001))}
+
+		dep := connector.BuildDeployment(conn, testChecksum)
+
+		podSC := dep.Spec.Template.Spec.SecurityContext
+		require.NotNil(t, podSC.FSGroup)
+		assert.Equal(t, int64(10001), *podSC.FSGroup, "the sidecar contract's group must own the mounted volumes")
+		assert.Nil(t, podSC.RunAsUser, "restricted-v2 still assigns the UID")
+	})
+}
+
 func TestBuildDeploymentSecurityContext(t *testing.T) {
 	conn := newTestConnector()
 	runAsNonRoot := false

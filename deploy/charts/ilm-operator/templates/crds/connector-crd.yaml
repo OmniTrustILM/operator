@@ -529,6 +529,17 @@ spec:
                 description: SecurityContext defines the security context for the
                   connector pod.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                      as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                      support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                      assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                      whether to pin one is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container

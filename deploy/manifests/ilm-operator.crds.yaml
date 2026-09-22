@@ -529,6 +529,17 @@ spec:
                 description: SecurityContext defines the security context for the
                   connector pod.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                      as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                      support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                      assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                      whether to pin one is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container
@@ -1433,12 +1444,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -2077,12 +2100,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -3091,12 +3126,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -4314,12 +4361,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -5007,12 +5066,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -6252,12 +6323,24 @@ spec:
                         type: array
                       securityContext:
                         description: |-
-                          SecurityContext overrides the main container's security context. It is always
+                          SecurityContext tunes the per-workload runtime decisions of the pod and container
+                          security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                           merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                           (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                           RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                           can never silently weaken pod security.
                         properties:
+                          fsGroup:
+                            description: |-
+                              FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                              as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                              support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                              assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                              whether to pin one is the deployment's decision.
+                            format: int64
+                            maximum: 2147483647
+                            minimum: 0
+                            type: integer
                           readOnlyRootFilesystem:
                             default: true
                             description: ReadOnlyRootFilesystem indicates that the
@@ -7061,12 +7144,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -7699,12 +7794,24 @@ spec:
                     type: array
                   securityContext:
                     description: |-
-                      SecurityContext overrides the main container's security context. It is always
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
                       merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
                       (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
                       RuntimeDefault) are guaranteed even if the user omits them, so a partial context
                       can never silently weaken pod security.
                     properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
                       readOnlyRootFilesystem:
                         default: true
                         description: ReadOnlyRootFilesystem indicates that the container
@@ -8604,11 +8711,22 @@ spec:
                 type: array
               securityContext:
                 description: |-
-                  SecurityContext tunes the per-workload runtime decisions of the container
-                  security context (readOnlyRootFilesystem). The SCC-critical fields
+                  SecurityContext tunes the per-workload runtime decisions of the pod and container
+                  security context (readOnlyRootFilesystem, fsGroup). The SCC-critical fields
                   (runAsNonRoot, no privilege escalation, dropped capabilities, seccomp) are
                   hardened by the shared builders and cannot be weakened from the CR.
                 properties:
+                  fsGroup:
+                    description: |-
+                      FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                      as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                      support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                      assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                      whether to pin one is the deployment's decision.
+                    format: int64
+                    maximum: 2147483647
+                    minimum: 0
+                    type: integer
                   readOnlyRootFilesystem:
                     default: true
                     description: ReadOnlyRootFilesystem indicates that the container

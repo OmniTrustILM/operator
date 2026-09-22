@@ -121,8 +121,8 @@ type ProxySpec struct {
 	// +optional
 	Volumes []VolumeSpec `json:"volumes,omitempty"`
 
-	// SecurityContext tunes the per-workload runtime decisions of the container
-	// security context (readOnlyRootFilesystem). The SCC-critical fields
+	// SecurityContext tunes the per-workload runtime decisions of the pod and container
+	// security context (readOnlyRootFilesystem, fsGroup). The SCC-critical fields
 	// (runAsNonRoot, no privilege escalation, dropped capabilities, seccomp) are
 	// hardened by the shared builders and cannot be weakened from the CR.
 	// +optional

@@ -64,7 +64,7 @@ Shared by every component.
 | `secretRefs` / `configMapRefs` | Mount or inject Secrets and ConfigMaps, as env or volume, with key mapping. |
 | `volumes` | Extra emptyDir volumes mounted into the main container. |
 | `probes` | Liveness, readiness, and startup overrides. |
-| `securityContext` | `runAsNonRoot` and `readOnlyRootFilesystem`, both defaulting to true; always SCC-hardened on a fill-don't-replace basis. |
+| `securityContext` | `runAsNonRoot` and `readOnlyRootFilesystem`, both defaulting to true, plus an optional pod-level `fsGroup` with no default; always SCC-hardened on a fill-don't-replace basis. |
 | `podAnnotations` / `podLabels` | Pod-template metadata. |
 | `nodeSelector` / `affinity` / `tolerations` | Scheduling. |
 | `initContainers` / `sidecars` | Appended, SCC-hardened. |

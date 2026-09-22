@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 // i32Ptr / boolPtr are small pointer helpers for the override fixtures (strPtr is
@@ -470,6 +471,19 @@ func TestComponentSpecUserSecurityContextCannotWeakenSCC(t *testing.T) {
 	assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop)
 	require.NotNil(t, sc.SeccompProfile)
 	assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, sc.SeccompProfile.Type)
+}
+
+func TestComponentSpecFSGroupReachesThePod(t *testing.T) {
+	p := basePlatform()
+	assert.Nil(t, common.BuildDeployment(ResolveCore(p)).Spec.Template.Spec.SecurityContext.FSGroup,
+		"no fsGroup unless the CR asks for one")
+
+	p.Spec.Core.SecurityContext = &otilmv1alpha1.SecurityContextSpec{FSGroup: ptr.To(int64(10001))}
+
+	podSC := common.BuildDeployment(ResolveCore(p)).Spec.Template.Spec.SecurityContext
+	require.NotNil(t, podSC.FSGroup)
+	assert.Equal(t, int64(10001), *podSC.FSGroup)
+	assert.Nil(t, podSC.RunAsUser, "restricted-v2 still assigns the UID")
 }
 
 func TestComponentSpecUserSidecarIsHardened(t *testing.T) {

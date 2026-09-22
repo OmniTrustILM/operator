@@ -39,6 +39,10 @@ spec:
   securityContext:
     runAsNonRoot: true
     readOnlyRootFilesystem: true
+    # Supplementary group for every container; also owns mounted volumes whose type or
+    # CSI driver supports it. No default: on OpenShift the namespace range must admit
+    # the value, so it is not safe to apply unedited.
+    # fsGroup: 10001
 
   probes:
     liveness:

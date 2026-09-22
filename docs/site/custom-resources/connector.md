@@ -200,6 +200,18 @@ Zero surge costs a gap in service, so Kubernetes requires `maxUnavailable` to be
 
 The operator writes the strategy only when the custom resource names one, so deleting the field later leaves the running Deployment with the strategy it already has. Set `type: RollingUpdate` with no bounds to return to the apps/v1 default.
 
+## Giving every container a shared group
+
+`spec.securityContext.fsGroup` adds one group to every container's supplementary groups. The kubelet also applies it as the group owner of mounted volumes, though only for volume types and CSI drivers that support ownership management. A sidecar whose contract names a fixed uid and gid needs it:
+
+```yaml
+spec:
+  securityContext:
+    fsGroup: 10001
+```
+
+There is no default, deliberately. On OpenShift the `restricted-v2` SCC allocates `fsGroup` from the namespace's own range and rejects a value outside it, so pinning one there needs a namespace range that admits the value or a custom SCC. Leave the field out and the pod carries no `fsGroup` at all, which is what most connectors want.
+
 ## The shipped samples
 
 Five ready-to-edit `Connector` samples ship with the operator:

@@ -85,7 +85,7 @@ metadata:
                 }
               ],
               "name": "X.509 Compliance Provider",
-              "platformUrl": "https://ilm-core.ilm-system.svc.cluster.local:8443/api"
+              "platformUrl": "http://core.ilm.svc.cluster.local:8080/api"
             },
             "service": {
               "port": 8080
@@ -272,6 +272,9 @@ metadata:
                 "name": "vault-agent"
               }
             ],
+            "strategy": {
+              "type": "Recreate"
+            },
             "tolerations": [
               {
                 "key": "hsm",

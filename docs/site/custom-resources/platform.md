@@ -634,7 +634,7 @@ spec:
     configMapRefs: []
     volumes: []                     # emptyDir volumes mounted into the main container
     probes: { liveness: {}, readiness: {}, startup: {} }
-    securityContext: {}             # always SCC-hardened (fill-don't-replace)
+    securityContext: {}             # readOnlyRootFilesystem plus the pod-level fsGroup; always SCC-hardened (fill-don't-replace)
     podAnnotations: {}              # for example Vault Agent or service-mesh injection
     podLabels: {}
     nodeSelector: {}
@@ -841,7 +841,8 @@ A platform version bundle that predates the bundled service renders nothing for 
 
 The operator runs on OpenShift unchanged — it neither detects nor special-cases it.
 
-- **SCC `restricted-v2` out of the box.** Every pod the operator renders, and the operator's own, is non-root, sets **no `runAsUser`** so OpenShift assigns the namespace's allocated UID, drops **all** capabilities, sets `seccompProfile: RuntimeDefault`, and forbids privilege escalation. It therefore runs under the default `restricted-v2` SCC with no custom SCC and no extra RBAC. An override in the custom resource cannot weaken this: the security context is fill-**and**-force.
+- **SCC `restricted-v2` out of the box.** Every pod the operator renders, and the operator's own, is non-root, sets **no `runAsUser`** so OpenShift assigns the namespace's allocated UID, drops **all** capabilities, sets `seccompProfile: RuntimeDefault`, and forbids privilege escalation. It therefore runs under the default `restricted-v2` SCC with no custom SCC and no extra RBAC. An override in the custom resource cannot weaken **those** guarantees: the security context is fill-**and**-force.
+- **`fsGroup` is the one field that can put a pod outside the default SCC.** `securityContext.fsGroup` has no default, deliberately. `restricted-v2` allocates `fsGroup` from the namespace's own range and rejects a value outside it, so pinning one on OpenShift needs a namespace range that admits the value or a custom SCC. Leave it unset and the pod carries no `fsGroup` at all.
 - **Install** through OperatorHub, using the bundled OLM package, or with the Helm chart.
 - **Edge.** Use `edge.type: ingress` — the OpenShift router reconciles the `Ingress` and publishes the Route for you — or `edge.type: gatewayAPI`. A native OpenShift `Route` edge type is **not yet supported**. The cert-manager TLS modes work as on any cluster; OpenShift has a Red Hat cert-manager operator.
 - **Managed infrastructure.** The CloudNativePG, RabbitMQ, Keycloak, and cert-manager operators all install from OperatorHub, and the operator detects their CRDs and waits exactly as it does elsewhere.
