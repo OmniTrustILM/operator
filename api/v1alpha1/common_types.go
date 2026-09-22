@@ -259,11 +259,11 @@ type SecurityContextSpec struct {
 	// +optional
 	ReadOnlyRootFilesystem *bool `json:"readOnlyRootFilesystem,omitempty"`
 
-	// FSGroup is added to every container's supplementary groups and becomes the group owner
-	// of the pod's mounted volumes, which is what a container whose contract names a fixed
-	// gid needs. It carries no default: OpenShift's restricted-v2 SCC assigns fsGroup from
-	// the namespace's allocated range and rejects a value outside it, so whether to pin one
-	// is the deployment's decision.
+	// FSGroup is added to every container's supplementary groups. The kubelet also applies it
+	// as the group owner of mounted volumes, but only for volume types and CSI drivers that
+	// support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+	// assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+	// whether to pin one is the deployment's decision.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=2147483647
 	// +optional

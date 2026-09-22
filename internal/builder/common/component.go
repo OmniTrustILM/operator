@@ -310,9 +310,8 @@ type Component struct {
 	// even if the caller leaves them unset, so a user-supplied context can never weaken
 	// pod security. ReadOnlyRootFilesystem above still applies on top.
 	SecurityContext *corev1.SecurityContext
-	// FSGroup, when set, is the pod's fsGroup: the group owning its mounted volumes and
-	// added to every container's supplementary groups. It stays nil unless a CR asks for a
-	// value — the builder never picks one.
+	// FSGroup, when set, is the pod's fsGroup: added to every container's supplementary
+	// groups. It stays nil unless a CR asks for a value — the builder never picks one.
 	FSGroup *int64
 	// PodAnnotations are extra annotations merged onto the pod template (e.g. user
 	// PodAnnotations or a config checksum). Operator-set keys win on conflict.

@@ -109,7 +109,7 @@ Everything beyond the token reference is optional. None of it configures the pro
 | `podAnnotations` / `podLabels` | Pod-template metadata; operator-managed labels win on collision. |
 | `initContainers` / `sidecars` | Extra containers, hardened exactly like the main one. |
 
-`securityContext.fsGroup` adds one group to every container's supplementary groups, and the kubelet stamps it as the group owner of the pod's volumes. It has no default: OpenShift's `restricted-v2` SCC allocates `fsGroup` from the namespace's own range and rejects a value outside it, so pinning one there needs a namespace range that admits the value or a custom SCC.
+`securityContext.fsGroup` adds one group to every container's supplementary groups. The kubelet also applies it as the group owner of mounted volumes, though only for volume types and CSI drivers that support ownership management. It has no default: OpenShift's `restricted-v2` SCC allocates `fsGroup` from the namespace's own range and rejects a value outside it, so pinning one there needs a namespace range that admits the value or a custom SCC.
 
 The metrics path is `/metrics`, not the `/v1/metrics` the platform's own components serve — the `Proxy` has its own metrics block for exactly that reason. A ServiceMonitor is rendered only when **both** `metrics.enabled` and `metrics.serviceMonitor.enabled` are true — turning the sub-block on without enabling metrics renders nothing. When both are set, the ServiceMonitor scrapes that path on the `http` port.
 

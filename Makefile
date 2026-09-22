@@ -478,7 +478,13 @@ bundle: manifests kustomize operator-sdk ## Generate bundle manifests and metada
 	$(OPERATOR_SDK) bundle validate ./bundle
 
 .PHONY: verify-generated
-verify-generated: generate manifests bundle ## Fail if the committed generated artifacts are stale (assumes a clean tree).
+verify-generated: generate manifests bundle ## Fail if the committed generated artifacts are stale or missing (assumes a clean tree).
+	@untracked=$$(git ls-files --others --exclude-standard -- api config deploy bundle); \
+	if [ -n "$$untracked" ]; then \
+		echo "::error::generated artifacts are missing from git — add and commit:"; \
+		echo "$$untracked"; \
+		exit 1; \
+	fi
 	@git diff --exit-code -- api config deploy bundle || { \
 		echo "::error::generated artifacts are stale — run 'make generate manifests bundle' and commit the result"; \
 		exit 1; \

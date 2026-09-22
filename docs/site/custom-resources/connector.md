@@ -202,7 +202,7 @@ The operator writes the strategy only when the custom resource names one, so del
 
 ## Giving every container a shared group
 
-`spec.securityContext.fsGroup` adds one group to every container's supplementary groups, and the kubelet stamps it as the group owner of the pod's volumes. A sidecar whose contract names a fixed uid and gid needs it:
+`spec.securityContext.fsGroup` adds one group to every container's supplementary groups. The kubelet also applies it as the group owner of mounted volumes, though only for volume types and CSI drivers that support ownership management. A sidecar whose contract names a fixed uid and gid needs it:
 
 ```yaml
 spec:
