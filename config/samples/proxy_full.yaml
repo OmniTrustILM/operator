@@ -40,7 +40,7 @@ spec:
         medium: Memory
   securityContext:
     readOnlyRootFilesystem: true # default; runAsNonRoot etc. are hardened and not configurable
-    fsGroup: 10001 # supplementary group for every container; on OpenShift the namespace range must admit it
+    # fsGroup: 10001 # supplementary group for every container; on OpenShift the namespace range must admit the value
   terminationGracePeriodSeconds: 120 # drain in-flight broker messages
   nodeSelector: # e.g. pin to egress-permitted nodes
     network-zone: egress

@@ -558,7 +558,8 @@ type ComponentSpec struct {
 	// +optional
 	Probes *ProbeSpec `json:"probes,omitempty"`
 
-	// SecurityContext overrides the main container's security context. It is always
+	// SecurityContext tunes the per-workload runtime decisions of the pod and container
+	// security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
 	// merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
 	// (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
 	// RuntimeDefault) are guaranteed even if the user omits them, so a partial context
