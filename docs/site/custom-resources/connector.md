@@ -182,7 +182,7 @@ spec:
         claimName: vendor-state
 ```
 
-The claim is yours: you choose its size, its storage class and its access mode, and the access mode is what decides whether several replicas may mount it at once. Naming neither source leaves an `emptyDir`.
+The claim is yours: you choose its size, its storage class and its access mode. For HSM appliance state shared by several connector replicas, use a `ReadWriteMany` claim; otherwise run one replica. Naming neither source leaves an `emptyDir`.
 
 The operator mounts the volume into the connector container at `mountPath` and publishes it to the pod under `name`, which is how a `spec.sidecars` container mounts the same volume at a path of its own.
 

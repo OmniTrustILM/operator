@@ -111,8 +111,7 @@ spec:
       mountPath: /var/cache/connector
       emptyDir:
         sizeLimit: 128Mi
-    # State the connector must keep across a restart. The claim is yours to create; its
-    # access mode decides whether several replicas may mount it at once.
+    # Use ReadWriteMany when replicas share appliance state; otherwise run one replica.
     - name: vendor-state
       mountPath: /var/lib/vendor
       persistentVolumeClaim:
