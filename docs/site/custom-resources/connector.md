@@ -145,7 +145,7 @@ The connector's own configuration reaches it in four ways, none of which require
 | `spec.env` | Non-sensitive `{name, value}` environment variables, set directly on the container. |
 | `spec.secretRefs` | Consume a `Secret` as environment (`type: env`) or mount it as a volume (`type: volume`), with per-key mapping. |
 | `spec.configMapRefs` | The same, for a `ConfigMap`. |
-| `spec.volumes` | Extra `emptyDir` volumes mounted into the container by name and `mountPath`. |
+| `spec.volumes` | Extra volumes mounted into the container by name and `mountPath`, each an `emptyDir` or an existing `PersistentVolumeClaim`. |
 
 A reference names an object and chooses how it is consumed. With `type: env` a `keys` list maps an individual key to an environment-variable name; with `type: volume` the object is mounted whole at `mountPath`, and a `keys` entry can place a key at a specific `path` inside it:
 
@@ -168,6 +168,25 @@ spec:
 Values are projected by reference — through `secretKeyRef` or a volume mount — and never copied into the rendered Deployment.
 
 Referenced objects are watched. The operator recomputes a checksum over every referenced `Secret` and `ConfigMap` on each reconcile and stamps it on the pod template, so editing a referenced object rolls the connector automatically; `status.configChecksum` is the value it last stamped. A reference that does not resolve is not a silent failure either: the connector goes `Failed`, `Degraded` becomes `True` with reason `MissingSecret` or `MissingConfigMap`, `Available` goes `False` with the same reason, and a `Warning` event names the object. The operator then requeues and self-heals as soon as the object appears — no restart, no reapply.
+
+## Volumes that outlive the pod
+
+A volume entry takes one source. An `emptyDir` is created fresh for each pod and lost with it, which suits scratch space and a cache. A `persistentVolumeClaim` names a claim you created in the same namespace, and its contents survive the pod:
+
+```yaml
+spec:
+  volumes:
+    - name: vendor-state
+      mountPath: /var/lib/vendor
+      persistentVolumeClaim:
+        claimName: vendor-state
+```
+
+The claim is yours: you choose its size, its storage class and its access mode. For HSM appliance state shared by several connector replicas, use a `ReadWriteMany` claim; otherwise run one replica. Naming neither source leaves an `emptyDir`.
+
+The operator mounts the volume into the connector container at `mountPath` and publishes it to the pod under `name`, which is how a `spec.sidecars` container mounts the same volume at a path of its own.
+
+A claim holding key material an HSM client wrote — wrapped blobs, an enrolled client identity — is as sensitive as the `Secret` that seeded it, and deserves the same handling: restricted access to the namespace, and a backup story that accounts for what the volume contains.
 
 ## Rolling out a change
 

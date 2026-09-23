@@ -152,7 +152,7 @@ func refProjections(px *otilmv1alpha1.Proxy) (extraEnv []corev1.EnvVar, envFrom 
 		appendRef(b.Env, b.EnvFrom, b.Volumes, b.VolumeMounts)
 	}
 	for _, v := range px.Spec.Volumes {
-		vol, vm := common.BuildEphemeralVolume(v)
+		vol, vm := common.BuildVolume(v)
 		volumes = append(volumes, vol)
 		volumeMounts = append(volumeMounts, vm)
 	}

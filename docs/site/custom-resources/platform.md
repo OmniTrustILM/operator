@@ -632,7 +632,7 @@ spec:
     env: [ { name: EXTRA_FLAG, value: "true" } ]   # non-sensitive inline env only
     secretRefs: []                  # mount or inject your own Secrets — see the key mapping below
     configMapRefs: []
-    volumes: []                     # emptyDir volumes mounted into the main container
+    volumes: []                     # additional volumes mounted into the main container
     probes: { liveness: {}, readiness: {}, startup: {} }
     securityContext: {}             # readOnlyRootFilesystem plus the pod-level fsGroup; always SCC-hardened (fill-don't-replace)
     podAnnotations: {}              # for example Vault Agent or service-mesh injection

@@ -98,7 +98,7 @@ Everything beyond the token reference is optional. None of it configures the pro
 | `resources` | Container requests and limits. |
 | `env` | Process-level environment only — `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` for corporate egress, which the token cannot know. Never secrets. |
 | `secretRefs` / `configMapRefs` | Consume a `Secret` or `ConfigMap` as environment or mount it as a volume, with per-key mapping — for example a private-PKI CA bundle for the broker TLS connection. |
-| `volumes` | Extra `emptyDir` volumes mounted into the container. |
+| `volumes` | Extra volumes mounted into the container, each an `emptyDir` or an existing `PersistentVolumeClaim`. |
 | `probes` | Override the liveness, readiness, and startup probes. The defaults match the proxy's own endpoints: `/health` for liveness and startup, `/ready` for readiness, both on the HTTP port. |
 | `podDisruptionBudget` | `enabled` plus `minAvailable` or `maxUnavailable` (mutually exclusive; `minAvailable` wins). |
 | `metrics` | `enabled`, `path` (default `/metrics`), and an optional `serviceMonitor`. |

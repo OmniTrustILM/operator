@@ -111,6 +111,11 @@ spec:
       mountPath: /var/cache/connector
       emptyDir:
         sizeLimit: 128Mi
+    # Use ReadWriteMany when replicas share appliance state; otherwise run one replica.
+    - name: vendor-state
+      mountPath: /var/lib/vendor
+      persistentVolumeClaim:
+        claimName: vendor-state
 
   lifecycle:
     terminationGracePeriodSeconds: 60

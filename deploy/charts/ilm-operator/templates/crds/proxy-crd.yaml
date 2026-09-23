@@ -587,11 +587,13 @@ spec:
                   type: object
                 type: array
               volumes:
-                description: Volumes defines additional emptyDir volumes mounted into
-                  the proxy container.
+                description: Volumes are additional volumes mounted into the proxy
+                  container.
                 items:
-                  description: VolumeSpec defines a volume to mount in the workload
-                    pod.
+                  description: |-
+                    VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                    emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                    whose contents outlive the pod. Naming neither leaves an emptyDir.
                   properties:
                     emptyDir:
                       description: EmptyDir defines the emptyDir volume source.
@@ -612,10 +614,31 @@ spec:
                     name:
                       description: Name is the name of the volume.
                       type: string
+                    persistentVolumeClaim:
+                      description: |-
+                        PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                        Writing it from a container that runs as an unprivileged uid needs a pod-level
+                        fsGroup, which spec.securityContext.fsGroup supplies.
+                      properties:
+                        claimName:
+                          description: ClaimName is the PersistentVolumeClaim's name
+                            in the workload's namespace.
+                          minLength: 1
+                          type: string
+                        readOnly:
+                          description: ReadOnly mounts the claim read-only.
+                          type: boolean
+                      required:
+                      - claimName
+                      type: object
                   required:
                   - mountPath
                   - name
                   type: object
+                  x-kubernetes-validations:
+                  - message: a volume takes either emptyDir or persistentVolumeClaim,
+                      not both
+                    rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                 type: array
             required:
             - configTokenSecretRef

@@ -283,7 +283,7 @@ spec:
     env: []                            # [{ name, value }] — non-sensitive only; e.g. JVM tuning: [{ name: JAVA_OPTS, value: "-XX:MaxRAMPercentage=75.0" }]
     secretRefs: []                     # [{ name, type: env|volume, mountPath?, keys: [{ secretKey, envVar|path }] }]
     configMapRefs: []                  # [{ name, type: env|volume, mountPath?, keys: [{ configMapKey, envVar|path }] }]
-    volumes: []                        # [{ name, mountPath, emptyDir: { medium?, sizeLimit? } }]
+    volumes: []                        # additional volumes mounted into the main container
     probes:                            # override liveness/readiness/startup; unset = operator defaults
       liveness: { path: "", initialDelaySeconds: 0, periodSeconds: 0, failureThreshold: 0 }
       readiness: {}

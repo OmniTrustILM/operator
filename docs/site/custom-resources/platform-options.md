@@ -62,7 +62,7 @@ Shared by every component.
 | `resources` | Container requests and limits. |
 | `env` | Non-sensitive inline env, appended last-wins. |
 | `secretRefs` / `configMapRefs` | Mount or inject Secrets and ConfigMaps, as env or volume, with key mapping. |
-| `volumes` | Extra emptyDir volumes mounted into the main container. |
+| `volumes` | Extra volumes mounted into the main container, each an emptyDir or an existing PersistentVolumeClaim. |
 | `probes` | Liveness, readiness, and startup overrides. |
 | `securityContext` | `runAsNonRoot` and `readOnlyRootFilesystem`, both defaulting to true, plus an optional pod-level `fsGroup` with no default; always SCC-hardened on a fill-don't-replace basis. |
 | `podAnnotations` / `podLabels` | Pod-template metadata. |

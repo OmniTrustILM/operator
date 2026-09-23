@@ -117,7 +117,7 @@ type ProxySpec struct {
 	// +optional
 	ConfigMapRefs []ConfigMapRef `json:"configMapRefs,omitempty"`
 
-	// Volumes defines additional emptyDir volumes mounted into the proxy container.
+	// Volumes are additional volumes mounted into the proxy container.
 	// +optional
 	Volumes []VolumeSpec `json:"volumes,omitempty"`
 

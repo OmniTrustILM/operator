@@ -218,7 +218,21 @@ type EmptyDirSpec struct {
 	SizeLimit *string `json:"sizeLimit,omitempty"`
 }
 
-// VolumeSpec defines a volume to mount in the workload pod.
+// PVCSpec mounts an existing PersistentVolumeClaim from the workload's namespace.
+type PVCSpec struct {
+	// ClaimName is the PersistentVolumeClaim's name in the workload's namespace.
+	// +kubebuilder:validation:MinLength=1
+	ClaimName string `json:"claimName"`
+
+	// ReadOnly mounts the claim read-only.
+	// +optional
+	ReadOnly *bool `json:"readOnly,omitempty"`
+}
+
+// VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+// emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+// whose contents outlive the pod. Naming neither leaves an emptyDir.
+// +kubebuilder:validation:XValidation:rule="!(has(self.emptyDir) && has(self.persistentVolumeClaim))",message="a volume takes either emptyDir or persistentVolumeClaim, not both"
 type VolumeSpec struct {
 	// Name is the name of the volume.
 	Name string `json:"name"`
@@ -229,6 +243,12 @@ type VolumeSpec struct {
 	// EmptyDir defines the emptyDir volume source.
 	// +optional
 	EmptyDir *EmptyDirSpec `json:"emptyDir,omitempty"`
+
+	// PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+	// Writing it from a container that runs as an unprivileged uid needs a pod-level
+	// fsGroup, which spec.securityContext.fsGroup supplies.
+	// +optional
+	PersistentVolumeClaim *PVCSpec `json:"persistentVolumeClaim,omitempty"`
 }
 
 // ServiceSpec defines the service configuration for the workload.
@@ -548,8 +568,8 @@ type ComponentSpec struct {
 	// +optional
 	ConfigMapRefs []ConfigMapRef `json:"configMapRefs,omitempty"`
 
-	// Volumes are additional pod volumes (emptyDir today) mounted into the main
-	// container, appended to the operator's own volumes.
+	// Volumes are additional pod volumes mounted into the main container, appended to
+	// the operator's own volumes.
 	// +optional
 	Volumes []VolumeSpec `json:"volumes,omitempty"`
 
