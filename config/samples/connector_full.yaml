@@ -111,6 +111,12 @@ spec:
       mountPath: /var/cache/connector
       emptyDir:
         sizeLimit: 128Mi
+    # State the connector must keep across a restart. The claim is yours to create; its
+    # access mode decides whether several replicas may mount it at once.
+    - name: vendor-state
+      mountPath: /var/lib/vendor
+      persistentVolumeClaim:
+        claimName: vendor-state
 
   lifecycle:
     terminationGracePeriodSeconds: 60

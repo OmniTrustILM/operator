@@ -14,11 +14,26 @@ import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
 
-// BuildEphemeralVolume renders one shared VolumeSpec (emptyDir) into a pod Volume and
-// its main-container VolumeMount. An invalid sizeLimit is logged and skipped rather
-// than failing the render (builders are pure and total).
-func BuildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
+// BuildVolume renders one shared VolumeSpec into a pod Volume and the matching container
+// VolumeMount, so every Kind that carries spec.volumes mounts the same shapes. A spec
+// naming a PersistentVolumeClaim mounts that claim; any other spec renders an emptyDir.
+//
+// An unparsable emptyDir sizeLimit is logged and dropped rather than failing the render:
+// the field is a cap, and losing it costs less than a workload that will not deploy.
+func BuildVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
 	vol := corev1.Volume{Name: v.Name}
+	vm := corev1.VolumeMount{Name: v.Name, MountPath: v.MountPath}
+
+	if v.PersistentVolumeClaim != nil {
+		claim := &corev1.PersistentVolumeClaimVolumeSource{ClaimName: v.PersistentVolumeClaim.ClaimName}
+		if v.PersistentVolumeClaim.ReadOnly != nil {
+			claim.ReadOnly = *v.PersistentVolumeClaim.ReadOnly
+			vm.ReadOnly = *v.PersistentVolumeClaim.ReadOnly
+		}
+		vol.VolumeSource = corev1.VolumeSource{PersistentVolumeClaim: claim}
+		return vol, vm
+	}
+
 	emptyDir := &corev1.EmptyDirVolumeSource{}
 	if v.EmptyDir != nil {
 		if v.EmptyDir.Medium != nil {
@@ -34,9 +49,6 @@ func BuildEphemeralVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.Vol
 		}
 	}
 	vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
-	vm := corev1.VolumeMount{
-		Name:      v.Name,
-		MountPath: v.MountPath,
-	}
+
 	return vol, vm
 }

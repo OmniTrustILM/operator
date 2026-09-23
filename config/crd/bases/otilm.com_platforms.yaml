@@ -741,11 +741,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -766,10 +768,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -1387,11 +1410,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -1412,10 +1437,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -2574,11 +2620,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -2599,10 +2647,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -3672,11 +3741,13 @@ spec:
                     type: object
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -3697,10 +3768,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -4361,11 +4453,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -4386,10 +4480,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -5616,11 +5731,13 @@ spec:
                         type: array
                       volumes:
                         description: |-
-                          Volumes are additional pod volumes (emptyDir today) mounted into the main
-                          container, appended to the operator's own volumes.
+                          Volumes are additional pod volumes mounted into the main container, appended to
+                          the operator's own volumes.
                         items:
-                          description: VolumeSpec defines a volume to mount in the
-                            workload pod.
+                          description: |-
+                            VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                            emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                            whose contents outlive the pod. Naming neither leaves an emptyDir.
                           properties:
                             emptyDir:
                               description: EmptyDir defines the emptyDir volume source.
@@ -5641,10 +5758,31 @@ spec:
                             name:
                               description: Name is the name of the volume.
                               type: string
+                            persistentVolumeClaim:
+                              description: |-
+                                PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                                Writing it from a container that runs as an unprivileged uid needs a pod-level
+                                fsGroup, which spec.securityContext.fsGroup supplies.
+                              properties:
+                                claimName:
+                                  description: ClaimName is the PersistentVolumeClaim's
+                                    name in the workload's namespace.
+                                  minLength: 1
+                                  type: string
+                                readOnly:
+                                  description: ReadOnly mounts the claim read-only.
+                                  type: boolean
+                              required:
+                              - claimName
+                              type: object
                           required:
                           - mountPath
                           - name
                           type: object
+                          x-kubernetes-validations:
+                          - message: a volume takes either emptyDir or persistentVolumeClaim,
+                              not both
+                            rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                         type: array
                       workloadType:
                         default: Deployment
@@ -6431,11 +6569,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -6456,10 +6596,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment
@@ -7081,11 +7242,13 @@ spec:
                     type: array
                   volumes:
                     description: |-
-                      Volumes are additional pod volumes (emptyDir today) mounted into the main
-                      container, appended to the operator's own volumes.
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
                     items:
-                      description: VolumeSpec defines a volume to mount in the workload
-                        pod.
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
                       properties:
                         emptyDir:
                           description: EmptyDir defines the emptyDir volume source.
@@ -7106,10 +7269,31 @@ spec:
                         name:
                           description: Name is the name of the volume.
                           type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
                       required:
                       - mountPath
                       - name
                       type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
                     type: array
                   workloadType:
                     default: Deployment

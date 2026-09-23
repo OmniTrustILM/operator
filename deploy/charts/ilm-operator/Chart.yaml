@@ -4,7 +4,7 @@ description: ILM Operator - manages the ILM platform and its connectors via CRDs
 type: application
 # version must stay *-develop on main; release versions are set when tagging
 version: 0.1.0-develop
-appVersion: "0.1.0"
+appVersion: "develop-latest"
 keywords:
   - ilm
   - operator

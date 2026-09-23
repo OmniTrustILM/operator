@@ -10,7 +10,6 @@ import (
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -138,8 +137,6 @@ func applyScalingOverrides(p *otilmv1alpha1.Platform, c *common.Component, spec 
 	}
 }
 
-// applyRefAndVolumeOverrides appends the user's Secret/ConfigMap references and emptyDir
-// volumes onto the component.
 func applyRefAndVolumeOverrides(c *common.Component, spec otilmv1alpha1.ComponentSpec) {
 	// Secret / ConfigMap references: render via the shared key-mapping logic and append.
 	// type=env keyed refs become ExtraEnv (appended last so they win), whole-source refs
@@ -153,9 +150,8 @@ func applyRefAndVolumeOverrides(c *common.Component, spec otilmv1alpha1.Componen
 		appendRefBindings(c, b)
 	}
 
-	// Volumes (emptyDir): append the user's volumes + their container mounts.
 	for _, v := range spec.Volumes {
-		vol, mount := buildSpecVolume(v)
+		vol, mount := common.BuildVolume(v)
 		c.Volumes = append(c.Volumes, vol)
 		c.VolumeMounts = append(c.VolumeMounts, mount)
 	}
@@ -273,25 +269,6 @@ func applyProbeOverrides(c *common.Component, spec *otilmv1alpha1.ProbeSpec) {
 	if spec.Startup != nil {
 		c.Probes.Startup = build(spec.Startup)
 	}
-}
-
-// buildSpecVolume renders one VolumeSpec (emptyDir) into a pod volume + its container
-// mount, mirroring the Connector's ephemeral-volume rendering.
-func buildSpecVolume(v otilmv1alpha1.VolumeSpec) (corev1.Volume, corev1.VolumeMount) {
-	vol := corev1.Volume{Name: v.Name}
-	emptyDir := &corev1.EmptyDirVolumeSource{}
-	if v.EmptyDir != nil {
-		if v.EmptyDir.Medium != nil {
-			emptyDir.Medium = corev1.StorageMedium(*v.EmptyDir.Medium)
-		}
-		if v.EmptyDir.SizeLimit != nil {
-			if qty, err := resource.ParseQuantity(*v.EmptyDir.SizeLimit); err == nil {
-				emptyDir.SizeLimit = &qty
-			}
-		}
-	}
-	vol.VolumeSource = corev1.VolumeSource{EmptyDir: emptyDir}
-	return vol, corev1.VolumeMount{Name: v.Name, MountPath: v.MountPath}
 }
 
 // mergeStringMaps returns base overlaid by extra (extra wins on conflict). A nil/empty

@@ -64,7 +64,7 @@ func component(conn *otilmv1alpha1.Connector, configChecksum string) common.Comp
 		volumeMounts = append(volumeMounts, b.VolumeMounts...)
 	}
 	for _, v := range conn.Spec.Volumes {
-		vol, vm := common.BuildEphemeralVolume(v)
+		vol, vm := common.BuildVolume(v)
 		volumes = append(volumes, vol)
 		volumeMounts = append(volumeMounts, vm)
 	}
