@@ -18,6 +18,7 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,6 +72,7 @@ const (
 	version2170 = "2.17.0"
 	version2180 = "2.18.0"
 	version2190 = "2.19.0"
+	version2200 = "2.20.0"
 )
 
 // componentAuthOPAPolicies is the operator's component identity for the
@@ -248,25 +250,26 @@ var bundles = map[string]Bundle{
 	// the "/" virtual host with the ilm / ilm-proxy exchanges, and the provider.status-poll
 	// queue.
 	version2190: {
-		Components: map[string]Image{
-			"core":                   {Name: "core", Tag: version2190},
-			"auth":                   {Name: "auth", Tag: "1.7.0"},
-			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
-			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
-			"curl":                   {Name: "curl", Tag: tagCurl8160},
-			"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
-			componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
-			componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
-			componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
-			"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
-			componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
-			"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
-		},
+		Components:      images2190,
 		Wiring:          wiring2190,
 		Messaging:       messagingTopology2190,
 		HasProvisioning: true,
 		Released:        true,
+		RabbitMQVersion: "4.3.1",
+		CNPGVersion:     "18",
+		KeycloakVersion: "26.6.3",
+	},
+	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
+	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
+	// queue (see messagingTopology2200) and the core and frontend-administrator 2.20.0 images.
+	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default
+	// and the chart sets none of them.
+	version2200: {
+		Components:      images2200,
+		Wiring:          wiring2190,
+		Messaging:       messagingTopology2200,
+		HasProvisioning: true,
+		Released:        false,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
@@ -307,6 +310,33 @@ var bundles = map[string]Bundle{
 		KeycloakVersion: "26.4.0",
 	},
 }
+
+// images2190 is the 2.19.0 image set (see the 2.19.0 bundle for where it was verified).
+var images2190 = map[string]Image{
+	"core":                   {Name: "core", Tag: version2190},
+	"auth":                   {Name: "auth", Tag: "1.7.0"},
+	componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
+	ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
+	"opa":                    {Name: "opa", Tag: tagOpa1100Static},
+	"curl":                   {Name: "curl", Tag: tagCurl8160},
+	"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
+	componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
+	componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
+	componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
+	"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+	componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
+	"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+}
+
+// images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0. The other
+// pins stay 2.19.0's until the tagged helm-charts 2.20.0 says otherwise: re-verify them before
+// the release-day flip. A clone, so the two bundles never share a map.
+var images2200 = func() map[string]Image {
+	m := maps.Clone(images2190)
+	m["core"] = Image{Name: "core", Tag: version2200}
+	m[componentFeAdministrator] = Image{Name: imageNameFeAdministrator, Tag: version2200}
+	return m
+}()
 
 // BundleFor returns the bundle for a platform version. An empty version selects the
 // DefaultVersion bundle (the operator's fresh-install default — not necessarily the newest
@@ -901,6 +931,10 @@ const (
 	queueProviderStatusPoll = "provider.status-poll"
 )
 
+// provider.discovery-work is the 2.20.0-new Discovery v2 work queue Core consumes for its run
+// ticks — helm-charts commit 72704da.
+const queueProviderDiscoveryWork = "provider.discovery-work"
+
 // Routing keys used by the czertainly/ilm-exchange→queue bindings (app-level publish
 // keys). They are unchanged by the 2.19.0 exchange rename and repeat once per topology
 // below, so they are named once here.
@@ -1033,6 +1067,55 @@ var messagingTopology2190 = MessagingTopology{
 		{Source: exchangeIlm, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
 		{Source: exchangeIlm, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
 		{Source: exchangeIlm, Destination: queueProviderStatusPoll, RoutingKey: queueProviderStatusPoll},
+		{Source: exchangeIlm, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
+		{Source: exchangeIlm, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
+		{Source: exchangeIlm, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},
+	},
+}
+
+// messagingTopology2200 is the 2.20.0 topology: the 2.19.0 topology plus the
+// provider.discovery-work queue, its binding from the ilm exchange, and Core's read grant on it.
+// The vhost and the exchanges are unchanged, so 2.19.0 -> 2.20.0 is an additive apply, not a
+// messaging migration. A literal rather than a copy of 2.19.0's, because queue Arguments maps
+// must never be shared between topologies.
+var messagingTopology2200 = MessagingTopology{
+	DefaultVirtualHost: "/",
+	Users: []MessagingUser{
+		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
+		// core: as in 2.19.0, plus provider.discovery-work. Without the grant the broker refuses
+		// Core's consumer and Core crash-loops.
+		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.(status-poll|discovery-work)$|^time-quality\.(config-request|results)$`},
+		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
+	},
+	Exchanges: []MessagingExchange{
+		{Name: exchangeIlm, Type: ExchangeTypeDirect, Durable: true},
+		{Name: exchangeIlmProxy, Type: ExchangeTypeTopic, Durable: true},
+	},
+	Queues: []MessagingQueue{
+		{Name: "core", Durable: true},
+		{Name: queueCoreAuditLogs, Durable: true},
+		{Name: queueCoreNotifications, Durable: true},
+		{Name: queueCoreScheduler, Durable: true},
+		{Name: queueCoreActions, Durable: true},
+		{Name: queueCoreValidation, Durable: true},
+		{Name: queueCoreEvents, Durable: true},
+		{Name: queueProviderStatusPoll, Durable: true},
+		{Name: queueProviderDiscoveryWork, Durable: true},
+		{Name: queueTimeQualityConfig, Durable: true, Arguments: latestOnlyQueueArguments()},
+		{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: latestOnlyQueueArguments()},
+		{Name: queueTimeQualityResults, Durable: true},
+	},
+	Bindings: []MessagingBinding{
+		{Source: exchangeIlm, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
+		{Source: exchangeIlm, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
+		{Source: exchangeIlm, Destination: queueCoreActions, RoutingKey: routingKeyAction},
+		{Source: exchangeIlm, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
+		{Source: exchangeIlm, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
+		{Source: exchangeIlm, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
+		{Source: exchangeIlm, Destination: queueProviderStatusPoll, RoutingKey: queueProviderStatusPoll},
+		{Source: exchangeIlm, Destination: queueProviderDiscoveryWork, RoutingKey: queueProviderDiscoveryWork},
 		{Source: exchangeIlm, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
 		{Source: exchangeIlm, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
 		{Source: exchangeIlm, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},

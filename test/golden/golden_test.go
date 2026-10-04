@@ -64,6 +64,8 @@ const (
 	// version2190 pins a variant to the 2.19.0 bundle — the default bundle, pinned here
 	// explicitly so the variant is stable across future default moves.
 	version2190 = "2.19.0"
+	// version2200 pins a variant to the 2.20.0 preview bundle.
+	version2200 = "2.20.0"
 )
 
 // updateGolden, when true (UPDATE_GOLDEN=1 in the environment, or -update on the test
@@ -160,6 +162,7 @@ func variants() []variant {
 		managedDBVariant(),
 		managedDBNoPoolerVariant(),
 		version2190Variant(),
+		version2200Variant(),
 		timeQualityVariant(),
 		coreInstanceIDVariant(),
 		coreStatefulSetVariant(),
@@ -304,6 +307,18 @@ func version2190Variant() variant {
 	spec.Version = version2190
 	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	return variant{name: "version-2190", platform: platformFor(spec)}
+}
+
+// version2200Variant: version2190Variant's CR pinned to the 2.20.0 bundle instead. Its diff
+// against version-2190's golden is the whole workload delta of 2.20.0: the core and
+// frontend-administrator tags and the platform-version annotation, with the wiring unchanged.
+// The bundle's messaging additions render only for a managed broker, which
+// TestResolveManagedMessaging2200IsAdditive covers.
+func version2200Variant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2200
+	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
+	return variant{name: "version-2200", platform: platformFor(spec)}
 }
 
 // timeQualityVariant: the 2.19.0 platform with BOTH time-quality controls on — Core's

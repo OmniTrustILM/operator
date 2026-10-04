@@ -59,6 +59,7 @@ const (
 	testQueueTQResults   = "time-quality.results"
 	testQueueTQConfigReq = "time-quality.config-request"
 	testQueueTQConfig    = "time-quality.config"
+	testQueueDiscovery   = "provider.discovery-work"
 	// The administrator User and its Permission, referenced by the per-user expectation tables
 	// (the frozen name lists spell every name out on purpose and are left literal).
 	testMessagingAdminUser = "ilm-messaging-administrator"
@@ -119,6 +120,7 @@ const (
 	testVersion217 = "2.17.0"
 	testVersion218 = "2.18.0"
 	testVersion219 = "2.19.0"
+	testVersion220 = "2.20.0"
 
 	// resolve_test.go — the per-bundle proxy exchange names (2.19.0 renamed them).
 	testExchangeCzertainlyProxy = "czertainly-proxy"
