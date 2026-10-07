@@ -360,6 +360,38 @@ var _ = Describe("Connector health check", func() {
 		})
 	})
 
+	Context("TestHangingCheckLeavesOtherConnectorsReconciling", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-health-hanging")
+		})
+
+		It("should reconcile another connector while one check waits out its timeout", func() {
+			hanging := newConnector("health-hanging", ns)
+			hanging.Spec.HealthCheck = &otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 60, TimeoutSeconds: 30}
+			connectors.hang(hanging, v2HealthPath)
+			Expect(k8sClient.Create(ctx, hanging)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, hanging)).To(Succeed()) })
+			key := types.NamespacedName{Name: hanging.Name, Namespace: ns}
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, key, &dep)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+			setReplicasReady(key)
+			Eventually(func() []string { return connectors.askedPaths(hanging) }, timeout, interval).
+				Should(ContainElement(v2HealthPath))
+
+			By("creating another connector while the check hangs")
+			other := newConnector("health-other", ns)
+			Expect(k8sClient.Create(ctx, other)).To(Succeed())
+			Eventually(func(g Gomega) {
+				var dep appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: other.Name, Namespace: ns}, &dep)).To(Succeed())
+			}, 5*time.Second, interval).Should(Succeed(), "the other connector waits behind the hanging check")
+		})
+	})
+
 	Context("TestHealthCheckRequeue", func() {
 		reconcile := func(key types.NamespacedName) ctrl.Result {
 			r := &Reconciler{

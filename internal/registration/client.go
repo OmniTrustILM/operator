@@ -106,12 +106,12 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 		// echo request/identity material that would then flow into the Connector's
 		// status condition, a Warning event, and logs (the "never in status/events/
 		// logs" invariant). Drain the body so the connection can be reused, but keep
-		// ONLY the status code on the error (5xx is retryable; other 4xx are not).
+		// ONLY the status code on the error.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return &Error{
 			StatusCode: resp.StatusCode,
 			Message:    fmt.Sprintf("registration failed with status %d", resp.StatusCode),
-			Retryable:  resp.StatusCode >= 500,
+			Retryable:  retryableStatus(resp.StatusCode),
 		}
 	}
 
@@ -134,4 +134,9 @@ func (c *Client) Post(ctx context.Context, path string, body any, result any) er
 	}
 
 	return nil
+}
+
+// retryableStatus marks an answer a later attempt can change: a server error, a timeout or a rate limit.
+func retryableStatus(code int) bool {
+	return code >= http.StatusInternalServerError || code == http.StatusRequestTimeout || code == http.StatusTooManyRequests
 }

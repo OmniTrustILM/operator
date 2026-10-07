@@ -88,7 +88,7 @@ spec:
 
 Registration runs exactly once. The operator skips it while the connector is any phase other than `Running`, and skips it again on every later reconcile once `status.registration.uuid` is set, so a rolling update or a spec change never re-registers an already-known connector.
 
-A failed registration is retried only when retrying can help. A 5xx response or a network error is retryable, so the operator requeues with exponential backoff from 5 seconds up to a 5-minute ceiling. A 4xx response is not: the request itself is wrong, the operator stops retrying, and `Degraded` stays `True` with reason `RegistrationFailed` until you fix the spec.
+A failed registration is retried only when retrying can help. A 5xx, 408 or 429 response or a network error is retryable, so the operator requeues with exponential backoff from 5 seconds up to a 5-minute ceiling. Any other 4xx response is a rejection: the request itself is wrong, the operator stops retrying, and `Degraded` stays `True` with reason `RegistrationFailed` until you fix the spec.
 
 That condition tells you the registration failed and with which HTTP status — and deliberately nothing more. The operator never reads the platform's error body, because that body can echo request and identity material which would then flow into the connector's status, a `Warning` event, and the operator's logs. A transport failure is reported as a generic phrase for the same reason: the request URL carries the platform's address. To find out *why* the platform rejected the registration, read the platform's own logs and audit trail for the corresponding request.
 
@@ -259,7 +259,7 @@ spec:
 `enabled: false` turns the check off and removes the condition.
 
 :::note[NetworkPolicy]
-The check is a request from the operator's pod to the connector's Service. A NetworkPolicy that admits only Core to a connector must also admit the operator. Otherwise `Healthy` stays `Unknown`.
+The check is a request from the operator's pod to the connector's Service. A NetworkPolicy that admits only Core to a connector must also admit the operator. Otherwise `Healthy` stays `Unknown`, and each check holds one of the operator's reconcile workers until it times out.
 :::
 
 ## The shipped samples
@@ -284,7 +284,7 @@ kubectl describe connector <name> -n <namespace>   # phase, conditions, registra
 kubectl get events -n <namespace> --sort-by=.lastTimestamp | tail
 ```
 
-The printed columns are the phase, the ready replica count, the `Healthy` condition, the in-cluster endpoint, and the age. `status` additionally records `currentImage` (the image actually resolved), `configChecksum`, `observedGeneration`, and — once registration succeeds — `registration`.
+The printed columns are the phase, the ready replica count, the `Healthy` condition, the in-cluster endpoint, and the age. `status` additionally records `currentImage` (the image actually resolved), `configChecksum`, `observedGeneration`, and `registration`.
 
 ### Phase
 
@@ -335,7 +335,7 @@ status:
     registeredAt: "2026-08-17T09:14:22Z"
 ```
 
-A `uuid` means the platform accepted the connector. `status` is the platform's own view of it, and it is one of `waitingForApproval`, `connected`, `failed`, or `offline`. The block records the outcome of registration rather than the connector's live health. Live health is what the conditions are for.
+A `uuid` means the platform accepted the connector. `status` is then the platform's own view of it, and it is one of `waitingForApproval`, `connected`, `failed`, or `offline`. `failed` without a `uuid` is a 4xx rejection the operator recorded for the current generation. Only a spec change retries it (annotations don't bump the generation). The block records the outcome of registration rather than the connector's live health. Live health is what the conditions are for.
 
 ## Removing a Connector
 

@@ -157,17 +157,17 @@ spec:
                   timeoutSeconds:
                     default: 10
                     description: |-
-                      TimeoutSeconds bounds one check, fallback included. A long wait delays every Connector on
-                      the one reconcile worker.
+                      TimeoutSeconds bounds one check, fallback included. A long wait holds one of the reconcile
+                      workers that every Connector shares.
                     format: int32
                     maximum: 30
                     minimum: 1
                     type: integer
                 type: object
                 x-kubernetes-validations:
-                - message: healthCheck.timeoutSeconds must be below healthCheck.periodSeconds
+                - message: healthCheck.timeoutSeconds must be at most healthCheck.periodSeconds
                   rule: '!has(self.timeoutSeconds) || !has(self.periodSeconds) ||
-                    self.timeoutSeconds < self.periodSeconds'
+                    self.timeoutSeconds <= self.periodSeconds'
               image:
                 description: Image defines the container image configuration.
                 properties:

@@ -31,6 +31,7 @@ type fakeConnectors struct {
 type fakeAnswer struct {
 	status int
 	body   string
+	hang   bool
 }
 
 func newFakeConnectors() *fakeConnectors {
@@ -46,6 +47,10 @@ func (f *fakeConnectors) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
+		return
+	}
+	if a.hang {
+		<-r.Context().Done()
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -68,6 +73,13 @@ func (f *fakeConnectors) answer(conn *otilmv1alpha1.Connector, path string, stat
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.answers[serviceHost(conn)+path] = fakeAnswer{status: status, body: body}
+}
+
+// hang leaves the connector Service's requests at path unanswered until the operator gives up.
+func (f *fakeConnectors) hang(conn *otilmv1alpha1.Connector, path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers[serviceHost(conn)+path] = fakeAnswer{hang: true}
 }
 
 // askedPaths lists the paths asked of the connector's Service, oldest first.

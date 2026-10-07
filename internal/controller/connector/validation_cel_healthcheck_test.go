@@ -43,8 +43,8 @@ var _ = Describe("Connector healthCheck validation", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring(wantInError))
 		},
-		Entry("a timeout at the period", otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 10, TimeoutSeconds: 10},
-			"healthCheck.timeoutSeconds must be below healthCheck.periodSeconds"),
+		Entry("a timeout above the period", otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 20, TimeoutSeconds: 21},
+			"healthCheck.timeoutSeconds must be at most healthCheck.periodSeconds"),
 		Entry("a period under 10 seconds", otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 5, TimeoutSeconds: 1}, "periodSeconds"),
 		Entry("a timeout over 30 seconds", otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 60, TimeoutSeconds: 31}, "timeoutSeconds"),
 		Entry("a relative path", otilmv1alpha1.HealthCheckSpec{Path: "v2/health"}, pathRuleMessage),
@@ -55,19 +55,18 @@ var _ = Describe("Connector healthCheck validation", func() {
 		Entry("a path over 1024 bytes", otilmv1alpha1.HealthCheckSpec{Path: "/" + strings.Repeat("a", 1024)}, "1024"),
 	)
 
-	It("accepts a path with a percent-escape", func() {
-		conn := newConnector("cel-healthcheck", ns)
-		conn.Spec.HealthCheck = &otilmv1alpha1.HealthCheckSpec{Path: "/health%2Fliveness"}
+	DescribeTable("accepts",
+		func(spec otilmv1alpha1.HealthCheckSpec) {
+			conn := newConnector("cel-healthcheck", ns)
+			conn.Spec.HealthCheck = &spec
 
-		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
-	})
-
-	It("accepts a block that sets every field", func() {
-		conn := newConnector("cel-healthcheck", ns)
-		conn.Spec.HealthCheck = &otilmv1alpha1.HealthCheckSpec{Path: "/v1/health", PeriodSeconds: 60, TimeoutSeconds: 30}
-
-		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
-	})
+			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
+		},
+		Entry("a path with a percent-escape", otilmv1alpha1.HealthCheckSpec{Path: "/health%2Fliveness"}),
+		Entry("a block that sets every field", otilmv1alpha1.HealthCheckSpec{Path: "/v1/health", PeriodSeconds: 60, TimeoutSeconds: 30}),
+		Entry("the shortest period alone", otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 10}),
+		Entry("the longest timeout alone", otilmv1alpha1.HealthCheckSpec{TimeoutSeconds: 30}),
+	)
 
 	It("defaults an empty block to what an absent block resolves to", func() {
 		conn := newConnector("cel-healthcheck", ns)

@@ -88,7 +88,7 @@ type RegistrationSpec struct {
 
 // HealthCheckSpec configures the Healthy condition, which covers the connector's dependencies
 // beyond readiness.
-// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || !has(self.periodSeconds) || self.timeoutSeconds < self.periodSeconds",message="healthCheck.timeoutSeconds must be below healthCheck.periodSeconds"
+// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || !has(self.periodSeconds) || self.timeoutSeconds <= self.periodSeconds",message="healthCheck.timeoutSeconds must be at most healthCheck.periodSeconds"
 type HealthCheckSpec struct {
 	// Setting enabled to false stops the check and removes the Healthy condition.
 	// +kubebuilder:default=true
@@ -109,8 +109,8 @@ type HealthCheckSpec struct {
 	// +optional
 	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
 
-	// TimeoutSeconds bounds one check, fallback included. A long wait delays every Connector on
-	// the one reconcile worker.
+	// TimeoutSeconds bounds one check, fallback included. A long wait holds one of the reconcile
+	// workers that every Connector shares.
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=30

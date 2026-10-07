@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -57,6 +58,9 @@ const (
 	condHealthy         = "Healthy"
 	reasonNotRunning    = "NotRunning"
 )
+
+// maxConcurrentReconciles lets other Connectors reconcile while a health check waits out its timeout.
+const maxConcurrentReconciles = 4
 
 // Reconciler reconciles a Connector object.
 type Reconciler struct {
@@ -617,7 +621,7 @@ func (r *Reconciler) handleRegistrationError(ctx context.Context, req ctrl.Reque
 	r.Recorder.Eventf(conn, corev1.EventTypeWarning, monitoring.ReasonRegistrationFailed, "Registration failed: %s", platformErr.Message)
 
 	if platformErr.Retryable {
-		// 5xx / network error: requeue with exponential backoff (5s -> 5m).
+		// A transient failure: requeue with exponential backoff (5s -> 5m).
 		logger.Info("registration failed (retryable), will retry", "error", err)
 		if statusErr := r.Status().Update(ctx, conn); statusErr != nil {
 			logger.Error(statusErr, "failed to update status after registration failure")
@@ -627,7 +631,6 @@ func (r *Reconciler) handleRegistrationError(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{RequeueAfter: backoff}, nil
 	}
 
-	// 4xx: don't requeue, manual intervention needed.
 	logger.Info("registration failed (non-retryable), manual intervention needed", "error", err)
 	conn.Status.Registration = &otilmv1alpha1.RegistrationStatus{Status: otilmv1alpha1.RegistrationStatusFailed}
 	return ctrl.Result{}, nil
@@ -792,6 +795,7 @@ func registrationBackoff(conn *otilmv1alpha1.Connector) time.Duration {
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&otilmv1alpha1.Connector{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
