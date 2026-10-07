@@ -25,6 +25,9 @@ spec:
       path: /v1/health
       periodSeconds: 10
       failureThreshold: 45
+  # The v1 path alone spares each check a /v2/health request.
+  healthCheck:
+    path: /v1/health
   env:
     - name: SERVER_PORT
       value: "8080"

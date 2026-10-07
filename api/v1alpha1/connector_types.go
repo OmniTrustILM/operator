@@ -86,6 +86,38 @@ type RegistrationSpec struct {
 	CustomAttributes []RegistrationAttribute `json:"customAttributes,omitempty"`
 }
 
+// HealthCheckSpec configures the Healthy condition, which covers the connector's dependencies
+// beyond readiness.
+// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || !has(self.periodSeconds) || self.timeoutSeconds < self.periodSeconds",message="healthCheck.timeoutSeconds must be below healthCheck.periodSeconds"
+type HealthCheckSpec struct {
+	// Setting enabled to false stops the check and removes the Healthy condition.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Path names the health endpoint on the connector's Service. The default asks /v2/health
+	// and falls back to /v1/health.
+	// +kubebuilder:validation:MaxLength=1024
+	// +kubebuilder:validation:XValidation:rule="self.matches('^/([^%[:cntrl:]]|%[[:xdigit:]]{2})*$')",message="healthCheck.path must be a URL path: a leading /, printable characters, and % only in two-hex-digit escapes"
+	// +optional
+	Path string `json:"path,omitempty"`
+
+	// PeriodSeconds sets the wait before a Running connector's next check. Any other reconcile
+	// checks it too.
+	// +kubebuilder:default=30
+	// +kubebuilder:validation:Minimum=10
+	// +optional
+	PeriodSeconds int32 `json:"periodSeconds,omitempty"`
+
+	// TimeoutSeconds bounds one check, fallback included. A long wait delays every Connector on
+	// the one reconcile worker.
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=30
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+
 // RegistrationStatusValue represents the registration state with the platform.
 type RegistrationStatusValue string
 
@@ -153,6 +185,10 @@ type ConnectorSpec struct {
 	// Probes defines the probe configuration for the connector.
 	// +optional
 	Probes *ProbeSpec `json:"probes,omitempty"`
+
+	// HealthCheck sets how the operator checks the connector's dependencies beyond readiness.
+	// +optional
+	HealthCheck *HealthCheckSpec `json:"healthCheck,omitempty"`
 
 	// Env defines environment variables for the connector.
 	// +optional
@@ -270,6 +306,7 @@ type ConnectorStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
+// +kubebuilder:printcolumn:name="Healthy",type=string,JSONPath=`.status.conditions[?(@.type=="Healthy")].status`
 // +kubebuilder:printcolumn:name="Endpoint",type=string,JSONPath=`.status.endpoint`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=conn

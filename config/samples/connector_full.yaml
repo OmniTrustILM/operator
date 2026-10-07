@@ -61,6 +61,13 @@ spec:
       periodSeconds: 5
       failureThreshold: 30
 
+  # This connector serves only the v1 interface. An unset path would try /v2/health first.
+  healthCheck:
+    enabled: true
+    path: /v1/health
+    periodSeconds: 30
+    timeoutSeconds: 10
+
   env:
     - name: SERVER_PORT
       value: "8443"

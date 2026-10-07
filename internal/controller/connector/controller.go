@@ -11,7 +11,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,6 +37,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	connbuilder "github.com/OmniTrustILM/operator/internal/builder/connector"
 	"github.com/OmniTrustILM/operator/internal/checksum"
+	"github.com/OmniTrustILM/operator/internal/connectorhealth"
 	"github.com/OmniTrustILM/operator/internal/monitoring"
 	"github.com/OmniTrustILM/operator/internal/registration"
 )
@@ -51,6 +54,8 @@ const (
 	condAvailable       = "Available"
 	condProgressing     = "Progressing"
 	condDegraded        = "Degraded"
+	condHealthy         = "Healthy"
+	reasonNotRunning    = "NotRunning"
 )
 
 // Reconciler reconciles a Connector object.
@@ -58,6 +63,9 @@ type Reconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// HealthClient replaces connectorhealth.NewHTTPClient for the health checks when set.
+	HealthClient *http.Client
 }
 
 // The Connector reconciler creates Deployments/Services/ServiceAccounts via
@@ -98,6 +106,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// ---------- Step 3: Set phase Deploying / Progressing ----------
+	rejected := rejectedRegistration(conn)
 	previousPhase := r.setInitialPhase(conn)
 
 	// ---------- Step 4: Compute checksums ----------
@@ -119,9 +128,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	r.reconcileHealthCondition(ctx, conn)
 
 	// ---------- Step 7: Platform registration ----------
-	if result, err := r.handleRegistration(ctx, req, conn); err != nil || result.RequeueAfter > 0 {
+	if result, err := r.handleRegistration(ctx, req, conn, rejected); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
 
@@ -129,7 +139,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	conn.Status.ObservedGeneration = conn.Generation
 	conn.Status.Replicas = currentDeploy.Status.Replicas
 	conn.Status.ReadyReplicas = currentDeploy.Status.ReadyReplicas
-	conn.Status.Endpoint = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
+	conn.Status.Endpoint = connbuilder.ServiceEndpoint(conn)
 	conn.Status.CurrentImage, _ = common.ResolveImage(nil, "", otilmv1alpha1.ImageSpec{}, conn.Spec.Image)
 	conn.Status.ConfigChecksum = combinedChecksum
 
@@ -149,7 +159,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: requeueDelay}, nil
 	}
 
-	return ctrl.Result{}, nil
+	return healthCheckRequeue(conn), nil
 }
 
 // fetchConnector retrieves the Connector CR. Returns nil conn if the resource is
@@ -540,8 +550,8 @@ func (r *Reconciler) setPhaseForZeroReady(conn *otilmv1alpha1.Connector, desired
 }
 
 // handleRegistration performs platform registration when the Connector is
-// Running and has a registration spec.
-func (r *Reconciler) handleRegistration(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector) (ctrl.Result, error) {
+// Running and has a registration spec. A rejection of the current spec stands until the spec changes.
+func (r *Reconciler) handleRegistration(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector, rejected *metav1.Condition) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	if conn.Status.Phase != otilmv1alpha1.ConnectorPhaseRunning || conn.Spec.Registration == nil {
@@ -552,9 +562,12 @@ func (r *Reconciler) handleRegistration(ctx context.Context, req ctrl.Request, c
 	if !needsRegistration {
 		return ctrl.Result{}, nil
 	}
+	if rejected != nil {
+		meta.SetStatusCondition(&conn.Status.Conditions, *rejected)
+		return ctrl.Result{}, nil
+	}
 
-	endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", conn.Name, conn.Namespace, conn.Spec.Service.Port)
-	regReq := registration.BuildRequest(endpoint, conn.Spec.Registration)
+	regReq := registration.BuildRequest(connbuilder.ServiceEndpoint(conn), conn.Spec.Registration)
 	platformClient := registration.NewClient(conn.Spec.Registration.PlatformURL)
 
 	regResp, err := registration.Register(ctx, platformClient, regReq)
@@ -579,6 +592,7 @@ func (r *Reconciler) handleRegistration(ctx context.Context, req ctrl.Request, c
 // and determining whether to requeue.
 func (r *Reconciler) handleRegistrationError(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector, err error) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	conn.Status.Registration = nil
 
 	var platformErr *registration.Error
 	if !errors.As(err, &platformErr) {
@@ -615,7 +629,67 @@ func (r *Reconciler) handleRegistrationError(ctx context.Context, req ctrl.Reque
 
 	// 4xx: don't requeue, manual intervention needed.
 	logger.Info("registration failed (non-retryable), manual intervention needed", "error", err)
+	conn.Status.Registration = &otilmv1alpha1.RegistrationStatus{Status: otilmv1alpha1.RegistrationStatusFailed}
 	return ctrl.Result{}, nil
+}
+
+// rejectedRegistration is the RegistrationFailed condition of a 4xx answer to the current
+// generation. setPhaseRunning overwrites Degraded, so the condition is read before it.
+func rejectedRegistration(conn *otilmv1alpha1.Connector) *metav1.Condition {
+	if conn.Status.Registration == nil || conn.Status.Registration.Status != otilmv1alpha1.RegistrationStatusFailed {
+		return nil
+	}
+	degraded := meta.FindStatusCondition(conn.Status.Conditions, condDegraded)
+	if degraded == nil || degraded.Status != metav1.ConditionTrue ||
+		degraded.Reason != monitoring.ReasonRegistrationFailed || degraded.ObservedGeneration != conn.Generation {
+		return nil
+	}
+	return degraded.DeepCopy()
+}
+
+// reconcileHealthCondition removes the Healthy condition for a disabled check. Otherwise it sets
+// the condition from a check of a Running connector, or to Unknown with reason NotRunning.
+func (r *Reconciler) reconcileHealthCondition(ctx context.Context, conn *otilmv1alpha1.Connector) {
+	healthCheck := connbuilder.ResolveHealthCheck(conn)
+	if !healthCheck.Enabled {
+		meta.RemoveStatusCondition(&conn.Status.Conditions, condHealthy)
+		return
+	}
+	verdict := connectorhealth.Verdict{
+		Status:  metav1.ConditionUnknown,
+		Reason:  reasonNotRunning,
+		Message: fmt.Sprintf("connector phase is %s", conn.Status.Phase),
+	}
+	if conn.Status.Phase == otilmv1alpha1.ConnectorPhaseRunning {
+		checkCtx, cancel := context.WithTimeout(ctx, healthCheck.Timeout)
+		defer cancel()
+		verdict = connectorhealth.Check(checkCtx, r.healthClient(), connbuilder.ServiceEndpoint(conn), healthCheck.Paths)
+	}
+	meta.SetStatusCondition(&conn.Status.Conditions, metav1.Condition{
+		Type:               condHealthy,
+		Status:             verdict.Status,
+		ObservedGeneration: conn.Generation,
+		Reason:             verdict.Reason,
+		Message:            verdict.Message,
+	})
+}
+
+func healthCheckRequeue(conn *otilmv1alpha1.Connector) ctrl.Result {
+	healthCheck := connbuilder.ResolveHealthCheck(conn)
+	if !healthCheck.Enabled {
+		return ctrl.Result{}
+	}
+	return ctrl.Result{RequeueAfter: healthCheck.Period}
+}
+
+// defaultHealthClient is the production client, shared by every Reconciler without a HealthClient.
+var defaultHealthClient = sync.OnceValue(connectorhealth.NewHTTPClient)
+
+func (r *Reconciler) healthClient() *http.Client {
+	if r.HealthClient != nil {
+		return r.HealthClient
+	}
+	return defaultHealthClient()
 }
 
 // emitPhaseTransitionEvents emits Kubernetes events for notable phase transitions.
@@ -679,6 +753,7 @@ func (r *Reconciler) computeRefChecksums(
 					Message:            fmt.Sprintf(msgRefNotFound, refKind, name),
 				})
 				r.Recorder.Eventf(conn, corev1.EventTypeWarning, missingReason, msgRefNotFound, refKind, name)
+				r.reconcileHealthCondition(ctx, conn)
 				if statusErr := r.Status().Update(ctx, conn); statusErr != nil {
 					logger.Error(statusErr, "failed to update status for missing "+strings.ToLower(refKind))
 				}

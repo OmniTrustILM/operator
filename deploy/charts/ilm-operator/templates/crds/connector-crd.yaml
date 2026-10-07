@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
+    - jsonPath: .status.conditions[?(@.type=="Healthy")].status
+      name: Healthy
+      type: string
     - jsonPath: .status.endpoint
       name: Endpoint
       type: string
@@ -123,6 +126,47 @@ spec:
                   - name
                   type: object
                 type: array
+              healthCheck:
+                description: HealthCheck sets how the operator checks the connector's
+                  dependencies beyond readiness.
+                properties:
+                  enabled:
+                    default: true
+                    description: Setting enabled to false stops the check and removes
+                      the Healthy condition.
+                    type: boolean
+                  path:
+                    description: |-
+                      Path names the health endpoint on the connector's Service. The default asks /v2/health
+                      and falls back to /v1/health.
+                    maxLength: 1024
+                    type: string
+                    x-kubernetes-validations:
+                    - message: 'healthCheck.path must be a URL path: a leading /,
+                        printable characters, and % only in two-hex-digit escapes'
+                      rule: self.matches('^/([^%[:cntrl:]]|%[[:xdigit:]]{2})*$')
+                  periodSeconds:
+                    default: 30
+                    description: |-
+                      PeriodSeconds sets the wait before a Running connector's next check. Any other reconcile
+                      checks it too.
+                    format: int32
+                    minimum: 10
+                    type: integer
+                  timeoutSeconds:
+                    default: 10
+                    description: |-
+                      TimeoutSeconds bounds one check, fallback included. A long wait delays every Connector on
+                      the one reconcile worker.
+                    format: int32
+                    maximum: 30
+                    minimum: 1
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: healthCheck.timeoutSeconds must be below healthCheck.periodSeconds
+                  rule: '!has(self.timeoutSeconds) || !has(self.periodSeconds) ||
+                    self.timeoutSeconds < self.periodSeconds'
               image:
                 description: Image defines the container image configuration.
                 properties:
