@@ -576,6 +576,10 @@ func TestBundle2200(t *testing.T) {
 	assert.Equal(t, b19.RabbitMQVersion, b.RabbitMQVersion)
 	assert.Equal(t, b19.CNPGVersion, b.CNPGVersion)
 	assert.Equal(t, b19.KeycloakVersion, b.KeycloakVersion)
+
+	assert.Equal(t, int32(180), b.CoreStartupFailureThreshold,
+		"2.20.0 migrations can outlast the default startup budget, so this bundle raises it (about 30 minutes, as the chart)")
+	assert.Zero(t, b19.CoreStartupFailureThreshold, "older bundles keep the default, so an operator upgrade does not roll their Core")
 }
 
 // TestCoreReadGrantCoversItsQueues checks Core's read regex by behaviour, not by spelling: the

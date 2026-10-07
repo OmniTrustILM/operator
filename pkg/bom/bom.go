@@ -178,6 +178,13 @@ type Bundle struct {
 	RabbitMQVersion string
 	CNPGVersion     string
 	KeycloakVersion string
+
+	// CoreStartupFailureThreshold is Core's startup-probe failure budget (in 10-second periods)
+	// for this platform version; 0 keeps the operator's default. A version whose migrations can
+	// run long raises it: Core migrates before it answers the probe, and a pod killed
+	// mid-migration rolls the migration back and starts over. Older bundles leave it 0, so
+	// upgrading the operator does not change their pod template and roll Core.
+	CoreStartupFailureThreshold int32
 }
 
 // Lookup returns the bundle's image coordinates for a component name. The wiring
@@ -273,6 +280,9 @@ var bundles = map[string]Bundle{
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: "26.6.3",
+		// About 30 minutes: V202608291000 rewrites discovery_certificate under an exclusive
+		// lock and indexes it, which can outlast the default on a large installation.
+		CoreStartupFailureThreshold: 180,
 	},
 	version2170: {
 		// 2.17.0 is the pre-rebrand CZERTAINLY release. Its images are republished under the

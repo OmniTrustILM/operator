@@ -175,7 +175,7 @@ func ResolveCore(p *otilmv1alpha1.Platform) common.Component {
 		SidecarsFirst: true,
 		Volumes:       []corev1.Volume{ephemeralVolume()},
 		VolumeMounts:  []corev1.VolumeMount{{Name: ephemeralVolumeName, MountPath: "/tmp"}},
-		Probes:        coreProbes(),
+		Probes:        coreProbes(b),
 		// Read-only root filesystem: ENABLED. Core is a Spring Boot (JVM) service; its
 		// only writable path is the in-memory /tmp ephemeral volume (the JVM honours
 		// java.io.tmpdir=/tmp). Validated end-to-end against the live core image on Kind
@@ -399,8 +399,9 @@ func coreSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.Secr
 
 // coreProbes returns Core's readiness and startup probes against the HTTP service
 // port. Readiness hits the readiness endpoint (gating Service traffic); startup hits
-// the liveness endpoint with a long failure budget (45 × 10s) so a slow boot — notably
-// the Flyway schema migration — is tolerated before liveness/traffic gating begins.
+// the liveness endpoint with a long failure budget (45 × 10s, or the bundle's
+// CoreStartupFailureThreshold when it sets one) so a slow boot — notably the Flyway schema
+// migration — is tolerated before liveness/traffic gating begins.
 //
 // Core intentionally has NO liveness probe, consistent with every other platform
 // component (httpProbes omits liveness fleet-wide) and with the chart, which ships
@@ -411,7 +412,7 @@ func coreSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.Secr
 // into a hard restart — and, mid-migration through a pooled connection, into schema
 // corruption. Readiness already removes a wedged pod from traffic without killing it;
 // startup already covers a slow boot. Liveness here is pure downside.
-func coreProbes() common.Probes {
+func coreProbes(b bom.Bundle) common.Probes {
 	port := intstr.FromInt32(depServicePort)
 	httpGet := func(path string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: path, Port: port}}}
@@ -422,6 +423,9 @@ func coreProbes() common.Probes {
 	startup.InitialDelaySeconds = 15
 	startup.PeriodSeconds = 10
 	startup.FailureThreshold = 45
+	if b.CoreStartupFailureThreshold > 0 {
+		startup.FailureThreshold = b.CoreStartupFailureThreshold
+	}
 	return common.Probes{Readiness: readiness, Startup: startup}
 }
 

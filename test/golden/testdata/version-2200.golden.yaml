@@ -471,7 +471,7 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         startupProbe:
-          failureThreshold: 45
+          failureThreshold: 180
           httpGet:
             path: /api/v1/health/liveness
             port: 8080

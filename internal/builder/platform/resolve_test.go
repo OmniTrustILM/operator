@@ -1704,6 +1704,34 @@ func TestResolveCoreProbes(t *testing.T) {
 	assert.Equal(t, int32(45), c.Probes.Startup.FailureThreshold)
 }
 
+// TestResolveCoreStartupBudgetFollowsTheBundle pins Core's startup budget per platform version.
+// 2.20.0 migrations can outlast 465 s on a large installation, and a pod killed mid-migration
+// rolls it back and starts over, so that bundle carries a larger budget. Older bundles keep 45,
+// so upgrading the operator does not change their pod template and roll Core.
+func TestResolveCoreStartupBudgetFollowsTheBundle(t *testing.T) {
+	for version, want := range map[string]int32{
+		testVersion217: 45,
+		testVersion218: 45,
+		testVersion219: 45,
+		testVersion220: 180,
+	} {
+		p := basePlatform()
+		p.Spec.Version = version
+		c := ResolveCore(p)
+		require.NotNil(t, c.Probes.Startup, version)
+		assert.Equal(t, want, c.Probes.Startup.FailureThreshold, "startup failureThreshold on %s", version)
+		assert.Equal(t, int32(10), c.Probes.Startup.PeriodSeconds, version)
+	}
+
+	// A larger database than the bundle planned for is the user's spec.core.probes.startup to set.
+	p := basePlatform()
+	p.Spec.Version = testVersion220
+	p.Spec.Core.Probes = &otilmv1alpha1.ProbeSpec{Startup: &otilmv1alpha1.ProbeConfig{
+		Path: "/api/v1/health/liveness", PeriodSeconds: 10, FailureThreshold: 360,
+	}}
+	assert.Equal(t, int32(360), ResolveCore(p).Probes.Startup.FailureThreshold, "the CR's startup probe wins over the bundle's budget")
+}
+
 func TestResolveCoreNoSecretRefsStillNoSecretEnv(t *testing.T) {
 	// Extends the existing no-secret-refs test: with all optional secret refs
 	// cleared, SecretEnv stays empty.
