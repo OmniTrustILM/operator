@@ -269,8 +269,7 @@ var bundles = map[string]Bundle{
 	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
 	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
 	// queue (see messagingTopology2200) and the core and frontend-administrator 2.20.0 images.
-	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default
-	// and the chart sets none of them.
+	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default.
 	version2200: {
 		Components:      images2200,
 		Wiring:          wiring2190,
@@ -338,9 +337,8 @@ var images2190 = map[string]Image{
 	"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
 }
 
-// images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0. The other
-// pins stay 2.19.0's until the tagged helm-charts 2.20.0 says otherwise: re-verify them before
-// the release-day flip. A clone, so the two bundles never share a map.
+// images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0; every
+// other component keeps its 2.19.0 release. A clone, so the two bundles never share a map.
 var images2200 = func() map[string]Image {
 	m := maps.Clone(images2190)
 	m["core"] = Image{Name: "core", Tag: version2200}
@@ -942,7 +940,7 @@ const (
 )
 
 // provider.discovery-work is the 2.20.0-new Discovery v2 work queue Core consumes for its run
-// ticks — helm-charts commit 72704da.
+// ticks (Core's DiscoveryWorkJmsEndpointConfig; queue and routing key in its application.yml).
 const queueProviderDiscoveryWork = "provider.discovery-work"
 
 // Routing keys used by the czertainly/ilm-exchange→queue bindings (app-level publish

@@ -530,8 +530,7 @@ func TestBundle2200(t *testing.T) {
 		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
 	}, b.Components)
 
-	// Every variable Core 2.20.0 adds has an in-image default and the chart sets none of them,
-	// so the wiring is 2.19.0's.
+	// Every variable Core 2.20.0 adds has an in-image default, so the wiring is 2.19.0's.
 	b19, _ := BundleFor(testVersion2190)
 	assert.Equal(t, b19.Wiring, b.Wiring)
 
