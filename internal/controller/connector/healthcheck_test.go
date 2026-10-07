@@ -333,6 +333,33 @@ var _ = Describe("Connector health check", func() {
 		})
 	})
 
+	Context("TestSteadyHealthWaitsForThePeriod", func() {
+		var ns string
+
+		BeforeEach(func() {
+			ns = createTestNamespace("test-health-steady")
+		})
+
+		It("should ask a connector with an unchanged report again only after its period", func() {
+			conn := newConnector("health-steady", ns)
+			connectors.answer(conn, v2HealthPath, http.StatusServiceUnavailable, v2KeystoreDown)
+			key := createRunning(conn)
+			expectHealthy(key, metav1.ConditionFalse, "Down")
+
+			By("waiting for the checks to settle")
+			var settled int
+			Eventually(func(g Gomega) {
+				before := len(connectors.askedPaths(conn))
+				g.Consistently(func() int { return len(connectors.askedPaths(conn)) }, time.Second, interval).
+					Should(Equal(before))
+				settled = before
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func() int { return len(connectors.askedPaths(conn)) }, 3*time.Second, interval).
+				Should(Equal(settled), "an unchanged report leaves the status as it is, so the next check waits for the period")
+		})
+	})
+
 	Context("TestHealthCheckRequeue", func() {
 		reconcile := func(key types.NamespacedName) ctrl.Result {
 			r := &Reconciler{

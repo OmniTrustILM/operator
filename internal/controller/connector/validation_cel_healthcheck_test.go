@@ -21,7 +21,7 @@ import (
 )
 
 // pathRuleMessage is the message of the path's admission rule.
-const pathRuleMessage = "healthCheck.path must be a URL path: a leading /, printable characters, and % only in two-hex-digit escapes"
+const pathRuleMessage = "healthCheck.path must be a URL path: a leading /, printable characters other than ? and #, and % only in two-hex-digit escapes"
 
 // These specs run the healthCheck schema through apiserver admission. Each rejection names the
 // offending field or rule.
@@ -50,6 +50,8 @@ var _ = Describe("Connector healthCheck validation", func() {
 		Entry("a relative path", otilmv1alpha1.HealthCheckSpec{Path: "v2/health"}, pathRuleMessage),
 		Entry("a path with a broken escape", otilmv1alpha1.HealthCheckSpec{Path: "/health%zz"}, pathRuleMessage),
 		Entry("a path with a control character", otilmv1alpha1.HealthCheckSpec{Path: "/health\x01"}, pathRuleMessage),
+		Entry("a path with a query", otilmv1alpha1.HealthCheckSpec{Path: "/health?verbose=true"}, pathRuleMessage),
+		Entry("a path with a fragment", otilmv1alpha1.HealthCheckSpec{Path: "/health#details"}, pathRuleMessage),
 		Entry("a path over 1024 bytes", otilmv1alpha1.HealthCheckSpec{Path: "/" + strings.Repeat("a", 1024)}, "1024"),
 	)
 

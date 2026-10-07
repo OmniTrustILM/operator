@@ -142,8 +142,9 @@ spec:
                     type: string
                     x-kubernetes-validations:
                     - message: 'healthCheck.path must be a URL path: a leading /,
-                        printable characters, and % only in two-hex-digit escapes'
-                      rule: self.matches('^/([^%[:cntrl:]]|%[[:xdigit:]]{2})*$')
+                        printable characters other than ? and #, and % only in two-hex-digit
+                        escapes'
+                      rule: self.matches('^/([^%?#[:cntrl:]]|%[[:xdigit:]]{2})*$')
                   periodSeconds:
                     default: 30
                     description: |-

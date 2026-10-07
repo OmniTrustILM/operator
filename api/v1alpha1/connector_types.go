@@ -98,7 +98,7 @@ type HealthCheckSpec struct {
 	// Path names the health endpoint on the connector's Service. The default asks /v2/health
 	// and falls back to /v1/health.
 	// +kubebuilder:validation:MaxLength=1024
-	// +kubebuilder:validation:XValidation:rule="self.matches('^/([^%[:cntrl:]]|%[[:xdigit:]]{2})*$')",message="healthCheck.path must be a URL path: a leading /, printable characters, and % only in two-hex-digit escapes"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^/([^%?#[:cntrl:]]|%[[:xdigit:]]{2})*$')",message="healthCheck.path must be a URL path: a leading /, printable characters other than ? and #, and % only in two-hex-digit escapes"
 	// +optional
 	Path string `json:"path,omitempty"`
 
