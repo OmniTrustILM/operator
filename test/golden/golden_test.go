@@ -310,9 +310,9 @@ func version2190Variant() variant {
 }
 
 // version2200Variant: version2190Variant's CR pinned to the 2.20.0 bundle instead. Its diff
-// against version-2190's golden is the whole workload delta of 2.20.0: the core and
-// frontend-administrator tags, the platform-version annotation and Core's larger startup
-// budget, with the wiring unchanged.
+// against version-2190's golden is the whole workload delta of 2.20.0: the core,
+// frontend-administrator and scheduler tags, the platform-version annotation and Core's larger
+// startup budget, with the wiring unchanged.
 // The bundle's messaging additions render only for a managed broker, which
 // TestResolveManagedMessaging2200IsAdditive covers.
 func version2200Variant() variant {

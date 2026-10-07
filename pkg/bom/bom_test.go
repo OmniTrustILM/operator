@@ -521,7 +521,7 @@ func TestBundle2200(t *testing.T) {
 		"proxy":                {Name: "proxy", Tag: "1.0.0"},
 		"opa":                  {Name: "opa", Tag: "1.10.0-static"},
 		"curl":                 {Name: "curl", Tag: "8.16.0"},
-		"scheduler":            {Name: "scheduler", Tag: "1.1.1"},
+		"scheduler":            {Name: "scheduler", Tag: "1.2.0"},
 		"fe-administrator":     {Name: "frontend-administrator", Tag: testVersion2200},
 		"utils":                {Name: "utils-service", Tag: "1.0.2"},
 		"api-gateway":          {Name: "kong", Tag: "3.9.1"},
