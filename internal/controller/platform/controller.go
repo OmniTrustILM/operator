@@ -1087,10 +1087,10 @@ func (r *Reconciler) handleDeletion(ctx context.Context, p *otilmv1alpha1.Platfo
 //   - Retain (default) → leave the CloudNativePG Cluster (and its Pooler and Database) and
 //     their data intact; record a Warning Event naming the retained database so the operator
 //     is visible (NO connection coordinate in the message). The operator deletes nothing.
-//   - Delete → delete the Cluster (CloudNativePG garbage-collects its PVCs), the Pooler, and
-//     the Database, then proceed. A NotFound, or a kind the cluster does not serve, is
-//     ignored; any other delete error is returned so the finalizer keeps the Platform and the
-//     teardown is retried.
+//   - Delete → delete the Database, the Cluster (CloudNativePG garbage-collects its PVCs), and
+//     the Pooler, then proceed. A NotFound, or a kind the cluster does not serve, is ignored;
+//     any other delete error is returned so the finalizer keeps the Platform and the teardown
+//     is retried.
 //
 // It is a no-op for an external database (the operator provisions nothing to tear down).
 func (r *Reconciler) handleManagedDatabaseDeletion(ctx context.Context, p *otilmv1alpha1.Platform, policy otilmv1alpha1.PlatformDeletionPolicy) error {

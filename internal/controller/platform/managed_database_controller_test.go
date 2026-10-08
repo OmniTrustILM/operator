@@ -187,6 +187,38 @@ func TestHandleDeletionManagedDeleteRemovesAppDatabase(t *testing.T) {
 	}
 }
 
+// TestHandleDeletionManagedDeletesAppDatabaseFirst: the Database references the Cluster, so it
+// is deleted first. Once its deletion has started its finalizer can only be released, never
+// added back, so it cannot outlive the Cluster.
+func TestHandleDeletionManagedDeletesAppDatabaseFirst(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform *otilmv1alpha1.Platform
+	}{
+		{name: "Keycloak managed", platform: managedDBWithManagedKeycloakCR()},
+		{name: "Keycloak no longer managed", platform: managedDBPlatformCR()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var deleted []string
+			recordDeletes := interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					deleted = append(deleted, obj.GetObjectKind().GroupVersionKind().Kind)
+					return c.Delete(ctx, obj, opts...)
+				},
+			}
+			s := managedDBScheme(t)
+			c := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.platform).WithInterceptorFuncs(recordDeletes).Build()
+			r := &Reconciler{Client: c, Scheme: s}
+
+			require.NoError(t, r.handleManagedDatabaseDeletion(context.Background(), tt.platform,
+				otilmv1alpha1.PlatformDeletionPolicyDelete))
+
+			assert.Equal(t, []string{"Database", "Cluster", "Pooler"}, deleted)
+		})
+	}
+}
+
 // TestHandleDeletionManagedDeleteWithoutDatabaseKind: on a CloudNativePG that does not serve
 // the Database kind, the API answers its delete with a no-match error. Delete must still reclaim
 // the Cluster rather than fail on a kind that cannot have any objects, which would hold the

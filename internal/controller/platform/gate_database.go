@@ -133,13 +133,22 @@ func (r *Reconciler) databaseGate(p *otilmv1alpha1.Platform) managedInfraGate {
 }
 
 // databaseDeletionGate is databaseGate with the Database that keeps Keycloak's schema always in
-// the teardown set: managed objects are never pruned, so one rendered while Keycloak was managed
-// must still be reclaimed by Delete after Keycloak stops being managed.
+// the teardown set, and first. Managed objects are never pruned, so one rendered while Keycloak
+// was managed must still be reclaimed by Delete after Keycloak stops being managed. It references
+// the Cluster, so it is deleted before it: once its deletion has started, its finalizer can only
+// be released, never added back.
 func (r *Reconciler) databaseDeletionGate(p *otilmv1alpha1.Platform) managedInfraGate {
 	g := r.databaseGate(p)
-	if g.managed && !platformbuilder.KeycloakManaged(p) {
-		g.objects = append(g.objects, platformbuilder.ManagedAppDatabase(p))
+	if !g.managed {
+		return g
 	}
+	objs := []client.Object{platformbuilder.ManagedAppDatabase(p)}
+	for _, obj := range g.objects {
+		if obj.GetObjectKind().GroupVersionKind() != platformbuilder.ManagedAppDatabaseGVK() {
+			objs = append(objs, obj)
+		}
+	}
+	g.objects = objs
 	return g
 }
 
