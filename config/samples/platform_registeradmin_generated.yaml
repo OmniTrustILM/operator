@@ -16,7 +16,7 @@
 #   - The issuer: when issuerRef is omitted, the operator defaults to the platform
 #     internal CA — it reuses the edge's internal CA when edge.tls.source=internal,
 #     otherwise it provisions a dedicated self-signed admin CA so generated works
-#     standalone. Set issuerRef to sign from your own Issuer/ClusterIssuer instead.
+#     standalone. Set issuerRef to sign from your own issuer instead.
 #
 # SECRETS YOU MUST CREATE FIRST (only DB + messaging; the admin cert Secret is
 # created BY cert-manager — you do not create it):

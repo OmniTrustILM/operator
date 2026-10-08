@@ -786,7 +786,6 @@ kind: Ingress
 metadata:
   annotations:
     cert-manager.io/issuer: ca-issuer
-    cert-manager.io/issuer-kind: Issuer
   labels:
     app.kubernetes.io/component: ilm-platform-core
     app.kubernetes.io/instance: ilm
