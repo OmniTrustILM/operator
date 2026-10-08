@@ -82,6 +82,18 @@ func TestPostHTTPErrors(t *testing.T) {
 			body:       `{"error":"forbidden"}`,
 			retryable:  false,
 		},
+		{
+			name:       "408 retryable",
+			statusCode: http.StatusRequestTimeout,
+			body:       `{"error":"request timeout"}`,
+			retryable:  true,
+		},
+		{
+			name:       "429 retryable",
+			statusCode: http.StatusTooManyRequests,
+			body:       `{"error":"too many requests"}`,
+			retryable:  true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -49,7 +49,7 @@ var _ = Describe("Connector samples", func() {
 		}
 	})
 
-	It("the OT PKI and timestamp-formatting samples carry the coordinates they document", func() {
+	It("the OT PKI, timestamp-formatting and full samples carry the coordinates they document", func() {
 		// These two ship PRIVATE-registry images and, for OT PKI, a secret-backed pod env. The
 		// schema check above cannot see any of that: a sample that dropped its pullSecrets, or
 		// named the wrong probe path, or wired the login password key as an inline value, is
@@ -83,6 +83,11 @@ var _ = Describe("Connector samples", func() {
 		key := keys[0].(map[string]interface{})
 		Expect(key["secretKey"]).To(Equal("login_password_key"))
 		Expect(key["envVar"]).To(Equal("OTPKI_LOGIN_PASSWORD_KEY"))
+
+		full, err := decodeConnectorSample(filepath.Join(root, "connector_full.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(nestedString(full, "spec", "healthCheck", "path")).To(Equal("/v1/health"),
+			"the EJBCA NG connector serves its health report on the v1 interface only")
 
 		tsf, err := decodeConnectorSample(filepath.Join(root, "connector_timestamp_formatting.yaml"))
 		Expect(err).NotTo(HaveOccurred())

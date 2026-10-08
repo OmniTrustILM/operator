@@ -383,6 +383,32 @@ spec:
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
+		It("should read the connector's v1 health report into Healthy=True", func() {
+			By("waiting for the check to fall back from /v2/health to the connector's /v1/health")
+			Eventually(func(g Gomega) {
+				status, reason := getConnectorCondition(connName, "Healthy")
+				g.Expect(status).To(Equal("True"), "Healthy should be True, got %s (%s)", status, reason)
+				g.Expect(reason).To(Equal("Up"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should report no health report on a path the connector does not serve", func() {
+			By("pointing the check at /v2/health alone")
+			cmd := exec.Command("kubectl", "patch", "connector", connName,
+				"-n", testNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"healthCheck":{"path":"/v2/health"}}}`,
+			)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch the Connector's healthCheck")
+
+			Eventually(func(g Gomega) {
+				status, reason := getConnectorCondition(connName, "Healthy")
+				g.Expect(status).To(Equal("Unknown"), "Healthy should be Unknown, got %s (%s)", status, reason)
+				g.Expect(reason).To(Equal("NoHealthReport"))
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
 		It("should update the Connector and reflect the change in the Deployment", func() {
 			By("patching the Connector to change an env var")
 			patch := `{"spec":{"env":[{"name":"SERVER_PORT","value":"8080"},{"name":"LOG_LEVEL","value":"DEBUG"},{"name":"E2E_TEST_VAR","value":"updated"}]}}`
@@ -690,6 +716,23 @@ func getConnectorPhase(name string) string {
 		return ""
 	}
 	return strings.TrimSpace(output)
+}
+
+// getConnectorCondition returns the status and reason of one Connector condition.
+func getConnectorCondition(name, conditionType string) (status, reason string) {
+	cmd := exec.Command("kubectl", "get", "connector", name,
+		"-n", testNamespace,
+		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].status} {.status.conditions[?(@.type=="%s")].reason}`, conditionType, conditionType),
+	)
+	output, err := utils.Run(cmd)
+	if err != nil {
+		return "", ""
+	}
+	fields := strings.Fields(output)
+	if len(fields) != 2 {
+		return "", ""
+	}
+	return fields[0], fields[1]
 }
 
 // getConnectorConfigChecksum returns the current configChecksum from the Connector status.
