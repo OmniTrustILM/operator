@@ -345,6 +345,15 @@ func TestResolveEdgeCertManagerShimAnnotations(t *testing.T) {
 			},
 		},
 		{
+			name: "external issuer with its own kind",
+			tls:  issuerRefTLS(testCorpCA, testExternalIssuerKind, testExternalIssuerGroup),
+			want: map[string]string{
+				certManagerIssuerAnnotation:      testCorpCA,
+				certManagerIssuerKindAnnotation:  testExternalIssuerKind,
+				certManagerIssuerGroupAnnotation: testExternalIssuerGroup,
+			},
+		},
+		{
 			name: "external issuer with kind unset",
 			tls:  issuerRefTLS(testVaultIssuer, "", testExternalIssuerGroup),
 			want: map[string]string{

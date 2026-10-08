@@ -724,7 +724,7 @@ The worked shape is [`platform_core_statefulset.yaml`](https://github.com/OmniTr
 |---|---|---|---|
 | `internal` (default) | a self-signed CA created by the operator, through cert-manager | yes | — |
 | `letsEncrypt` | ACME; needs `letsEncrypt.email`, and `environment` is `production` by default | yes | [`platform_edge_letsencrypt.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_edge_letsencrypt.yaml) |
-| `issuerRef` | any existing `Issuer` or `ClusterIssuer` | yes | [`platform_edge_issuerref.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_edge_issuerref.yaml) |
+| `issuerRef` | any existing `Issuer` or `ClusterIssuer`, or an external issuer named by its own `kind` and `group` | yes | [`platform_edge_issuerref.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_edge_issuerref.yaml) |
 | `secret` | a bring-your-own TLS Secret | **no** | [`platform_edge_byo_secret.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_edge_byo_secret.yaml) |
 
 For the three cert-manager sources, `tls.secretRef` is optional and only renames the Secret cert-manager populates, which otherwise defaults to `ilm-ingress-tls`. For `source: secret` it is required and names the Secret you created. With `source: internal` the CA the operator generates lands in the `ca-keypair` Secret in the platform's namespace — that is the certificate to add to a trust store, and the same CA that signs a generated administrator certificate.

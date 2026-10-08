@@ -14,6 +14,7 @@ const (
 	testVaultIssuer         = "vault-issuer"
 	testCorpCA              = "corp-ca"
 	testExternalIssuerGroup = "issuer.example.com"
+	testExternalIssuerKind  = "ExampleClusterIssuer"
 	testGatewayAPIGroup     = "gateway.networking.k8s.io"
 
 	// Common identifiers/hosts shared by multiple test files.

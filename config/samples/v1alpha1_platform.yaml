@@ -30,12 +30,12 @@ spec:
     host: ilm.example.com
     tls:
       # PREREQUISITE: source "internal" (self-signed CA), "letsEncrypt" (ACME), and
-      # "issuerRef" (any existing cert-manager Issuer/ClusterIssuer) all require
+      # "issuerRef" (any existing cert-manager issuer) all require
       # cert-manager (cert-manager.io) to be installed in the cluster; the operator
       # detects it and, if absent, skips the edge and reports
       # EdgeReady=False/CertManagerNotInstalled (the rest of the platform still
       # converges). Use source "secret" to bring your own TLS Secret — that needs
       # no cert-manager. The operator never installs cert-manager itself.
       source: internal
-      # source: issuerRef            # any cert-manager Issuer/ClusterIssuer mints the leaf
-      # issuerRef: { name: vault-issuer, kind: ClusterIssuer }  # kind: Issuer (default) | ClusterIssuer
+      # source: issuerRef            # any cert-manager issuer mints the leaf
+      # issuerRef: { name: vault-issuer, kind: ClusterIssuer }  # kind: Issuer (default) | ClusterIssuer | an external issuer's kind (with its group)

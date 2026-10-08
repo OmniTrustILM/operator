@@ -33,6 +33,13 @@ const (
 	testDuplicateRejection = "Duplicate value"
 	// testQueueArgExpires is the standard queue-argument name for message expiration.
 	testQueueArgExpires = "x-expires"
+	// testExternalIssuer* reference an external cert-manager issuer (AWS Private CA) whose
+	// kind is its own rather than Issuer or ClusterIssuer.
+	testExternalIssuerName  = "aws-pca"
+	testExternalIssuerKind  = "AWSPCAClusterIssuer"
+	testExternalIssuerGroup = "awspca.cert-manager.io"
+	// testIssuerKindRejection is the issuerRef kind/group rule's message.
+	testIssuerKindRejection = "issuerRef.kind must be Issuer or ClusterIssuer unless issuerRef.group names an external issuer"
 )
 
 // These specs exercise the field-level CEL (XValidation) on the Platform CRD at
@@ -277,6 +284,72 @@ var _ = Describe("Platform CEL validation", func() {
 			ns := freshNS("cel-tls-secret-good")
 			p := platformIn(ns)
 			p.Spec.Edge = newEdge(&otilmv1alpha1.EdgeTLSSpec{Source: "secret", SecretRef: stringPtr("my-tls")})
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	Context("issuerRef kind", func() {
+		issuerRefEdge := func(ref *otilmv1alpha1.CertManagerIssuerRef) *otilmv1alpha1.EdgeSpec {
+			return &otilmv1alpha1.EdgeSpec{
+				Enabled: true, Type: "ingress", Host: testEdgeHost,
+				TLS: &otilmv1alpha1.EdgeTLSSpec{Source: "issuerRef", IssuerRef: ref},
+			}
+		}
+		externalIssuerRef := func() *otilmv1alpha1.CertManagerIssuerRef {
+			return &otilmv1alpha1.CertManagerIssuerRef{Name: testExternalIssuerName, Kind: testExternalIssuerKind, Group: testExternalIssuerGroup}
+		}
+		// withEmptyIssuerRefField sends the edge issuerRef with one field explicitly empty on
+		// the wire: the typed client omits an empty string, and the CRD default would fill it.
+		withEmptyIssuerRefField := func(ns string, ref *otilmv1alpha1.CertManagerIssuerRef, field string) *unstructured.Unstructured {
+			p := platformIn(ns)
+			p.Spec.Edge = issuerRefEdge(ref)
+			m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(p)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedField(m, "", "spec", "edge", "tls", "issuerRef", field)).To(Succeed())
+			u := &unstructured.Unstructured{Object: m}
+			u.SetGroupVersionKind(otilmv1alpha1.GroupVersion.WithKind("Platform"))
+			return u
+		}
+		It("accepts an external issuer's own kind on the edge", func() {
+			ns := freshNS("cel-ir-external")
+			p := platformIn(ns)
+			p.Spec.Edge = issuerRefEdge(externalIssuerRef())
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts an external issuer's own kind for a generated admin certificate", func() {
+			ns := freshNS("cel-ir-admin-external")
+			p := platformIn(ns)
+			p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{
+				Enabled:     true,
+				Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: ptr(true), Source: "generated", IssuerRef: externalIssuerRef()},
+			}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("rejects a kind other than Issuer or ClusterIssuer in the cert-manager.io group", func() {
+			ns := freshNS("cel-ir-bad-kind")
+			p := platformIn(ns)
+			p.Spec.Edge = issuerRefEdge(&otilmv1alpha1.CertManagerIssuerRef{Name: testExternalIssuerName, Kind: testExternalIssuerKind})
+			err := k8sClient.Create(ctx, p)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(testIssuerKindRejection))
+		})
+		It("rejects an external kind with an empty group", func() {
+			ns := freshNS("cel-ir-empty-group")
+			ref := &otilmv1alpha1.CertManagerIssuerRef{Name: testExternalIssuerName, Kind: testExternalIssuerKind}
+			err := k8sClient.Create(ctx, withEmptyIssuerRefField(ns, ref, "group"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(testIssuerKindRejection))
+		})
+		It("rejects an empty kind for an external group", func() {
+			ns := freshNS("cel-ir-empty-kind")
+			err := k8sClient.Create(ctx, withEmptyIssuerRefField(ns, externalIssuerRef(), "kind"))
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("should be at least 1 chars long"))
+		})
+		It("accepts a cert-manager ClusterIssuer", func() {
+			ns := freshNS("cel-ir-cluster")
+			p := platformIn(ns)
+			p.Spec.Edge = issuerRefEdge(&otilmv1alpha1.CertManagerIssuerRef{Name: "corp-ca", Kind: "ClusterIssuer"})
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
 		})
 	})
