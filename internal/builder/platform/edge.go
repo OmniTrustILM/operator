@@ -88,12 +88,11 @@ const (
 	caPrivateKeyAlgorithm = "RSA"
 	caPrivateKeySize      = int64(4096)
 
-	// certManagerIssuerAnnotation / certManagerIssuerKindAnnotation are the
-	// ingress-shim annotations stamped for internal/letsEncrypt so cert-manager
-	// provisions the leaf cert into the Ingress tls Secret. The shim also honors
-	// certManagerClusterIssuerAnnotation (for a ClusterIssuer instead of a namespaced
-	// Issuer) and certManagerIssuerGroupAnnotation (for an external issuer group);
-	// these are used by the issuerRef source. See the cert-manager ingress-shim docs:
+	// certManagerIssuerAnnotation / certManagerClusterIssuerAnnotation name the
+	// namespaced Issuer / ClusterIssuer the cert-manager ingress/gateway shim uses to
+	// mint the edge leaf cert. An external issuer is named by
+	// certManagerIssuerAnnotation plus certManagerIssuerKindAnnotation and
+	// certManagerIssuerGroupAnnotation. See the cert-manager ingress-shim docs:
 	// https://cert-manager.io/docs/usage/ingress/#supported-annotations
 	certManagerIssuerAnnotation        = "cert-manager.io/issuer"
 	certManagerClusterIssuerAnnotation = "cert-manager.io/cluster-issuer"
@@ -142,21 +141,14 @@ func isCertManagedSource(source string) bool {
 //
 //   - internal / letsEncrypt: the operator-created CA/ACME issuer named ca-issuer
 //     (Issuer kind).
-//   - issuerRef: the caller's existing Issuer/ClusterIssuer. A namespaced Issuer
-//     uses the cert-manager.io/issuer key; a ClusterIssuer uses the
-//     cert-manager.io/cluster-issuer key. issuer-kind is always set; issuer-group
-//     is set only when the group is non-default (e.g. an external issuer), since
-//     the shim defaults the group to cert-manager.io.
+//   - issuerRef: the caller's existing issuer (see issuerRefShimAnnotations).
 //   - secret (bring-your-own) and any unknown source: no shim annotations — the
 //     edge references the caller-provided Secret directly.
 func certManagerShimAnnotations(tls *otilmv1alpha1.EdgeTLSSpec) map[string]string {
 	switch edgeSource(tls) {
 	case edgeSourceInternal, edgeSourceLetsEncrypt:
 		// The operator-created ca-issuer (a namespaced Issuer) mints the leaf.
-		return map[string]string{
-			certManagerIssuerAnnotation:     caIssuerName,
-			certManagerIssuerKindAnnotation: kindIssuer,
-		}
+		return map[string]string{certManagerIssuerAnnotation: caIssuerName}
 	case edgeSourceIssuerRef:
 		ref := tls.IssuerRef
 		if ref == nil || ref.Name == "" {
@@ -164,27 +156,33 @@ func certManagerShimAnnotations(tls *otilmv1alpha1.EdgeTLSSpec) map[string]strin
 			// source); render no shim rather than a dangling annotation.
 			return nil
 		}
-		kind := ref.Kind
-		if kind == "" {
-			kind = kindIssuer
-		}
-		ann := map[string]string{certManagerIssuerKindAnnotation: kind}
-		// A ClusterIssuer is named via cert-manager.io/cluster-issuer; a namespaced
-		// Issuer via cert-manager.io/issuer.
-		if kind == kindClusterIssuer {
-			ann[certManagerClusterIssuerAnnotation] = ref.Name
-		} else {
-			ann[certManagerIssuerAnnotation] = ref.Name
-		}
-		// Only emit issuer-group for a non-default (external) group; the shim
-		// defaults it to cert-manager.io.
-		if ref.Group != "" && ref.Group != certManagerDefaultGroup {
-			ann[certManagerIssuerGroupAnnotation] = ref.Group
-		}
-		return ann
+		return issuerRefShimAnnotations(ref)
 	default:
 		// secret (BYO) and unknown sources carry no cert-manager wiring.
 		return nil
+	}
+}
+
+// issuerRefShimAnnotations returns the shim annotations naming the caller's issuer.
+// The shim rejects cluster-issuer combined with issuer-kind or issuer-group, so an
+// external issuer (a non-default group) is named by issuer with its kind and group,
+// a ClusterIssuer by cluster-issuer alone, and an Issuer by issuer alone.
+func issuerRefShimAnnotations(ref *otilmv1alpha1.CertManagerIssuerRef) map[string]string {
+	kind := ref.Kind
+	if kind == "" {
+		kind = kindIssuer
+	}
+	switch {
+	case ref.Group != "" && ref.Group != certManagerDefaultGroup:
+		return map[string]string{
+			certManagerIssuerAnnotation:      ref.Name,
+			certManagerIssuerKindAnnotation:  kind,
+			certManagerIssuerGroupAnnotation: ref.Group,
+		}
+	case kind == kindClusterIssuer:
+		return map[string]string{certManagerClusterIssuerAnnotation: ref.Name}
+	default:
+		return map[string]string{certManagerIssuerAnnotation: ref.Name}
 	}
 }
 
@@ -398,8 +396,8 @@ func resolveIngressEdge(p *otilmv1alpha1.Platform) []client.Object {
 
 // certManagerObjectsForSource returns the cert-manager objects for the edge's TLS
 // source, shared by the Ingress and Gateway API paths (the gateway-shim honors the
-// same Issuer/issuer-kind annotations the ingress-shim does, so the issuer objects
-// are identical). Returns nil for the bring-your-own ("secret") source.
+// same issuer annotations the ingress-shim does, so the issuer objects are
+// identical). Returns nil for the bring-your-own ("secret") source.
 func certManagerObjectsForSource(p *otilmv1alpha1.Platform) []client.Object {
 	switch edgeSource(p.Spec.Edge.TLS) {
 	case edgeSourceInternal:
@@ -697,11 +695,10 @@ func buildHTTPRoute(p *otilmv1alpha1.Platform, parent *otilmv1alpha1.GatewayPare
 // buildOwnedGateway renders the operator-owned Gateway (gateway.networking.k8s.io/v1)
 // for the gatewayAPI edge with no parentRef. It has an HTTP listener (:80) and an
 // HTTPS listener (:443, mode Terminate, certificateRef -> the edge TLS Secret), both
-// scoped to same-namespace routes and pinned to the platform host (PlatformHost) when set. For the
-// internal/letsEncrypt TLS sources it carries cert-manager's gateway-shim annotation
-// (the same cert-manager.io/issuer + issuer-kind keys the Ingress uses), so
-// cert-manager provisions the leaf cert into the certificateRef Secret. The
-// gatewayClassName comes from gatewayAPI.gatewayClassName.
+// scoped to same-namespace routes and pinned to the platform host (PlatformHost) when set. For a
+// cert-managed TLS source it carries the same shim annotations as the Ingress
+// (certManagerShimAnnotations), so cert-manager provisions the leaf cert into the
+// certificateRef Secret. The gatewayClassName comes from gatewayAPI.gatewayClassName.
 //
 // SECURITY: no cert/key material is placed here; the HTTPS listener references the
 // serving Secret by name only (cert-manager-populated or caller-provided).

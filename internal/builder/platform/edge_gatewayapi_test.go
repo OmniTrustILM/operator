@@ -93,7 +93,6 @@ func TestResolveGatewayAPIOwnedInternal(t *testing.T) {
 
 	// gateway-shim annotations present for the internal source.
 	assert.Equal(t, caIssuerName, gw.GetAnnotations()[certManagerIssuerAnnotation])
-	assert.Equal(t, kindIssuer, gw.GetAnnotations()[certManagerIssuerKindAnnotation])
 
 	// HTTP listener: :80, Same-namespace routes, host pinned.
 	http := firstListener(t, gw, gatewayListenerHTTP)
@@ -158,7 +157,6 @@ func TestResolveGatewayAPIOwnedLetsEncrypt(t *testing.T) {
 	// gateway-shim annotations still present (letsEncrypt lets cert-manager mint).
 	gw := findUnstructured(t, objs, kindGateway, ownedGatewayName)
 	assert.Equal(t, caIssuerName, gw.GetAnnotations()[certManagerIssuerAnnotation])
-	assert.Equal(t, kindIssuer, gw.GetAnnotations()[certManagerIssuerKindAnnotation])
 
 	// Exactly the ACME issuer, no Certificate (the shim mints the leaf).
 	assert.Equal(t, 0, countUnstructured(objs, kindCertificate))
@@ -184,25 +182,12 @@ func TestResolveGatewayAPIOwnedIssuerRef(t *testing.T) {
 
 		gw := findUnstructured(t, objs, kindGateway, ownedGatewayName)
 		assert.Equal(t, "vault-issuer", gw.GetAnnotations()[certManagerIssuerAnnotation])
-		assert.Equal(t, kindIssuer, gw.GetAnnotations()[certManagerIssuerKindAnnotation])
 		_, hasCluster := gw.GetAnnotations()[certManagerClusterIssuerAnnotation]
 		assert.False(t, hasCluster, "namespaced Issuer must not carry the cluster-issuer annotation")
 		// HTTPS listener still references the edge TLS Secret by name (cert-manager-populated).
 		https := firstListener(t, gw, gatewayListenerHTTPS)
 		ref := https["tls"].(map[string]interface{})["certificateRefs"].([]interface{})[0].(map[string]interface{})
 		assert.Equal(t, defaultEdgeTLSSecret, ref["name"])
-	})
-
-	t.Run("ClusterIssuer", func(t *testing.T) {
-		objs := ResolveEdge(ownedGatewayPlatform(&otilmv1alpha1.EdgeTLSSpec{
-			Source:    edgeSourceIssuerRef,
-			IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{Name: testCorpCA, Kind: kindClusterIssuer},
-		}))
-		gw := findUnstructured(t, objs, kindGateway, ownedGatewayName)
-		assert.Equal(t, testCorpCA, gw.GetAnnotations()[certManagerClusterIssuerAnnotation])
-		assert.Equal(t, kindClusterIssuer, gw.GetAnnotations()[certManagerIssuerKindAnnotation])
-		_, hasNamespaced := gw.GetAnnotations()[certManagerIssuerAnnotation]
-		assert.False(t, hasNamespaced, "ClusterIssuer must use cluster-issuer, not the namespaced issuer key")
 	})
 }
 

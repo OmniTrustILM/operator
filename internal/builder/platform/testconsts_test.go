@@ -11,9 +11,10 @@ package platform
 // single source of truth.
 const (
 	// Cert-manager / Gateway API coordinates referenced in the edge tests.
-	testVaultIssuer     = "vault-issuer"
-	testCorpCA          = "corp-ca"
-	testGatewayAPIGroup = "gateway.networking.k8s.io"
+	testVaultIssuer         = "vault-issuer"
+	testCorpCA              = "corp-ca"
+	testExternalIssuerGroup = "issuer.example.com"
+	testGatewayAPIGroup     = "gateway.networking.k8s.io"
 
 	// Common identifiers/hosts shared by multiple test files.
 	testEdgeHost     = "ilm.example.com"

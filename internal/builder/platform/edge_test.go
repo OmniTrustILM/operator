@@ -142,7 +142,6 @@ func TestResolveEdgeInternalCertManagerChain(t *testing.T) {
 	// internal source: ingress-shim annotations point at the CA issuer.
 	ing := findIngress(t, objs)
 	assert.Equal(t, caIssuerName, ing.Annotations[certManagerIssuerAnnotation])
-	assert.Equal(t, kindIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
 
 	// selfsigned-issuer: selfSigned: {}.
 	ssi := findUnstructured(t, objs, kindIssuer, selfSignedIssuerName)
@@ -244,8 +243,8 @@ func TestResolveEdgeSecretBYO(t *testing.T) {
 
 func TestResolveEdgeIssuerRefNamespacedIssuer(t *testing.T) {
 	// source=issuerRef with the default Kind (Issuer): the Ingress carries the
-	// cert-manager.io/issuer annotation naming the caller's Issuer, plus issuer-kind
-	// Issuer. No operator-created cert-manager objects are rendered.
+	// cert-manager.io/issuer annotation naming the caller's Issuer. No
+	// operator-created cert-manager objects are rendered.
 	objs := ResolveEdge(edgePlatform(&otilmv1alpha1.EdgeTLSSpec{
 		Source:    edgeSourceIssuerRef,
 		IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{Name: testVaultIssuer, Kind: kindIssuer, Group: certManagerDefaultGroup},
@@ -259,7 +258,6 @@ func TestResolveEdgeIssuerRefNamespacedIssuer(t *testing.T) {
 	ing := findIngress(t, objs)
 	// Namespaced Issuer -> cert-manager.io/issuer naming the caller's issuer.
 	assert.Equal(t, testVaultIssuer, ing.Annotations[certManagerIssuerAnnotation])
-	assert.Equal(t, kindIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
 	// No cluster-issuer key for a namespaced Issuer.
 	_, hasCluster := ing.Annotations[certManagerClusterIssuerAnnotation]
 	assert.False(t, hasCluster, "namespaced Issuer must not carry the cluster-issuer annotation")
@@ -270,49 +268,116 @@ func TestResolveEdgeIssuerRefNamespacedIssuer(t *testing.T) {
 	assert.Equal(t, defaultEdgeTLSSecret, ing.Spec.TLS[0].SecretName)
 }
 
-func TestResolveEdgeIssuerRefClusterIssuer(t *testing.T) {
-	// source=issuerRef with Kind=ClusterIssuer: the Ingress carries the
-	// cert-manager.io/cluster-issuer annotation (NOT the namespaced issuer key).
-	objs := ResolveEdge(edgePlatform(&otilmv1alpha1.EdgeTLSSpec{
+// issuerRefTLS returns an issuerRef TLS source naming the given issuer.
+func issuerRefTLS(name, kind, group string) *otilmv1alpha1.EdgeTLSSpec {
+	return &otilmv1alpha1.EdgeTLSSpec{
 		Source:    edgeSourceIssuerRef,
-		IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{Name: testCorpCA, Kind: kindClusterIssuer},
-	}))
-
-	assert.Equal(t, 0, countUnstructured(objs, kindCertificate))
-	assert.Equal(t, 0, countUnstructured(objs, kindIssuer))
-
-	ing := findIngress(t, objs)
-	assert.Equal(t, testCorpCA, ing.Annotations[certManagerClusterIssuerAnnotation])
-	assert.Equal(t, kindClusterIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
-	// The namespaced issuer key must be absent for a ClusterIssuer.
-	_, hasNamespaced := ing.Annotations[certManagerIssuerAnnotation]
-	assert.False(t, hasNamespaced, "ClusterIssuer must use cluster-issuer, not the namespaced issuer key")
+		IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{Name: name, Kind: kind, Group: group},
+	}
 }
 
-func TestResolveEdgeIssuerRefExternalGroup(t *testing.T) {
-	// A non-default issuer group (an external issuer, e.g. awspca.cert-manager.io)
-	// emits the issuer-group annotation; the default group does not (tested above).
-	objs := ResolveEdge(edgePlatform(&otilmv1alpha1.EdgeTLSSpec{
-		Source: edgeSourceIssuerRef,
-		IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{
-			Name: "aws-pca", Kind: kindClusterIssuer, Group: "awspca.cert-manager.io",
+// certManagerAnnotations returns the cert-manager.io/ annotations in ann.
+func certManagerAnnotations(ann map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range ann {
+		if strings.HasPrefix(k, "cert-manager.io/") {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// TestResolveEdgeCertManagerShimAnnotations pins the exact shim annotations on the
+// Ingress and the operator-owned Gateway. cert-manager rejects cluster-issuer combined
+// with issuer-kind or issuer-group, so only an external issuer carries kind and group.
+func TestResolveEdgeCertManagerShimAnnotations(t *testing.T) {
+	tests := []struct {
+		name string
+		tls  *otilmv1alpha1.EdgeTLSSpec
+		want map[string]string
+	}{
+		{
+			name: "internal",
+			tls:  &otilmv1alpha1.EdgeTLSSpec{Source: edgeSourceInternal},
+			want: map[string]string{certManagerIssuerAnnotation: caIssuerName},
 		},
-	}))
-	ing := findIngress(t, objs)
-	assert.Equal(t, "awspca.cert-manager.io", ing.Annotations[certManagerIssuerGroupAnnotation])
-	assert.Equal(t, "aws-pca", ing.Annotations[certManagerClusterIssuerAnnotation])
-	assert.Equal(t, kindClusterIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
-}
+		{
+			name: "letsEncrypt",
+			tls:  &otilmv1alpha1.EdgeTLSSpec{Source: edgeSourceLetsEncrypt},
+			want: map[string]string{certManagerIssuerAnnotation: caIssuerName},
+		},
+		{
+			name: "Issuer",
+			tls:  issuerRefTLS(testVaultIssuer, kindIssuer, certManagerDefaultGroup),
+			want: map[string]string{certManagerIssuerAnnotation: testVaultIssuer},
+		},
+		{
+			name: "Issuer with kind and group unset",
+			tls:  issuerRefTLS(testVaultIssuer, "", ""),
+			want: map[string]string{certManagerIssuerAnnotation: testVaultIssuer},
+		},
+		{
+			name: "ClusterIssuer",
+			tls:  issuerRefTLS(testCorpCA, kindClusterIssuer, certManagerDefaultGroup),
+			want: map[string]string{certManagerClusterIssuerAnnotation: testCorpCA},
+		},
+		{
+			name: "ClusterIssuer with group unset",
+			tls:  issuerRefTLS(testCorpCA, kindClusterIssuer, ""),
+			want: map[string]string{certManagerClusterIssuerAnnotation: testCorpCA},
+		},
+		{
+			name: "external Issuer",
+			tls:  issuerRefTLS(testVaultIssuer, kindIssuer, testExternalIssuerGroup),
+			want: map[string]string{
+				certManagerIssuerAnnotation:      testVaultIssuer,
+				certManagerIssuerKindAnnotation:  kindIssuer,
+				certManagerIssuerGroupAnnotation: testExternalIssuerGroup,
+			},
+		},
+		{
+			name: "external ClusterIssuer",
+			tls:  issuerRefTLS(testCorpCA, kindClusterIssuer, testExternalIssuerGroup),
+			want: map[string]string{
+				certManagerIssuerAnnotation:      testCorpCA,
+				certManagerIssuerKindAnnotation:  kindClusterIssuer,
+				certManagerIssuerGroupAnnotation: testExternalIssuerGroup,
+			},
+		},
+		{
+			name: "external issuer with kind unset",
+			tls:  issuerRefTLS(testVaultIssuer, "", testExternalIssuerGroup),
+			want: map[string]string{
+				certManagerIssuerAnnotation:      testVaultIssuer,
+				certManagerIssuerKindAnnotation:  kindIssuer,
+				certManagerIssuerGroupAnnotation: testExternalIssuerGroup,
+			},
+		},
+		{
+			name: "issuerRef missing",
+			tls:  &otilmv1alpha1.EdgeTLSSpec{Source: edgeSourceIssuerRef},
+			want: map[string]string{},
+		},
+		{
+			name: "issuerRef without a name",
+			tls:  issuerRefTLS("", kindClusterIssuer, certManagerDefaultGroup),
+			want: map[string]string{},
+		},
+		{
+			name: "bring-your-own secret",
+			tls:  &otilmv1alpha1.EdgeTLSSpec{Source: edgeSourceSecret, SecretRef: strPtr(testBYOTLSSecret)},
+			want: map[string]string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ing := findIngress(t, ResolveEdge(edgePlatform(tt.tls)))
+			assert.Equal(t, tt.want, certManagerAnnotations(ing.Annotations), "Ingress")
 
-func TestResolveEdgeIssuerRefDefaultKindIsIssuer(t *testing.T) {
-	// Kind unset behaves as the CRD default (Issuer): the namespaced issuer key.
-	objs := ResolveEdge(edgePlatform(&otilmv1alpha1.EdgeTLSSpec{
-		Source:    edgeSourceIssuerRef,
-		IssuerRef: &otilmv1alpha1.CertManagerIssuerRef{Name: testVaultIssuer},
-	}))
-	ing := findIngress(t, objs)
-	assert.Equal(t, testVaultIssuer, ing.Annotations[certManagerIssuerAnnotation])
-	assert.Equal(t, kindIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
+			gw := findUnstructured(t, ResolveEdge(ownedGatewayPlatform(tt.tls)), kindGateway, ownedGatewayName)
+			assert.Equal(t, tt.want, certManagerAnnotations(gw.GetAnnotations()), "Gateway")
+		})
+	}
 }
 
 func TestResolveEdgeIssuerRefSecretRefOverride(t *testing.T) {
@@ -341,7 +406,7 @@ func TestResolveEdgeIssuerRefCallerCannotOverrideShim(t *testing.T) {
 	objs := ResolveEdge(p)
 	ing := findIngress(t, objs)
 	assert.Equal(t, testVaultIssuer, ing.Annotations[certManagerIssuerAnnotation], "issuer key is operator-owned")
-	assert.Equal(t, kindIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
+	assert.NotContains(t, ing.Annotations, certManagerIssuerKindAnnotation, "caller issuer-kind must be dropped")
 	_, hasCluster := ing.Annotations[certManagerClusterIssuerAnnotation]
 	assert.False(t, hasCluster, "caller cluster-issuer must be dropped (namespaced Issuer)")
 	_, hasGroup := ing.Annotations[certManagerIssuerGroupAnnotation]
@@ -374,7 +439,7 @@ func TestResolveEdgeCallerCannotOverrideCertManagerAnnotations(t *testing.T) {
 	objs := ResolveEdge(p)
 	ing := findIngress(t, objs)
 	assert.Equal(t, caIssuerName, ing.Annotations[certManagerIssuerAnnotation], "cert-manager issuer annotation is operator-owned")
-	assert.Equal(t, kindIssuer, ing.Annotations[certManagerIssuerKindAnnotation])
+	assert.NotContains(t, ing.Annotations, certManagerIssuerKindAnnotation, "caller issuer-kind must be dropped")
 }
 
 // TestResolveEdgeNoSecretLeakage asserts that no rendered edge object embeds
