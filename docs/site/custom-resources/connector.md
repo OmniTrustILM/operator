@@ -16,7 +16,7 @@ Registration is separate and optional. Deploying a connector makes it *reachable
 
 ## A minimal Connector
 
-`spec.image` and `spec.service` are the only two blocks the CRD requires. The probes and the environment below are optional; this sample sets them because its image serves health on a legacy path:
+`spec.image` and `spec.service` are the only two blocks the CRD requires. The probes, the health check and the environment below are optional. This sample sets them because its image serves health on a legacy path:
 
 ```yaml
 apiVersion: otilm.com/v1alpha1
@@ -46,6 +46,9 @@ spec:
       path: /v1/health
       periodSeconds: 10
       failureThreshold: 45
+  # The v1 path alone spares each check a /v2/health request.
+  healthCheck:
+    path: /v1/health
   env:
     - name: SERVER_PORT
       value: "8080"
@@ -60,8 +63,8 @@ Apply it and watch the phase:
 ```bash
 kubectl apply -f connector.yaml
 kubectl get connectors -n default
-# NAME                       PHASE     READY   ENDPOINT                                                    AGE
-# x509-compliance-provider   Running   1       http://x509-compliance-provider.default.svc.cluster.local:8080   …
+# NAME                       PHASE     READY   HEALTHY   ENDPOINT                                                         AGE
+# x509-compliance-provider   Running   1       True      http://x509-compliance-provider.default.svc.cluster.local:8080   …
 ```
 
 ## Registering with the platform
@@ -85,7 +88,7 @@ spec:
 
 Registration runs exactly once. The operator skips it while the connector is any phase other than `Running`, and skips it again on every later reconcile once `status.registration.uuid` is set, so a rolling update or a spec change never re-registers an already-known connector.
 
-A failed registration is retried only when retrying can help. A 5xx response or a network error is retryable, so the operator requeues with exponential backoff from 5 seconds up to a 5-minute ceiling. A 4xx response is not: the request itself is wrong, the operator stops retrying, and `Degraded` stays `True` with reason `RegistrationFailed` until you fix the spec.
+A failed registration is retried only when retrying can help. A 5xx, 408 or 429 response or a network error is retryable, so the operator requeues with exponential backoff from 5 seconds up to a 5-minute ceiling. Any other 4xx response is a rejection: the request itself is wrong, the operator stops retrying, and `Degraded` stays `True` with reason `RegistrationFailed` until you fix the spec.
 
 That condition tells you the registration failed and with which HTTP status — and deliberately nothing more. The operator never reads the platform's error body, because that body can echo request and identity material which would then flow into the connector's status, a `Warning` event, and the operator's logs. A transport failure is reported as a generic phrase for the same reason: the request URL carries the platform's address. To find out *why* the platform rejected the registration, read the platform's own logs and audit trail for the corresponding request.
 
@@ -231,6 +234,34 @@ spec:
 
 There is no default, deliberately. On OpenShift the `restricted-v2` SCC allocates `fsGroup` from the namespace's own range and rejects a value outside it, so pinning one there needs a namespace range that admits the value or a custom SCC. Leave the field out and the pod carries no `fsGroup` at all, which is what most connectors want.
 
+## Checking what the connector depends on
+
+Readiness tells Kubernetes that the connector's process serves. Readiness leaves out what the connector depends on, such as an HSM, a database or a remote CA. An outage there must keep the pod in its Service. A `Running` connector can therefore still fail every operation.
+
+The `Healthy` condition closes that gap. The operator asks a `Running` connector's own health endpoint on a period and records the answer:
+
+- `True` when the connector reports itself up.
+- `False` when it reports any other status.
+- `Unknown` when the operator holds no report.
+
+`kubectl get connectors` shows the condition as the `HEALTHY` column. The phase, `Available` and registration follow the Deployment alone.
+
+The default check asks `/v2/health` and falls back to `/v1/health`. A connector on either interface therefore needs no configuration. A named path is checked alone:
+
+```yaml
+spec:
+  healthCheck:
+    path: /v1/health
+    periodSeconds: 60
+    timeoutSeconds: 5
+```
+
+`enabled: false` turns the check off and removes the condition.
+
+:::note[NetworkPolicy]
+The check is a request from the operator's pod to the connector's Service. A NetworkPolicy that admits only Core to a connector must also admit the operator. Otherwise `Healthy` stays `Unknown`, and each check holds one of the operator's reconcile workers until it times out.
+:::
+
 ## The shipped samples
 
 Five ready-to-edit `Connector` samples ship with the operator:
@@ -253,7 +284,7 @@ kubectl describe connector <name> -n <namespace>   # phase, conditions, registra
 kubectl get events -n <namespace> --sort-by=.lastTimestamp | tail
 ```
 
-The printed columns are the phase, the ready replica count, the in-cluster endpoint, and the age. `status` additionally records `currentImage` (the image actually resolved), `configChecksum`, `observedGeneration`, and — once registration succeeds — `registration`.
+The printed columns are the phase, the ready replica count, the `Healthy` condition, the in-cluster endpoint, and the age. `status` additionally records `currentImage` (the image actually resolved), `configChecksum`, `observedGeneration`, and `registration`.
 
 ### Phase
 
@@ -271,7 +302,7 @@ A connector that is not `Running` is requeued every 30 seconds, so a transient p
 
 ### Conditions
 
-The operator sets three condition types. Each carries a `reason` you can match on, and the reasons below are the complete vocabulary:
+The operator sets the condition types below. Each carries a `reason` you can match on, and the reasons below are the complete vocabulary:
 
 | Condition | Reason | Status | What it means |
 |---|---|---|---|
@@ -282,12 +313,17 @@ The operator sets three condition types. Each carries a `reason` you can match o
 | `Available` | `AllReplicasReady` | `True` | Every desired replica is ready. |
 | `Available` | `ReplicaFailure` | `False` | The Deployment cannot bring pods up. |
 | `Available` | `MissingSecret` / `MissingConfigMap` | `False` | A referenced object does not exist. |
-| `Degraded` | `Running` | `False` | The connector is healthy. This is the condition you want to see. |
+| `Degraded` | `Running` | `False` | Every replica is ready and nothing has failed. This is the condition you want to see. |
 | `Degraded` | `ReplicaFailure` | `True` | The Deployment's pods are failing — read the pod events and logs. |
 | `Degraded` | `RegistrationFailed` | `True` | The platform rejected the registration, or it could not be reached. The message carries the HTTP status only — the reason lives in the platform's own logs. |
 | `Degraded` | `MissingSecret` / `MissingConfigMap` | `True` | A referenced object does not exist. The message names it. |
+| `Healthy` | `Up` | `True` | The connector reports itself up. |
+| `Healthy` | `Degraded` / `Down` / `OutOfService` / `Unknown` | `False` | The reason names the status the connector reports. |
+| `Healthy` | `NotRunning` | `Unknown` | The operator asks only a `Running` connector. |
+| `Healthy` | `NoAnswer` | `Unknown` | The connector gave no complete answer. |
+| `Healthy` | `NoHealthReport` | `Unknown` | The connector answered without a health report, as from a missing endpoint. The message carries the HTTP status. |
 
-`Degraded=False` with reason `Running` is the healthy resting state — a `Degraded` condition is always present once the connector has been up, so read its `status`, not its presence.
+`Degraded=False` with reason `Running` is the resting state — a `Degraded` condition is always present once the connector has been up, so read its `status`, not its presence.
 
 Registration records its outcome separately, in `status.registration`:
 
@@ -299,7 +335,7 @@ status:
     registeredAt: "2026-08-17T09:14:22Z"
 ```
 
-A `uuid` means the platform accepted the connector. `status` is the platform's own view of it, and it is one of `waitingForApproval`, `connected`, `failed`, or `offline`. The operator writes the block once, when registration succeeds, and does not poll it afterwards — so it records the outcome of registration rather than the connector's live health. Live health is what the conditions are for.
+A `uuid` means the platform accepted the connector. `status` is then the platform's own view of it, and it is one of `waitingForApproval`, `connected`, `failed`, or `offline`. `failed` without a `uuid` is a 4xx rejection the operator recorded for the current generation. Only a spec change retries it (annotations don't bump the generation). The block records the outcome of registration rather than the connector's live health. Live health is what the conditions are for.
 
 ## Removing a Connector
 

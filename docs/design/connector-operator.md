@@ -314,7 +314,7 @@ Registration request fields (from ILM Core API):
 
 Registration is optional. If `spec.registration` is omitted, the operator does not call the platform API. The platform can register the connector manually via UI or other means.
 
-**Registration retry behavior:** If the registration call fails (platform unreachable, 5xx error), the operator sets the `Degraded` condition with a registration failure reason and requeues with exponential backoff (starting at 5s, max 5m). Registration is only attempted when the connector Deployment is healthy (all replicas ready). If registration returns a 4xx error (e.g., connector already registered, validation error), the operator sets the `Degraded` condition and does not retry — manual intervention is required.
+**Registration retry behavior:** If the registration call fails (platform unreachable, 5xx, 408 or 429), the operator sets the `Degraded` condition with a registration failure reason and requeues with exponential backoff (starting at 5s, max 5m). Registration is only attempted when the connector Deployment is healthy (all replicas ready). If registration returns any other 4xx error (e.g., connector already registered, validation error), the operator sets the `Degraded` condition and does not retry — manual intervention is required.
 
 ## Connector Common Interfaces Coverage
 

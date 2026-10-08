@@ -9,6 +9,7 @@ package connector
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
@@ -74,6 +75,7 @@ var _ = Describe("Connector print columns", func() {
 
 		It("should render the ready replica count under Ready in the server-side table", func() {
 			conn := newConnector(connName, ns)
+			connectors.answer(conn, "/v2/health", http.StatusOK, `{"status":"UP"}`)
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
 			key := types.NamespacedName{Name: connName, Namespace: ns}
@@ -118,6 +120,13 @@ var _ = Describe("Connector print columns", func() {
 			Expect(row).To(HaveKey("Ready"))
 			Expect(row["Ready"]).To(BeEquivalentTo(1), "Ready cell must carry the ready replica count")
 			Expect(row["Phase"]).To(Equal(string(otilmv1alpha1.ConnectorPhaseRunning)))
+
+			By("verifying the Healthy cell carries the condition's status")
+			Eventually(func(g Gomega) {
+				row, err := connectorTableRow(ns, connName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(row).To(HaveKeyWithValue("Healthy", "True"))
+			}, timeout, interval).Should(Succeed())
 		})
 	})
 })
