@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -163,35 +164,47 @@ func TestResolveManagedDatabaseRendersCluster(t *testing.T) {
 	owner, _, _ := unstructured.NestedString(cluster.Object, "spec", "bootstrap", "initdb", "owner")
 	assert.Equal(t, "ilm", db)
 	assert.Equal(t, "ilm", owner)
-
-	// With no MANAGED Keycloak sharing this DB, there is no schema to pre-create: the
-	// postInitApplicationSQL hook is absent (a plain app-DB bootstrap, behaviour unchanged).
-	_, hasSQL, _ := unstructured.NestedSlice(cluster.Object, "spec", "bootstrap", "initdb", "postInitApplicationSQL")
-	assert.False(t, hasSQL, "without a managed Keycloak there should be no postInitApplicationSQL")
 }
 
-// TestResolveManagedDatabasePreCreatesKeycloakSchema asserts the managed-DB + managed-Keycloak
-// combination renders a postInitApplicationSQL that pre-creates Keycloak's dedicated schema in
-// the shared database. Keycloak/Liquibase does NOT create the schema and crash-loops on a
-// missing one (observed with Keycloak 26.4.0), so CNPG must create it at bootstrap.
-func TestResolveManagedDatabasePreCreatesKeycloakSchema(t *testing.T) {
-	p := managedDBPlatform(func(p *otilmv1alpha1.Platform) {
-		// Add a managed Keycloak sharing this managed database.
+// managedDBWithManagedKeycloak returns a Platform whose managed database is shared by a
+// managed Keycloak.
+func managedDBWithManagedKeycloak() *otilmv1alpha1.Platform {
+	return managedDBPlatform(func(p *otilmv1alpha1.Platform) {
 		p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{
 			Mode:    "managed",
-			Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1, Version: "26.4.0"},
+			Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1},
 		}
 	})
-	cluster := findManagedObj(ResolveManagedDatabase(p), cnpgKindCluster)
-	require.NotNil(t, cluster)
+}
 
-	sql, found, err := unstructured.NestedStringSlice(cluster.Object, "spec", "bootstrap", "initdb", "postInitApplicationSQL")
-	require.NoError(t, err)
-	require.True(t, found, "a managed Keycloak sharing the managed DB must add postInitApplicationSQL")
-	require.Len(t, sql, 1)
-	// The SQL pre-creates Keycloak's schema (idempotent) owned by the app owner Keycloak
-	// authenticates as, so Keycloak's migration into spec.db.schema=keycloak succeeds.
-	assert.Equal(t, "CREATE SCHEMA IF NOT EXISTS keycloak AUTHORIZATION ilm", sql[0])
+// TestResolveManagedDatabaseManagesKeycloakSchema asserts that a managed Keycloak sharing the
+// managed database gets its schema through a CloudNativePG Database object. Keycloak does not
+// create its schema, and CloudNativePG reconciles a Database object on an existing cluster too,
+// so a Keycloak switched to managed after the cluster was bootstrapped still gets it.
+func TestResolveManagedDatabaseManagesKeycloakSchema(t *testing.T) {
+	db := findManagedObj(ResolveManagedDatabase(managedDBWithManagedKeycloak()), testKindDatabase)
+	require.NotNil(t, db, "a managed Keycloak sharing the managed database needs the CloudNativePG Database object")
+
+	assert.Equal(t, "postgresql.cnpg.io/v1", db.GetAPIVersion())
+	assert.Equal(t, "ilm-db-app", db.GetName())
+	assert.Equal(t, "ns", db.GetNamespace())
+	assert.Equal(t, common.ManagedByValue, db.GetLabels()[common.ManagedByLabel])
+	assert.Equal(t, "ilm", db.GetLabels()[common.InstanceLabel])
+
+	cluster, _, _ := unstructured.NestedString(db.Object, "spec", "cluster", "name")
+	assert.Equal(t, testILMDB, cluster, "the Database targets the managed Cluster")
+	name, _, _ := unstructured.NestedString(db.Object, "spec", "name")
+	owner, _, _ := unstructured.NestedString(db.Object, "spec", "owner")
+	assert.Equal(t, "ilm", name, "the Database adopts the bootstrapped application database")
+	assert.Equal(t, "ilm", owner, "the Database keeps the bootstrapped owner")
+	schemas, _, _ := unstructured.NestedSlice(db.Object, "spec", "schemas")
+	assert.Equal(t, []interface{}{map[string]interface{}{"name": "keycloak", "owner": "ilm"}}, schemas,
+		"Keycloak's schema must be owned by the role Keycloak connects as")
+}
+
+func TestResolveManagedDatabaseWithoutManagedKeycloakManagesNoSchema(t *testing.T) {
+	assert.Nil(t, findManagedObj(ResolveManagedDatabase(managedDBPlatform(nil)), testKindDatabase),
+		"without a managed Keycloak there is no schema to manage")
 }
 
 func TestResolveManagedDatabaseResources(t *testing.T) {
@@ -368,6 +381,13 @@ func TestManagedDatabaseDependencies(t *testing.T) {
 	depsP := DatabaseDependencies(pp)
 	require.Len(t, depsP, 2)
 	assert.Equal(t, cnpgKindPooler, depsP[1].GroupKind.Kind)
+
+	// Managed + a managed Keycloak sharing it: the Database CRD is required too, so a cluster
+	// without it waits on a condition instead of failing the apply.
+	depsK := DatabaseDependencies(managedDBWithManagedKeycloak())
+	require.Len(t, depsK, 3)
+	assert.Equal(t, schema.GroupKind{Group: "postgresql.cnpg.io", Kind: testKindDatabase}, depsK[2].GroupKind)
+	assert.Equal(t, ReasonCloudNativePGNotInstalled, depsK[2].Reason)
 }
 
 // TestManagedDatabaseNoLeak asserts the rendered Cluster carries no credential material —

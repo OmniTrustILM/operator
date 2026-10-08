@@ -60,10 +60,11 @@ func RenderPlatform(p *otilmv1alpha1.Platform) []client.Object {
 	DefaultImageRegistry(p)
 	objs := RenderPlatformBase(p)
 
-	// Managed database (optional): the CloudNativePG Cluster (+ optional Pooler) when
-	// database.mode=managed, gated on the CloudNativePG CRDs (DatabaseReady). nil for an
-	// external database. The controller applies these via gateDatabase, after confirming
-	// the CNPG CRDs are served, and WITHOUT a controller owner reference (deletion safety).
+	// Managed database (optional): the CloudNativePG Cluster (+ optional Pooler, and the
+	// Database keeping a managed Keycloak's schema) when database.mode=managed, gated on the
+	// CloudNativePG CRDs (DatabaseReady). nil for an external database. The controller
+	// applies these via gateDatabase, after confirming the CNPG CRDs are served, and WITHOUT
+	// a controller owner reference (deletion safety).
 	objs = append(objs, ResolveManagedDatabase(p)...)
 
 	// Managed messaging (optional): the RabbitmqCluster + the full messaging topology

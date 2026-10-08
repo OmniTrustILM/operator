@@ -46,26 +46,27 @@ const (
 // Watch on the generated Secret's creation, so this requeue is a backstop only.
 const databaseRequeueAfter = 15 * time.Second
 
-// gateDatabase reconciles the managed database (CloudNativePG Cluster + optional Pooler)
-// and reflects its state on the DatabaseReady condition. It is the managed-infra analogue
-// of gateEdge, with one extra state: a present CRD does not imply a Ready database, so
-// after applying the CNPG objects it probes the Cluster's readiness and the generated
-// app Secret.
+// gateDatabase reconciles the managed database (CloudNativePG Cluster, optional Pooler, and
+// the Database keeping a managed Keycloak's schema) and reflects its state on the
+// DatabaseReady condition. It is the managed-infra analogue of gateEdge, with one extra
+// state: a present CRD does not imply a Ready database, so after applying the CNPG objects
+// it probes the Cluster's readiness, the generated app Secret, and a managed Keycloak's schema.
 //
 // Returns ready=true only when an external database (nothing to provision — always
-// "ready" from the platform's perspective) OR a managed database whose Cluster is Ready
-// and whose app Secret exists. requeue=true asks the caller to re-check soon. An error is
-// returned only for an actual apply failure or a rejected override (a missing CRD or a
-// not-yet-Ready Cluster is non-fatal, like the edge).
+// "ready" from the platform's perspective) OR a managed database whose Cluster is Ready,
+// whose app Secret exists, and whose managed Keycloak's schema, if any, is applied.
+// requeue=true asks the caller to re-check soon. An error is returned only for an actual
+// apply failure or a rejected override (a missing CRD or a not-yet-Ready Cluster is
+// non-fatal, like the edge).
 //
 // Behaviour (managed database):
 //   - render-time error (rejected override / malformed patch) → hard error (degrade).
 //   - CRD absent → DatabaseReady=False/CloudNativePGNotInstalled, apply nothing, mark the
 //     CNPG objects desired (prune-preservation across a flap), requeue.
-//   - CRD present → apply the Cluster (+Pooler); then probe readiness:
-//     Cluster not Ready or app Secret missing → DatabaseReady=False/WaitingForDatabase,
-//     ready=false, requeue;
-//     both present → DatabaseReady=True, ready=true.
+//   - CRD present → apply the CNPG objects; then probe readiness:
+//     Cluster not Ready, app Secret missing, or Keycloak's schema not applied →
+//     DatabaseReady=False/WaitingForDatabase, ready=false, requeue;
+//     all in place → DatabaseReady=True, ready=true.
 //
 // SECURITY: the condition message names only the spec field and the remedy — never a
 // secret value or a connection coordinate.
@@ -113,11 +114,14 @@ func (r *Reconciler) databaseGate(p *otilmv1alpha1.Platform) managedInfraGate {
 		objects:      platformbuilder.ResolveManagedDatabase(p),
 		renderError:  platformbuilder.ManagedDatabaseRenderError,
 		dependencies: platformbuilder.DatabaseDependencies(p),
-		// Ready when the Cluster reports Ready AND the CNPG-generated app Secret exists.
+		// Ready when the Cluster reports Ready AND the CNPG-generated app Secret exists. A managed
+		// Keycloak is provisioned only once this holds, so with one sharing the database its
+		// schema must be applied as well.
 		ready: func(ctx context.Context) bool {
 			return managedReadyProbe(ctx,
 				func(ctx context.Context) (bool, error) { return r.managedClusterReady(ctx, p) },
-				func(ctx context.Context) bool { return r.managedAppSecretPresent(ctx, p) })
+				func(ctx context.Context) bool { return r.managedAppSecretPresent(ctx, p) }) &&
+				(!platformbuilder.KeycloakManaged(p) || r.managedKeycloakSchemaApplied(ctx, p))
 		},
 		conditionType:  conditionDatabaseReady,
 		waitingReason:  reasonWaitingForDatabase,
@@ -126,6 +130,17 @@ func (r *Reconciler) databaseGate(p *otilmv1alpha1.Platform) managedInfraGate {
 		readyMessage:   "managed database reconciled",
 		detectionLabel: "database",
 	}
+}
+
+// databaseDeletionGate is databaseGate with the Database that keeps Keycloak's schema always in
+// the teardown set: managed objects are never pruned, so one rendered while Keycloak was managed
+// must still be reclaimed by Delete after Keycloak stops being managed.
+func (r *Reconciler) databaseDeletionGate(p *otilmv1alpha1.Platform) managedInfraGate {
+	g := r.databaseGate(p)
+	if g.managed && !platformbuilder.KeycloakManaged(p) {
+		g.objects = append(g.objects, platformbuilder.ManagedAppDatabase(p))
+	}
+	return g
 }
 
 // managedClusterReady reports whether the managed CloudNativePG Cluster is Ready. It
@@ -199,6 +214,26 @@ func (r *Reconciler) managedAppSecretPresent(ctx context.Context, p *otilmv1alph
 		return false
 	}
 	return true
+}
+
+// managedKeycloakSchemaApplied reports whether CloudNativePG reports Keycloak's schema applied
+// in the status of the Database object that keeps it (status.schemas, from CloudNativePG 1.26).
+// It checks the schema itself rather than the object's status.applied, which CloudNativePG 1.25
+// also reports after the API has dropped the unsupported spec.schemas. A read error or a status
+// without the schema is "not applied", so the requeue retries.
+func (r *Reconciler) managedKeycloakSchemaApplied(ctx context.Context, p *otilmv1alpha1.Platform) bool {
+	var u unstructured.Unstructured
+	u.SetGroupVersionKind(platformbuilder.ManagedAppDatabaseGVK())
+	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.ManagedAppDatabaseName(p)}, &u); err != nil {
+		return false
+	}
+	schemas, _, _ := unstructured.NestedSlice(u.Object, "status", "schemas")
+	for _, s := range schemas {
+		if m, ok := s.(map[string]interface{}); ok && m["name"] == platformbuilder.KeycloakDBSchema && m["applied"] == true {
+			return true
+		}
+	}
+	return false
 }
 
 // applyManaged server-side-applies a managed-infrastructure object (a CloudNativePG

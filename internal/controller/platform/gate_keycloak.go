@@ -71,10 +71,11 @@ const keycloakRequeueAfter = 15 * time.Second
 func (r *Reconciler) gateKeycloak(ctx context.Context, p *otilmv1alpha1.Platform, bundle bom.Bundle, desired desiredSet, dbReady bool) (ready bool, requeue bool, err error) {
 	// The managed Keycloak shares the platform database. Defer provisioning its Keycloak CR until
 	// the database is ready, so the Keycloak Operator's StatefulSet does not start and crash-loop
-	// against a Postgres that is not yet accepting connections. dbReady is true for an external
-	// database (nothing to wait on) and for a Ready managed CNPG cluster; external Keycloak is not
-	// managed and falls through (the shared gate simply drops the condition). The rendered objects
-	// are marked desired so the prune preserves an already-applied Keycloak across a DB flap.
+	// against a Postgres that is not yet accepting connections or lacks Keycloak's schema. dbReady
+	// is true for an external database (nothing to wait on) and for a Ready managed CNPG cluster
+	// whose Database has applied Keycloak's schema; external Keycloak is not managed and falls
+	// through (the shared gate simply drops the condition). The rendered objects are marked
+	// desired so the prune preserves an already-applied Keycloak across a DB flap.
 	if platformbuilder.KeycloakManaged(p) && !dbReady {
 		meta.SetStatusCondition(&p.Status.Conditions, metav1.Condition{
 			Type: conditionKeycloakReady, Status: metav1.ConditionFalse, Reason: reasonWaitingForDatabase,

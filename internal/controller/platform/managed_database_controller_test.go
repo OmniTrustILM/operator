@@ -18,11 +18,13 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // TestReconcileAuthDBSecretManagedReadback proves the mode-agnostic readback: for a
@@ -157,6 +159,57 @@ func TestHandleDeletionManagedDeleteRemovesCluster(t *testing.T) {
 	e := drainEvent(rec)
 	assert.Contains(t, e, "DeletedDatabase")
 	assert.Contains(t, e, dbSecretRef)
+}
+
+// TestHandleDeletionManagedDeleteRemovesAppDatabase: Delete also reclaims the Database object
+// that keeps Keycloak's schema, so nothing is left referencing the deleted cluster. Managed
+// objects are never pruned, so a Database rendered while Keycloak was managed must be reclaimed
+// even after Keycloak stopped being managed.
+func TestHandleDeletionManagedDeleteRemovesAppDatabase(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform *otilmv1alpha1.Platform
+	}{
+		{name: "Keycloak managed", platform: managedDBWithManagedKeycloakCR()},
+		{name: "Keycloak no longer managed", platform: managedDBPlatformCR()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := appliedAppDatabase(tt.platform)
+			r := newManagedDBReconciler(t, nil, tt.platform, db)
+
+			require.NoError(t, r.handleManagedDatabaseDeletion(context.Background(), tt.platform,
+				otilmv1alpha1.PlatformDeletionPolicyDelete))
+
+			err := r.Get(context.Background(), client.ObjectKeyFromObject(db), db)
+			assert.True(t, apierrors.IsNotFound(err), "Delete must reclaim the Database object")
+		})
+	}
+}
+
+// TestHandleDeletionManagedDeleteWithoutDatabaseKind: on a CloudNativePG that does not serve
+// the Database kind, the API answers its delete with a no-match error. Delete must still reclaim
+// the Cluster rather than fail on a kind that cannot have any objects, which would hold the
+// Platform's finalizer.
+func TestHandleDeletionManagedDeleteWithoutDatabaseKind(t *testing.T) {
+	p := managedDBPlatformCR()
+	cluster, _ := readyClusterAndSecret(p)
+	noDatabaseKind := interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if obj.GetObjectKind().GroupVersionKind() == appDatabaseGVK {
+				return &meta.NoKindMatchError{GroupKind: appDatabaseGVK.GroupKind(), SearchedVersions: []string{appDatabaseGVK.Version}}
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}
+	s := managedDBScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(p, cluster).WithInterceptorFuncs(noDatabaseKind).Build()
+	r := &Reconciler{Client: c, Scheme: s}
+
+	require.NoError(t, r.handleManagedDatabaseDeletion(context.Background(), p, otilmv1alpha1.PlatformDeletionPolicyDelete))
+
+	err := r.Get(context.Background(), client.ObjectKeyFromObject(cluster), cluster)
+	assert.True(t, apierrors.IsNotFound(err), "Delete must reclaim the Cluster")
 }
 
 func TestHandleDeletionExternalNoManagedTeardown(t *testing.T) {

@@ -41,6 +41,7 @@ const (
 
 	// managed_database_test.go.
 	testDefaultKeptMsg = "default kept when not overridden"
+	testKindDatabase   = "Database"
 
 	// managed_keycloak_test.go.
 	testPGHost       = "pg.example.com"
