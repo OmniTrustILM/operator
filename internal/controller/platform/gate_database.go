@@ -216,15 +216,20 @@ func (r *Reconciler) managedAppSecretPresent(ctx context.Context, p *otilmv1alph
 	return true
 }
 
-// managedKeycloakSchemaApplied reports whether CloudNativePG reports Keycloak's schema applied
-// in the status of the Database object that keeps it (status.schemas, from CloudNativePG 1.26).
-// It checks the schema itself rather than the object's status.applied, which CloudNativePG 1.25
-// also reports after the API has dropped the unsupported spec.schemas. A read error or a status
-// without the schema is "not applied", so the requeue retries.
+// managedKeycloakSchemaApplied reports whether CloudNativePG's current, successful reconciliation
+// of the Database object that keeps Keycloak's schema reports that schema applied: status.applied
+// for the object's current generation, and the keycloak entry in status.schemas (from
+// CloudNativePG 1.26; 1.25 reports the object applied after the API has dropped the unsupported
+// spec.schemas). A read error or any other status is "not applied", so the requeue retries.
 func (r *Reconciler) managedKeycloakSchemaApplied(ctx context.Context, p *otilmv1alpha1.Platform) bool {
 	var u unstructured.Unstructured
 	u.SetGroupVersionKind(platformbuilder.ManagedAppDatabaseGVK())
 	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.ManagedAppDatabaseName(p)}, &u); err != nil {
+		return false
+	}
+	applied, _, _ := unstructured.NestedBool(u.Object, "status", "applied")
+	observed, _, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration")
+	if !applied || observed != u.GetGeneration() {
 		return false
 	}
 	schemas, _, _ := unstructured.NestedSlice(u.Object, "status", "schemas")

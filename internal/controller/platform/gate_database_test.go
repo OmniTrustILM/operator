@@ -74,21 +74,21 @@ func managedDBWithManagedKeycloakCR() *otilmv1alpha1.Platform {
 // appliedAppDatabase returns the Database object that keeps Keycloak's schema with the status
 // CloudNativePG 1.26+ reports once it has applied it.
 func appliedAppDatabase(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
-	db := appDatabaseWithStatus(p, map[string]interface{}{
+	return appDatabaseWithStatus(p, 1, map[string]interface{}{
 		"applied":            true,
 		"observedGeneration": int64(1),
 		"schemas":            []interface{}{map[string]interface{}{"name": "keycloak", "applied": true}},
 	})
-	return db
 }
 
-// appDatabaseWithStatus returns the Database object that keeps Keycloak's schema with the given
-// status.
-func appDatabaseWithStatus(p *otilmv1alpha1.Platform, status map[string]interface{}) *unstructured.Unstructured {
+// appDatabaseWithStatus returns the Database object that keeps Keycloak's schema at the given
+// generation, with the given status.
+func appDatabaseWithStatus(p *otilmv1alpha1.Platform, generation int64, status map[string]interface{}) *unstructured.Unstructured {
 	db := &unstructured.Unstructured{}
 	db.SetGroupVersionKind(appDatabaseGVK)
 	db.SetName(p.Name + "-db-app")
 	db.SetNamespace(p.Namespace)
+	db.SetGeneration(generation)
 	_ = unstructured.SetNestedMap(db.Object, status, "status")
 	return db
 }
@@ -262,26 +262,42 @@ func TestGateDatabaseWaitsForKeycloakSchema(t *testing.T) {
 	assert.Equal(t, "WaitingForDatabase", cond.Reason)
 }
 
-// TestGateDatabaseWaitsUntilKeycloakSchemaApplied: readiness waits for Keycloak's schema itself,
-// not for the Database object as a whole. CloudNativePG 1.25 serves the Database kind without
-// schema management, so the API drops spec.schemas and CloudNativePG reports the object applied
-// without creating the schema.
+// TestGateDatabaseWaitsUntilKeycloakSchemaApplied: readiness waits until CloudNativePG's current,
+// successful reconciliation reports Keycloak's schema applied. CloudNativePG 1.25 serves the
+// Database kind without schema management, so the API drops spec.schemas and CloudNativePG
+// reports the object applied without creating the schema; a status from an earlier generation,
+// or from a failed reconciliation that kept the earlier schema entries, describes no current
+// schema either.
 func TestGateDatabaseWaitsUntilKeycloakSchemaApplied(t *testing.T) {
+	appliedSchema := []interface{}{map[string]interface{}{"name": "keycloak", "applied": true}}
 	tests := []struct {
-		name   string
-		status map[string]interface{}
+		name       string
+		generation int64
+		status     map[string]interface{}
 	}{
 		{
-			name:   "schemas not reported (CloudNativePG 1.25)",
-			status: map[string]interface{}{"applied": true, "observedGeneration": int64(1)},
+			name:       "schemas not reported (CloudNativePG 1.25)",
+			generation: 1,
+			status:     map[string]interface{}{"applied": true, "observedGeneration": int64(1)},
 		},
 		{
-			name: "schema not applied yet",
+			name:       "schema not applied yet",
+			generation: 1,
 			status: map[string]interface{}{
 				"applied":            false,
 				"observedGeneration": int64(1),
 				"schemas":            []interface{}{map[string]interface{}{"name": "keycloak", "applied": false}},
 			},
+		},
+		{
+			name:       "status from an earlier generation",
+			generation: 2,
+			status:     map[string]interface{}{"applied": true, "observedGeneration": int64(1), "schemas": appliedSchema},
+		},
+		{
+			name:       "current reconciliation failed",
+			generation: 1,
+			status:     map[string]interface{}{"applied": false, "observedGeneration": int64(1), "schemas": appliedSchema},
 		},
 	}
 	for _, tt := range tests {
@@ -289,7 +305,7 @@ func TestGateDatabaseWaitsUntilKeycloakSchemaApplied(t *testing.T) {
 			p := managedDBWithManagedKeycloakCR()
 			cluster, secret := readyClusterAndSecret(p)
 			r := newManagedDBReconciler(t, programmableDetector{available: map[string]bool{cnpgGroup: true}}, p,
-				cluster, secret, appDatabaseWithStatus(p, tt.status))
+				cluster, secret, appDatabaseWithStatus(p, tt.generation, tt.status))
 
 			ready, requeue, err := r.gateDatabase(context.Background(), p, guardTestBundle(), newDesiredSet())
 			require.NoError(t, err)
