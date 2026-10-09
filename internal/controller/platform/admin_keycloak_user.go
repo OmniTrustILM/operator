@@ -119,14 +119,10 @@ func (r *Reconciler) reconcileAdminKeycloakUser(ctx context.Context, p *otilmv1a
 	// password if the user already exists). The identity comes from the CR; the password is
 	// handed over once and never logged.
 	ra := p.Spec.RegisterAdmin
-	username := ra.Username
-	if username == "" {
-		username = adminUserDefaultUsername
-	}
 	ensureErr := r.OIDCRegistrar.EnsureRealmUser(ctx,
 		r.keycloakBaseURL(p), platformbuilder.KeycloakRealmName(p), adminUser, adminPass,
 		registration.RealmUser{
-			Username:  username,
+			Username:  platformbuilder.AdminUsername(p),
 			Email:     ra.Email,
 			FirstName: ra.Name,
 			LastName:  ra.LastName,
@@ -144,11 +140,6 @@ func (r *Reconciler) reconcileAdminKeycloakUser(ctx context.Context, p *otilmv1a
 	r.setAdminUserReady(p, metav1.ConditionTrue, reasonAdminUserReady, "admin Keycloak user ensured")
 	return false
 }
-
-// adminUserDefaultUsername is the realm user's username when registerAdmin.username is unset.
-// It mirrors the certificate method's default Subject CommonName ("Administrator") so the two
-// methods bootstrap the same identity out of the box.
-const adminUserDefaultUsername = "Administrator"
 
 // passwordAdminActive reports whether the PASSWORD admin method is active: the bootstrap is
 // enabled, the password sub-block is present and enabled, AND Keycloak is managed. Otherwise the

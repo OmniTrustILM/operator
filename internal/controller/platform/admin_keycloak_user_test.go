@@ -275,7 +275,7 @@ func TestReconcileAdminUserDefaultUsername(t *testing.T) {
 
 	require.False(t, r.reconcileAdminKeycloakUser(context.Background(), p))
 	require.Equal(t, 1, len(reg.userCalls))
-	assert.Equal(t, adminUserDefaultUsername, reg.userCalls[0].user.Username)
+	assert.Equal(t, "Administrator", reg.userCalls[0].user.Username)
 	// Sanity: confirm the realm passed matches the platform's realm name.
 	assert.Equal(t, platformbuilder.KeycloakRealmName(p), reg.userCalls[0].realm)
 }

@@ -102,7 +102,7 @@ func TestResolveAdminCertGeneratedDefaultCommonName(t *testing.T) {
 		Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
 	}))
 	cert := adminCertificate(t, objs)
-	assert.Equal(t, adminCertCommonName, cert.Object["spec"].(map[string]interface{})["commonName"])
+	assert.Equal(t, "Administrator", cert.Object["spec"].(map[string]interface{})["commonName"])
 }
 
 func TestResolveAdminCertGeneratedReusesEdgeInternalCA(t *testing.T) {
