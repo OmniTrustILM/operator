@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 package platform
 
 import (
+	"strings"
+
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -26,9 +28,8 @@ const (
 	adminCertName = "admin-certificate"
 	adminCertRole = "register-admin"
 
-	// adminCertCommonName is the default Subject CommonName when registerAdmin.username
-	// is unset (the default admin identity "Administrator").
-	adminCertCommonName = "Administrator"
+	// defaultAdminUsername is the username AdminUsername falls back to.
+	defaultAdminUsername = "Administrator"
 
 	// adminCertDuration / adminCertRenewBefore are sane cert-manager defaults for the
 	// admin client cert: a one-year (8760h) lifetime renewed 30 days (720h) before
@@ -354,14 +355,17 @@ func AdminCABundle(p *otilmv1alpha1.Platform) AdminCABundleSource {
 	return AdminCABundleSource{}
 }
 
-// adminCertCommonNameValue returns the Subject CommonName for the admin certificate:
-// registerAdmin.username when set, otherwise the default ("Administrator"). This is
-// the admin identity the certificate binds, not a credential.
-func adminCertCommonNameValue(p *otilmv1alpha1.Platform) string {
-	if ra := p.Spec.RegisterAdmin; ra != nil && ra.Username != "" {
+// AdminUsername returns the first admin's username: registerAdmin.username, or the default
+// ("Administrator") when it is unset or blank. It is the one resolution of the admin identity
+// that the certificate's Subject CommonName, the Core registration (register-admin.sh) and
+// the password method's Keycloak realm user all share, so they cannot drift apart — and a
+// blank username, which Core's local-admin API rejects, never reaches Core. This is the
+// admin identity, not a credential.
+func AdminUsername(p *otilmv1alpha1.Platform) string {
+	if ra := p.Spec.RegisterAdmin; ra != nil && strings.TrimSpace(ra.Username) != "" {
 		return ra.Username
 	}
-	return adminCertCommonName
+	return defaultAdminUsername
 }
 
 // buildAdminCertificate renders the admin client Certificate (cert-manager.io/v1):
@@ -371,7 +375,7 @@ func adminCertCommonNameValue(p *otilmv1alpha1.Platform) string {
 func buildAdminCertificate(p *otilmv1alpha1.Platform, issuerRef map[string]interface{}) *unstructured.Unstructured {
 	return newCertManagerObject(p, kindCertificate, adminCertName, adminCertRole, map[string]interface{}{
 		"secretName":  adminCertSecretName,
-		"commonName":  adminCertCommonNameValue(p),
+		"commonName":  AdminUsername(p),
 		"duration":    adminCertDuration,
 		"renewBefore": adminCertRenewBefore,
 		"usages":      adminCertUsages,

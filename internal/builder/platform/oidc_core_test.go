@@ -410,6 +410,40 @@ func TestRegisterAdminScriptOmitsUnsetLastName(t *testing.T) {
 	assert.NotContains(t, raw, "lastName")
 }
 
+// TestRegisterAdminScriptUsername pins the username register-admin.sh sends to Core to the
+// certificate's CN. Core rejects a blank username and the fire-and-forget postStart would
+// swallow that, so the platform would silently get no first admin.
+func TestRegisterAdminScriptUsername(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		username string
+		want     string
+	}{
+		{name: "unset defaults to Administrator", username: "", want: "Administrator"},
+		{name: "whitespace-only defaults to Administrator", username: " \t ", want: "Administrator"},
+		{name: "set is sent verbatim", username: "ops-admin", want: "ops-admin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := adminPlatform(&otilmv1alpha1.RegisterAdminSpec{
+				Enabled:     true,
+				Username:    tc.username,
+				Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
+			})
+			cm := BuildCoreScriptsConfigMap(p)
+			require.NotNil(t, cm)
+			bodies, _ := quotedHeredocBodies(t, cm.Data[adminScriptName])
+			require.Len(t, bodies, 1)
+			var got adminRequest
+			require.NoError(t, json.Unmarshal([]byte(bodies[0]), &got))
+			assert.Equal(t, tc.want, got.Username, "the username registered in Core")
+
+			cert := adminCertificate(t, ResolveAdminCertObjects(p))
+			assert.Equal(t, tc.want, cert.Object["spec"].(map[string]interface{})["commonName"],
+				"the certificate's Subject CN names the same admin")
+		})
+	}
+}
+
 // TestRegisterAdminScriptCertSubstitutionIsBase64Safe locks the ONE runtime substitution in
 // register-admin.sh: the base64 $CERT replaces the placeholder via sed with a "|" delimiter.
 // Base64's charset (A-Za-z0-9+/=) contains neither the delimiter nor sed's "&" nor a backslash,

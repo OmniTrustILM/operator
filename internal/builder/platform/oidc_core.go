@@ -286,7 +286,7 @@ func registerAdminScript(p *otilmv1alpha1.Platform) string {
 	// json.Marshal of a struct of plain strings/bools is infallible, so the builder stays a
 	// pure, error-free function. LastName is omitempty: an unset surname omits the field.
 	body, _ := json.Marshal(adminRequest{
-		Username:        ra.Username,
+		Username:        AdminUsername(p),
 		FirstName:       ra.Name,
 		LastName:        ra.LastName,
 		Email:           ra.Email,
