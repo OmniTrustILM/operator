@@ -7,8 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package platform
 
 // managed_database.go renders the operator-provisioned PostgreSQL infrastructure for a
-// Platform whose database.mode=managed: a CloudNativePG Cluster (and, when
-// pgBouncer.managed, a Pooler), emitted as preset-GVK *unstructured.Unstructured.
+// Platform whose database.mode=managed: a CloudNativePG Cluster, a Pooler when
+// pgBouncer.managed, and a Database that keeps Keycloak's schema when a managed Keycloak
+// shares the database, emitted as preset-GVK *unstructured.Unstructured.
 //
 // WHY UNSTRUCTURED (preset GVK): exactly the rationale used for the edge's cert-manager
 // / Gateway API objects (see edge.go ResolveEdge / newEdgeUnstructured). Adding a typed
@@ -28,8 +29,9 @@ package platform
 // CNPG accepts the rendered Cluster, round-trips its spec fields, reconciles it to
 // "Cluster in healthy state", and generates the <cluster>-app Secret + <cluster>-rw Service
 // the readback consumes. The Pooler shape is not exercised end-to-end (the e2e does not set
-// pgBouncer.managed); its field paths are taken from the CNPG v1.29 Pooler API. No credential
-// or connection coordinate is ever placed in these objects beyond what CNPG itself requires.
+// pgBouncer.managed); its field paths are taken from the CNPG v1.29 Pooler API, and the
+// Database field paths from the CNPG v1.29 Database API. No credential or connection
+// coordinate is ever placed in these objects beyond what CNPG itself requires.
 
 import (
 	"encoding/json"
@@ -57,7 +59,8 @@ const ReasonCloudNativePGNotInstalled = "CloudNativePGNotInstalled"
 // reconciler probes each via the capability detector and gates the DatabaseReady
 // condition on their presence; the result mirrors exactly what ResolveManagedDatabase
 // renders so the two never drift. The actionable message names the install remedy and the
-// external escape hatch.
+// external escape hatch. A managed Keycloak sharing the database also requires the Database
+// CRD, which CloudNativePG serves with schema management from 1.26.
 func DatabaseDependencies(p *otilmv1alpha1.Platform) []CRDDependency {
 	if !DatabaseManaged(p) {
 		return nil
@@ -80,6 +83,15 @@ func DatabaseDependencies(p *otilmv1alpha1.Platform) []CRDDependency {
 			Message:   msg,
 		})
 	}
+	if KeycloakManaged(p) {
+		deps = append(deps, CRDDependency{
+			GroupKind: schema.GroupKind{Group: cnpgGroup, Kind: cnpgKindDatabase},
+			Versions:  []string{"v1"},
+			Reason:    ReasonCloudNativePGNotInstalled,
+			Message: "a managed Keycloak on a managed database requires the CloudNativePG Database resource " +
+				"(CloudNativePG 1.26 or newer); upgrade CloudNativePG or set spec.database.mode=external",
+		})
+	}
 	return deps
 }
 
@@ -89,13 +101,15 @@ func DatabaseDependencies(p *otilmv1alpha1.Platform) []CRDDependency {
 // the readback (managedDBConnection) is a fixed contract independent of the CR.
 const (
 	// cnpgGroup / cnpgVersion / cnpgAPIVersion are the CloudNativePG API coordinates.
-	// CNPG's GA API is postgresql.cnpg.io/v1 (Cluster and Pooler both live there).
+	// CNPG's GA API is postgresql.cnpg.io/v1 (Cluster, Pooler, and Database all live there).
 	cnpgGroup      = "postgresql.cnpg.io"
 	cnpgVersion    = "v1"
 	cnpgAPIVersion = cnpgGroup + "/" + cnpgVersion
-	// cnpgKindCluster / cnpgKindPooler are the CloudNativePG Kinds the operator renders.
-	cnpgKindCluster = "Cluster"
-	cnpgKindPooler  = "Pooler"
+	// cnpgKindCluster / cnpgKindPooler / cnpgKindDatabase are the CloudNativePG Kinds the
+	// operator renders.
+	cnpgKindCluster  = "Cluster"
+	cnpgKindPooler   = "Pooler"
+	cnpgKindDatabase = "Database"
 
 	// managedDBRole is the component label the managed database objects carry.
 	managedDBRole = "database"
@@ -185,6 +199,18 @@ func ManagedDatabaseClusterGVK() schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: cnpgGroup, Version: cnpgVersion, Kind: cnpgKindCluster}
 }
 
+// ManagedAppDatabaseName returns the name of the CloudNativePG Database object that keeps
+// Keycloak's schema in the managed application database: "<platform>-db-app".
+func ManagedAppDatabaseName(p *otilmv1alpha1.Platform) string {
+	return ManagedDatabaseName(p) + "-app"
+}
+
+// ManagedAppDatabaseGVK returns the preset GroupVersionKind of that Database object. The
+// reconciler uses it to GET the object when probing whether CloudNativePG has applied it.
+func ManagedAppDatabaseGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{Group: cnpgGroup, Version: cnpgVersion, Kind: cnpgKindDatabase}
+}
+
 // DatabaseManaged reports whether the Platform's database is operator-provisioned
 // (mode=managed with the managed block present). It is the single predicate the builder,
 // the readback, the gating, and the deletion path share so they never drift.
@@ -217,7 +243,8 @@ const (
 
 // ResolveManagedDatabase returns the CloudNativePG objects the operator provisions for a
 // managed database, or nil when the database is external (or managed but mis-specified).
-// It renders a Cluster and, when pgBouncer.managed, a Pooler — both as preset-GVK
+// It renders a Cluster, a Pooler when pgBouncer.managed, and the Database that keeps
+// Keycloak's schema when a managed Keycloak shares the database — all as preset-GVK
 // unstructured objects with NO owner reference (the reconciler decides ownership per the
 // deletion-safety contract: managed CRs carry no controller ownerRef and are
 // prune-excluded, so a transient de-render never deletes the database).
@@ -233,6 +260,9 @@ func ResolveManagedDatabase(p *otilmv1alpha1.Platform) []client.Object {
 	objs := []client.Object{buildCNPGCluster(p)}
 	if poolerManaged(p) {
 		objs = append(objs, buildCNPGPooler(p))
+	}
+	if KeycloakManaged(p) {
+		objs = append(objs, ManagedAppDatabase(p))
 	}
 	return objs
 }
@@ -263,7 +293,10 @@ func buildCNPGCluster(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
 		// therefore operator-owned + protected from Overrides. CNPG provisions the "ilm"
 		// database/owner the readback consumes.
 		"bootstrap": map[string]interface{}{
-			"initdb": cnpgInitDB(p),
+			"initdb": map[string]interface{}{
+				"database": managedDBAppName,
+				"owner":    managedDBAppName,
+			},
 		},
 	}
 
@@ -306,31 +339,21 @@ func buildCNPGCluster(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
 	return u
 }
 
-// cnpgInitDB renders the CNPG spec.bootstrap.initdb block: the operator-owned application
-// database + owner (the readback contract), plus — when a MANAGED Keycloak shares this managed
-// database — a postInitApplicationSQL statement that pre-creates Keycloak's dedicated schema.
-//
-// WHY the schema must be pre-created: a managed Keycloak shares this PostgreSQL under a
-// dedicated schema (spec.db.schema=keycloak → KC_DB_SCHEMA), but Keycloak/Liquibase does NOT
-// create the schema — it expects it to pre-exist and otherwise crash-loops with
-// 'schema "keycloak" does not exist'. CNPG runs postInitApplicationSQL as a superuser in the
-// application database right after bootstrap, so "CREATE SCHEMA IF NOT EXISTS keycloak
-// AUTHORIZATION <owner>" creates the schema owned by the app owner Keycloak authenticates as.
-// IF NOT EXISTS keeps it idempotent/safe. This only applies to the MANAGED-DB + MANAGED-Keycloak
-// combination (an external DB is the operator's responsibility to prepare; an external Keycloak
-// uses its own DB). Without the pre-created schema the managed Keycloak crash-loops on the
-// missing schema during its Liquibase migration.
-func cnpgInitDB(p *otilmv1alpha1.Platform) map[string]interface{} {
-	initdb := map[string]interface{}{
-		"database": managedDBAppName,
-		"owner":    managedDBAppName,
+// ManagedAppDatabase renders the CloudNativePG Database that keeps Keycloak's schema in the
+// managed application database, owned by the role Keycloak connects as. Keycloak does not
+// create its schema, and unlike bootstrap SQL, which runs only when the cluster is created,
+// CloudNativePG reconciles a Database object on an existing cluster too, so a Keycloak switched
+// to managed later still gets it.
+func ManagedAppDatabase(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
+	spec := map[string]interface{}{
+		"cluster": map[string]interface{}{"name": ManagedDatabaseName(p)},
+		"name":    managedDBAppName,
+		"owner":   managedDBAppName,
+		"schemas": []interface{}{
+			map[string]interface{}{"name": KeycloakDBSchema, "owner": managedDBAppName},
+		},
 	}
-	if KeycloakManaged(p) {
-		initdb["postInitApplicationSQL"] = []interface{}{
-			"CREATE SCHEMA IF NOT EXISTS " + keycloakDBSchema + " AUTHORIZATION " + managedDBAppName,
-		}
-	}
-	return initdb
+	return newManagedUnstructured(p, cnpgAPIVersion, cnpgKindDatabase, ManagedAppDatabaseName(p), managedDBRole, spec)
 }
 
 // managedInstances returns the configured instance count, defaulting to 1 (the CRD also

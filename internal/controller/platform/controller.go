@@ -230,7 +230,7 @@ func (r *Reconciler) event(p *otilmv1alpha1.Platform, eventType, reason, message
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=issuers;certificates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;httproutes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters;poolers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters;databases;poolers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rabbitmq.com,resources=rabbitmqclusters;vhosts;users;permissions;exchanges;queues;bindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=k8s.keycloak.org,resources=keycloaks;keycloakrealmimports,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
@@ -1084,16 +1084,17 @@ func (r *Reconciler) handleDeletion(ctx context.Context, p *otilmv1alpha1.Platfo
 // handleManagedDatabaseDeletion enforces the deletion-safety contract for a managed
 // database on Platform deletion:
 //
-//   - Retain (default) → leave the CloudNativePG Cluster (and Pooler) and their data
-//     intact; record a Warning Event naming the retained database so the operator is
-//     visible (NO connection coordinate in the message). The operator deletes nothing.
-//   - Delete → delete the Cluster (CloudNativePG garbage-collects its PVCs) and the
-//     Pooler, then proceed. A NotFound is ignored (already gone); any other delete error
-//     is returned so the finalizer keeps the Platform and the teardown is retried.
+//   - Retain (default) → leave the CloudNativePG Cluster (and its Pooler and Database) and
+//     their data intact; record a Warning Event naming the retained database so the operator
+//     is visible (NO connection coordinate in the message). The operator deletes nothing.
+//   - Delete → delete the Database, the Cluster (CloudNativePG garbage-collects its PVCs), and
+//     the Pooler, then proceed. A NotFound, or a kind the cluster does not serve, is ignored;
+//     any other delete error is returned so the finalizer keeps the Platform and the teardown
+//     is retried.
 //
 // It is a no-op for an external database (the operator provisions nothing to tear down).
 func (r *Reconciler) handleManagedDatabaseDeletion(ctx context.Context, p *otilmv1alpha1.Platform, policy otilmv1alpha1.PlatformDeletionPolicy) error {
-	return r.handleManagedInfraDeletion(ctx, p, policy, r.teardownGate(p, r.databaseGate), "RetainedDatabase", "DeletedDatabase")
+	return r.handleManagedInfraDeletion(ctx, p, policy, r.teardownGate(p, r.databaseDeletionGate), "RetainedDatabase", "DeletedDatabase")
 }
 
 // handleManagedMessagingDeletion enforces the deletion-safety contract for a managed

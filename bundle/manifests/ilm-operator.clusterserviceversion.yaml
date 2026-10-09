@@ -672,7 +672,7 @@ metadata:
         }
       ]
     capabilities: Basic Install
-    createdAt: "2026-10-05T20:09:24Z"
+    createdAt: "2026-10-08T15:41:41Z"
     operators.operatorframework.io/builder: operator-sdk-v1.42.2
     operators.operatorframework.io/project_layout: go.kubebuilder.io/v4
   name: ilm-operator.v0.0.1
@@ -919,6 +919,7 @@ spec:
           - postgresql.cnpg.io
           resources:
           - clusters
+          - databases
           - poolers
           verbs:
           - create

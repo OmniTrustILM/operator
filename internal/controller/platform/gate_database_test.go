@@ -22,6 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -51,7 +52,45 @@ func managedDBScheme(t *testing.T) *runtime.Scheme {
 	poolerGVK := clusterGVK.GroupVersion().WithKind("Pooler")
 	s.AddKnownTypeWithName(poolerGVK, &unstructured.Unstructured{})
 	s.AddKnownTypeWithName(poolerGVK.GroupVersion().WithKind("PoolerList"), &unstructured.UnstructuredList{})
+	s.AddKnownTypeWithName(appDatabaseGVK, &unstructured.Unstructured{})
+	s.AddKnownTypeWithName(appDatabaseGVK.GroupVersion().WithKind("DatabaseList"), &unstructured.UnstructuredList{})
 	return s
+}
+
+// appDatabaseGVK is the CloudNativePG Database kind that keeps Keycloak's schema.
+var appDatabaseGVK = schema.GroupVersionKind{Group: "postgresql.cnpg.io", Version: "v1", Kind: "Database"}
+
+// managedDBWithManagedKeycloakCR is managedDBPlatformCR with a managed Keycloak sharing the
+// database.
+func managedDBWithManagedKeycloakCR() *otilmv1alpha1.Platform {
+	p := managedDBPlatformCR()
+	p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{
+		Mode:    "managed",
+		Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1},
+	}
+	return p
+}
+
+// appliedAppDatabase returns the Database object that keeps Keycloak's schema with the status
+// CloudNativePG 1.26+ reports once it has applied it.
+func appliedAppDatabase(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
+	return appDatabaseWithStatus(p, 1, map[string]interface{}{
+		"applied":            true,
+		"observedGeneration": int64(1),
+		"schemas":            []interface{}{map[string]interface{}{"name": "keycloak", "applied": true}},
+	})
+}
+
+// appDatabaseWithStatus returns the Database object that keeps Keycloak's schema at the given
+// generation, with the given status.
+func appDatabaseWithStatus(p *otilmv1alpha1.Platform, generation int64, status map[string]interface{}) *unstructured.Unstructured {
+	db := &unstructured.Unstructured{}
+	db.SetGroupVersionKind(appDatabaseGVK)
+	db.SetName(p.Name + "-db-app")
+	db.SetNamespace(p.Namespace)
+	db.SetGeneration(generation)
+	_ = unstructured.SetNestedMap(db.Object, status, "status")
+	return db
 }
 
 // managedDBPlatformCR is an in-namespace Platform with a managed database.
@@ -204,6 +243,91 @@ func TestGateDatabaseClusterReadyButSecretMissingWaits(t *testing.T) {
 	cond := databaseReadyCondition(t, p)
 	require.NotNil(t, cond)
 	assert.Equal(t, "WaitingForDatabase", cond.Reason)
+}
+
+// TestGateDatabaseWaitsForKeycloakSchema: with a managed Keycloak sharing the database,
+// DatabaseReady waits until CloudNativePG has applied Keycloak's schema, because Keycloak is
+// provisioned only once the database is ready and crash-loops without its schema.
+func TestGateDatabaseWaitsForKeycloakSchema(t *testing.T) {
+	p := managedDBWithManagedKeycloakCR()
+	cluster, secret := readyClusterAndSecret(p)
+	r := newManagedDBReconciler(t, programmableDetector{available: map[string]bool{cnpgGroup: true}}, p, cluster, secret)
+
+	ready, requeue, err := r.gateDatabase(context.Background(), p, guardTestBundle(), newDesiredSet())
+	require.NoError(t, err)
+	assert.False(t, ready, "Keycloak's schema is not applied yet")
+	assert.True(t, requeue)
+	cond := databaseReadyCondition(t, p)
+	require.NotNil(t, cond)
+	assert.Equal(t, "WaitingForDatabase", cond.Reason)
+}
+
+// TestGateDatabaseWaitsUntilKeycloakSchemaApplied: readiness waits until CloudNativePG's current,
+// successful reconciliation reports Keycloak's schema applied. CloudNativePG 1.25 serves the
+// Database kind without schema management, so the API drops spec.schemas and CloudNativePG
+// reports the object applied without creating the schema; a status from an earlier generation,
+// or from a failed reconciliation that kept the earlier schema entries, describes no current
+// schema either.
+func TestGateDatabaseWaitsUntilKeycloakSchemaApplied(t *testing.T) {
+	appliedSchema := []interface{}{map[string]interface{}{"name": "keycloak", "applied": true}}
+	tests := []struct {
+		name       string
+		generation int64
+		status     map[string]interface{}
+	}{
+		{
+			name:       "schemas not reported (CloudNativePG 1.25)",
+			generation: 1,
+			status:     map[string]interface{}{"applied": true, "observedGeneration": int64(1)},
+		},
+		{
+			name:       "schema not applied yet",
+			generation: 1,
+			status: map[string]interface{}{
+				"applied":            false,
+				"observedGeneration": int64(1),
+				"schemas":            []interface{}{map[string]interface{}{"name": "keycloak", "applied": false}},
+			},
+		},
+		{
+			name:       "status from an earlier generation",
+			generation: 2,
+			status:     map[string]interface{}{"applied": true, "observedGeneration": int64(1), "schemas": appliedSchema},
+		},
+		{
+			name:       "current reconciliation failed",
+			generation: 1,
+			status:     map[string]interface{}{"applied": false, "observedGeneration": int64(1), "schemas": appliedSchema},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := managedDBWithManagedKeycloakCR()
+			cluster, secret := readyClusterAndSecret(p)
+			r := newManagedDBReconciler(t, programmableDetector{available: map[string]bool{cnpgGroup: true}}, p,
+				cluster, secret, appDatabaseWithStatus(p, tt.generation, tt.status))
+
+			ready, requeue, err := r.gateDatabase(context.Background(), p, guardTestBundle(), newDesiredSet())
+			require.NoError(t, err)
+			assert.False(t, ready, "the database is not ready until Keycloak's schema is applied")
+			assert.True(t, requeue)
+		})
+	}
+}
+
+func TestGateDatabaseReadyOnceKeycloakSchemaApplied(t *testing.T) {
+	p := managedDBWithManagedKeycloakCR()
+	cluster, secret := readyClusterAndSecret(p)
+	r := newManagedDBReconciler(t, programmableDetector{available: map[string]bool{cnpgGroup: true}}, p,
+		cluster, secret, appliedAppDatabase(p))
+
+	ready, requeue, err := r.gateDatabase(context.Background(), p, guardTestBundle(), newDesiredSet())
+	require.NoError(t, err)
+	assert.True(t, ready, "a Ready Cluster with its app Secret and Keycloak's schema applied is ready")
+	assert.False(t, requeue)
+	cond := databaseReadyCondition(t, p)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
 func TestGateDatabaseRejectedOverrideIsHardError(t *testing.T) {
