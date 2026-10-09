@@ -63,6 +63,8 @@ spec:
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  networkPolicy:
+    enabled: true # default; admits ports 8080/8081 only from this namespace and the operator
   podAnnotations:
     example.com/scrape: "true"
   podLabels:

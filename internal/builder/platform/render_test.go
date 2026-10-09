@@ -30,7 +30,7 @@ func TestRenderPlatformWorkloadTypeStatefulSet(t *testing.T) {
 	var coreSTS *appsv1.StatefulSet
 	deployNames := map[string]bool{}
 	stsNames := map[string]bool{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		switch v := o.(type) {
 		case *appsv1.Deployment:
 			deployNames[v.Name] = true
@@ -87,14 +87,14 @@ func TestRenderPlatformWorkloadTypeDefaultsToDeployment(t *testing.T) {
 	p := basePlatform()
 	p.Spec.Utils.Enabled = true
 
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		_, isSTS := o.(*appsv1.StatefulSet)
 		assert.Falsef(t, isSTS, "no StatefulSet must be rendered by default (got %q)", o.GetName())
 	}
 
 	// And core specifically is a Deployment.
 	var coreDep *appsv1.Deployment
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if d, ok := o.(*appsv1.Deployment); ok && d.Name == coreComponentName {
 			coreDep = d
 		}
@@ -112,7 +112,7 @@ func TestRenderPlatformWorkloadTypeStatefulSetOmitsReplicasUnderHPA(t *testing.T
 	p.Spec.Core.Autoscaling = &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 5, TargetCPUUtilization: &cpu}
 
 	var coreSTS *appsv1.StatefulSet
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if s, ok := o.(*appsv1.StatefulSet); ok && s.Name == coreComponentName {
 			coreSTS = s
 		}
@@ -131,7 +131,7 @@ func TestMultiReplicaCoreRendersAStatefulSet(t *testing.T) {
 	p.Spec.Core.Replicas = i32Ptr(3)
 
 	var sts *appsv1.StatefulSet
-	for _, obj := range RenderPlatformBase(p) {
+	for _, obj := range RenderPlatformBase(p, testOperatorNamespace) {
 		if s, ok := obj.(*appsv1.StatefulSet); ok && s.Name == coreComponentName {
 			sts = s
 		}
@@ -142,7 +142,7 @@ func TestMultiReplicaCoreRendersAStatefulSet(t *testing.T) {
 
 	single := basePlatform()
 	var dep *appsv1.Deployment
-	for _, obj := range RenderPlatformBase(single) {
+	for _, obj := range RenderPlatformBase(single, testOperatorNamespace) {
 		if d, ok := obj.(*appsv1.Deployment); ok && d.Name == coreComponentName {
 			dep = d
 		}
@@ -154,7 +154,7 @@ func TestMultiReplicaCoreRendersAStatefulSet(t *testing.T) {
 
 func TestRenderPlatformObjects(t *testing.T) {
 	// utils disabled (default); check core + scheduler + auth-opa-policies.
-	objs := RenderPlatform(basePlatform())
+	objs := RenderPlatform(basePlatform(), testOperatorNamespace)
 	w := bom.Wiring()
 
 	// objKey identifies a rendered object by kind + name for presence assertions.
@@ -242,7 +242,7 @@ func TestRenderPlatformAllContainersSCCHardened(t *testing.T) {
 	p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{Enabled: true, Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"}}
 
 	var containersChecked int
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		dep, ok := o.(*appsv1.Deployment)
 		if !ok {
 			continue
@@ -279,7 +279,7 @@ func TestRenderPlatformReadOnlyRootFilesystem(t *testing.T) {
 	p.Spec.Utils.Enabled = true
 
 	deps := map[string]*appsv1.Deployment{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok {
 			deps[dep.Name] = dep
 		}
@@ -370,7 +370,7 @@ func TestRenderPlatformAdditionalEnvOnEveryComponent(t *testing.T) {
 	}
 
 	deps := map[string]*appsv1.Deployment{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok {
 			deps[dep.Name] = dep
 		}
@@ -401,7 +401,7 @@ func TestRenderPlatformStampsTheVersionOnEveryPodTemplate(t *testing.T) {
 	p.Spec.Common.PodAnnotations = map[string]string{PlatformVersionAnnotation: "not-a-version"}
 
 	deps := map[string]*appsv1.Deployment{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok {
 			deps[dep.Name] = dep
 		}
@@ -436,7 +436,7 @@ func TestRenderPlatformAdditionalEnvOmittedWhenUnset(t *testing.T) {
 	p := basePlatform()
 	p.Spec.Utils.Enabled = true
 	deps := map[string]*appsv1.Deployment{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok {
 			deps[dep.Name] = dep
 		}
@@ -469,7 +469,7 @@ func TestRenderPlatformComponentEnvOverridesGlobal(t *testing.T) {
 	p.Spec.Core.Env = []otilmv1alpha1.EnvVar{{Name: javaOptsEnv, Value: "-Xmx512m"}}
 
 	var core *appsv1.Deployment
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok && dep.Name == "core" {
 			core = dep
 		}
@@ -506,7 +506,7 @@ func TestRenderPlatformComponentEnvOverridesGlobal(t *testing.T) {
 func TestRenderPlatformUtilsEnabled(t *testing.T) {
 	p := basePlatform()
 	p.Spec.Utils.Enabled = true
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 
 	type objKey struct{ kind, name string }
 	got := map[objKey]client.Object{}
@@ -536,7 +536,7 @@ func TestRenderPlatformUtilsEnabled(t *testing.T) {
 // keyed by name, the shared setup for the spec.global passthrough tests.
 func renderedDeployments(p *otilmv1alpha1.Platform) map[string]*appsv1.Deployment {
 	deps := map[string]*appsv1.Deployment{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if dep, ok := o.(*appsv1.Deployment); ok {
 			deps[dep.Name] = dep
 		}

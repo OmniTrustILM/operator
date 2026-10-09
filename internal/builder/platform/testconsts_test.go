@@ -24,6 +24,10 @@ const (
 	testILMDB        = "ilm-db"
 	testProvURL      = "https://prov.example.com"
 
+	// testOperatorNamespace is the namespace the operator renders from; the ingress default-deny
+	// admits the operator's pods from it.
+	testOperatorNamespace = "ilm-operator-system"
+
 	// admin_test.go.
 	testClientKey = "client.key"
 
