@@ -724,7 +724,10 @@ func ResolveAuth(p *otilmv1alpha1.Platform) common.Component {
 		Command:  imageCommand(p.Spec.Common.Image, p.Spec.Auth.Image),
 		Args:     imageArgs(p.Spec.Common.Image, p.Spec.Auth.Image),
 		Env: []common.EnvPair{
-			{Name: w.AuthCreateUsersEnv, Value: strconv.FormatBool(p.Spec.Auth.Create.CreateUnknownUsers)},
+			// The password method creates the admin only in Keycloak, so auth must be able to
+			// create its ILM user at the first sign-in: an active password method turns
+			// unknown-user creation on.
+			{Name: w.AuthCreateUsersEnv, Value: strconv.FormatBool(p.Spec.Auth.Create.CreateUnknownUsers || RegisterAdminPasswordEnabled(p))},
 			{Name: w.AuthCreateRolesEnv, Value: strconv.FormatBool(p.Spec.Auth.Create.CreateUnknownRoles)},
 			{Name: w.AuthSyncPolicyEnv, Value: syncPolicy},
 			{Name: w.AuthAspNetURLsEnv, Value: w.AuthAspNetURLs},

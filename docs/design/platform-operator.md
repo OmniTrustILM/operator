@@ -153,6 +153,8 @@ spec:
   # password (a Keycloak realm user with the superadmin attribute; OFF by default): the operator
   #   creates the user via the Keycloak admin API with the password from password.secretRef
   #   (read-only, never minted/logged). REQUIRES keycloak.mode=managed; tracked by AdminUserReady.
+  #   Turns on auth.create.createUnknownUsers: it creates the admin only in Keycloak, so ILM
+  #   creates its own user record at the first sign-in.
   registerAdmin:
     enabled: true
     username: ""

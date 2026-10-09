@@ -22,7 +22,7 @@ The fields on `spec` itself; [How configuration is organized](./platform.md#how-
 | `networkPolicy` | enabled | Default-deny isolation (opt-out), plus `ingressNamespace` (default `ingress-nginx`). |
 | `core` | — | Core overrides, plus `clientCertHeader` (operator-filled `ssl-client-cert`), `timeQualityMonitor`, and `instanceId` — which admission accepts only on a single-replica Core: not alongside `autoscaling`, and under `highAvailability.enabled` only with an explicit `core.replicas: 1`, because one id shared by several replicas would emit identical certificate serial numbers. |
 | `provisioning` | `external` | Remote-proxy provisioning wiring; `deploy` renders the bundled service. |
-| `auth` | — | Auth overrides, plus `create.createUnknownUsers`/`createUnknownRoles` (both `false`) and `syncPolicy` (`create-only`). |
+| `auth` | — | Auth overrides, plus `create.createUnknownUsers`/`createUnknownRoles` (both `false`; `registerAdmin.password` turns `createUnknownUsers` on) and `syncPolicy` (`create-only`). |
 | `scheduler` / `authOpaPolicies` / `feAdministrator` / `utils` / `gateway` | — | Component overrides. `utils.enabled` is opt-in; `gateway` adds `cors`, `logging.request`, and `trustedIps`; `feAdministrator` adds `url`. |
 | `edge` | none | The external HTTPS edge — Ingress or Gateway API, plus TLS. |
 | `registerAdmin` | off | First-administrator bootstrap, by certificate and/or password. Both methods are walked through in [Read back the generated credentials](./platform.md#read-back-the-generated-credentials). |

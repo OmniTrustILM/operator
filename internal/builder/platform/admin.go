@@ -130,6 +130,20 @@ func RegisterAdminCertEnabled(p *otilmv1alpha1.Platform) bool {
 	return registerAdminCertEnabled(p)
 }
 
+// RegisterAdminPasswordEnabled reports whether the PASSWORD admin method is active: the
+// bootstrap is enabled, the password sub-block is present and enabled, AND Keycloak is managed.
+// The PlatformSpec CEL already requires keycloak.mode=managed for an enabled password method, so
+// the managed check is belt-and-suspenders for a hand-mutated object. The reconciler gates the
+// Keycloak realm-user creation on it and ResolveAuth turns on auth's unknown-user creation with
+// it, so both use one definition.
+func RegisterAdminPasswordEnabled(p *otilmv1alpha1.Platform) bool {
+	if !registerAdminEnabled(p) {
+		return false
+	}
+	pw := p.Spec.RegisterAdmin.Password
+	return pw != nil && pw.Enabled && KeycloakManaged(p)
+}
+
 // AdminCertKey resolves the effective in-Secret key the admin client certificate is read
 // from. For source=provided it is the spec.registerAdmin.certKey override when set, else
 // the wiring-profile default ("tls.crt"). For source=generated it is ALWAYS the default —
