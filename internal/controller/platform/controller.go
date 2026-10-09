@@ -183,6 +183,10 @@ type Reconciler struct {
 	// defaults to the real HTTP client; tests inject a factory returning a scripted broker so
 	// the drain is exercised without one.
 	BrokerAdmins brokerAdminFactory
+	// OperatorNamespace is the namespace the operator runs in. The platform's ingress
+	// default-deny admits the operator's pods from it, so the operator reaches Core when a
+	// Connector registers through the in-cluster address. Empty admits no operator.
+	OperatorNamespace string
 }
 
 // eventf records a namespaced Event on the Platform, formatting the message from args.
@@ -923,7 +927,7 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 		core: coreChecksum, gateway: gatewayChecksum, frozen: coreFrozenChecksum,
 		coreExists: coreExists, coreReady: coreReady,
 	}
-	for _, obj := range platformbuilder.RenderPlatformBase(platform) {
+	for _, obj := range platformbuilder.RenderPlatformBase(platform, r.OperatorNamespace) {
 		objSwitching, objHandled, objRes, objErr := r.applyBaseObject(ctx, platform, desired, mig, sums, obj)
 		if objHandled {
 			return objSwitching, true, objRes, objErr

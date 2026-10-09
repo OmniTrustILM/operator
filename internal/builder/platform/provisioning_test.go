@@ -36,7 +36,7 @@ func deployProvisioningPlatform() *otilmv1alpha1.Platform {
 func renderDeployments(p *otilmv1alpha1.Platform) (map[string]*appsv1.Deployment, map[string]*corev1.Service) {
 	deps := map[string]*appsv1.Deployment{}
 	svcs := map[string]*corev1.Service{}
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		switch v := o.(type) {
 		case *appsv1.Deployment:
 			deps[v.Name] = v

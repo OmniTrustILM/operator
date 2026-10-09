@@ -57,6 +57,9 @@ const (
 	// instanceName is the Platform CR name (and resource-prefix) every variant uses, so
 	// the recorded golden names are stable across runs.
 	instanceName = "ilm"
+	// operatorNamespace is the namespace the operator renders from; the platform's ingress
+	// default-deny admits the operator's pods from it.
+	operatorNamespace = "ilm-operator-system"
 	// goldenDir is the directory holding the checked-in golden files.
 	goldenDir = "testdata"
 	// docSeparator joins serialized objects into a single multi-document YAML stream.
@@ -414,7 +417,7 @@ func renderToYAML(p *otilmv1alpha1.Platform) ([]byte, error) {
 		return nil, err
 	}
 
-	rendered := platformbuilder.RenderPlatform(p)
+	rendered := platformbuilder.RenderPlatform(p, operatorNamespace)
 	objs := make([]*unstructured.Unstructured, 0, len(rendered))
 	for _, o := range rendered {
 		u, err := toUnstructured(scheme, o)

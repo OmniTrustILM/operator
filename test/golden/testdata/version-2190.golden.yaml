@@ -900,6 +900,12 @@ spec:
   ingress:
   - from:
     - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ilm-operator-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ilm-operator
   podSelector:
     matchLabels:
       app.kubernetes.io/instance: ilm

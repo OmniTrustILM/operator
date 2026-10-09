@@ -467,6 +467,16 @@ type ServiceAccountSpec struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// WorkloadNetworkPolicySpec switches the NetworkPolicy the operator renders for a Connector or a
+// Proxy.
+type WorkloadNetworkPolicySpec struct {
+	// Enabled renders the NetworkPolicy. Unset counts as true. False removes the policy, for
+	// example on a CNI that does not enforce NetworkPolicy or when you manage isolation yourself.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
 // WorkloadKind selects the apps/v1 workload kind the operator renders for a component.
 // +kubebuilder:validation:Enum=Deployment;StatefulSet
 type WorkloadKind string

@@ -137,15 +137,16 @@ cmd/
   values2platform/     - Helm-values → Platform CR migration converter (CLI)
 internal/
   builder/
-    common/            - CRD-agnostic builders: Component render model, ResolveImage, Build{Deployment,StatefulSet,Service,ServiceAccount,PDB,HPA,ServiceMonitor}, SCC-clean pod security
-    connector/         - Connector-specific builders (Deployment, Service, SA, PDB, ServiceMonitor)
+    common/            - CRD-agnostic builders: Component render model, ResolveImage, Build{Deployment,StatefulSet,Service,ServiceAccount,PDB,HPA,ServiceMonitor,NetworkPolicy}, SCC-clean pod security
+    connector/         - Connector-specific builders (Deployment, Service, SA, NetworkPolicy, PDB, ServiceMonitor)
     platform/          - Platform-specific builders (component resolution, edge, managed-infra CRs)
-    proxy/             - Proxy-specific builders (token-only Deployment, Service with http+api ports, SA, PDB, ServiceMonitor at /metrics)
+    proxy/             - Proxy-specific builders (token-only Deployment, Service with http+api ports, SA, NetworkPolicy, PDB, ServiceMonitor at /metrics)
   checksum/            - Configuration checksum utility for drift detection
   controller/
     connector/         - Connector reconciler (+ watches)
     platform/          - Platform reconciler (capability gates, prune, OIDC wiring, lifecycle, the managed-infra upgrade guard, the messaging-migration phase machine: fence → drain → cutover → cleanup)
     proxy/             - Proxy reconciler — pure consumer of the provisioning-issued config token; no platform calls
+  incluster/           - The operator's own namespace, read from its pod at startup (every rendered NetworkPolicy admits the operator from it)
   monitoring/          - Prometheus metrics registration + event recorder helpers
   rabbitmq/            - Minimal RabbitMQ Management API client (drain-criteria reads for the messaging migration; credentials from the managed cluster's Secret, never logged)
   registration/        - ILM platform registration client (connector → platform) + OIDC wiring
@@ -189,6 +190,7 @@ The operator manages the **ILM platform itself** via the `Platform` CRD, alongsi
 
 - **No secrets in CRs.** Sensitive values are `Secret` references only (`*SecretRef`) — never inline. Read referenced Secrets read-only and inject via `secretKeyRef`/`envFrom` (never copy values into rendered objects). Never put secret values *or* connection coordinates (host/port/URI) in status, conditions, events, or logs.
 - **SCC-clean pods (OpenShift `restricted-v2`).** `runAsNonRoot: true`, **no hard-coded `runAsUser`**, drop **all** capabilities, `seccompProfile: RuntimeDefault`, no privilege escalation.
+- **Network isolation.** Every workload the operator renders admits ingress only from its own namespace and from the operator's pods (`common.OperatorPeers`: the operator namespace from `internal/incluster` plus `app.kubernetes.io/name: ilm-operator`); egress stays open. The Platform's default-deny and each Connector's and Proxy's own policy (opt-out via `spec.networkPolicy.enabled`) follow this rule.
 - **Deletion safety.** Add the finalizer first; `spec.deletionPolicy` (default `Retain`) must leave managed (upstream-operator) infrastructure and its data intact. Clean cluster-scoped artifacts (webhook config, ClusterRoles) via finalizer/labels — not owner-reference GC (cross-namespace ownerRefs are invalid).
 - **Stateful infra is delegated** to upstream operators (CloudNativePG; RabbitMQ Cluster + Messaging Topology; Keycloak) when `managed`, or referenced when `external` — never re-templated in Go, never via the Helm SDK.
 - **Upstream-operator dependencies are detected (RESTMapper) and gated, never assumed.** A required upstream CRD that is not served means skip the dependent objects, surface a non-fatal `False` condition with an actionable reason, and requeue to self-heal — not a cryptic apply failure or a whole-Platform `Degraded`. cert-manager is external/prerequisite (cluster-singleton, never installed by the operator) and required only for cert-managed edge modes (`tls.source` `internal`/`letsEncrypt`); Gateway API CRDs only for `type=gatewayAPI`; BYO `tls.source=secret` needs neither. The detector (`pkg/capabilities`) is generic and reused for the managed-infra (CNPG/RabbitMQ/Keycloak) checks.
@@ -225,7 +227,7 @@ Release day is a data-only flip: set `Released: true` on the bundle and move `De
 The operator is structured so a new Kind follows the same shape as `Connector`, `Platform`, and `Proxy` (`Proxy` was added exactly this way). The pattern, end to end:
 
 1. **Types** — add `api/v1alpha1/<kind>_types.go` (Spec/Status, kubebuilder markers, printer columns). Reuse the shared building-block specs in `common_types.go` (`ImageSpec`, `EnvVar`, ref + key-mapping types, `ProbeSpec`, `MetricsSpec`, …) rather than re-declaring them. Run `make generate manifests`.
-2. **Builders** — put pure, unit-tested builder functions under `internal/builder/<kind>/`, composing the CRD-agnostic primitives in `internal/builder/common/` (the Component render model, `ResolveImage`, the Deployment/StatefulSet/Service/SA/PDB/HPA/ServiceMonitor builders, SCC-clean pod security). Builders take a spec and return a K8s object — no client calls.
+2. **Builders** — put pure, unit-tested builder functions under `internal/builder/<kind>/`, composing the CRD-agnostic primitives in `internal/builder/common/` (the Component render model, `ResolveImage`, the Deployment/StatefulSet/Service/SA/PDB/HPA/ServiceMonitor/NetworkPolicy builders, SCC-clean pod security). Builders take a spec and return a K8s object — no client calls.
 3. **Controller** — add `internal/controller/<kind>/` with a thin reconciler: `For(<Kind>)`, `Owns(...)` the children, `Watches(Secret/ConfigMap)` for config-drift. Delegate all rendering to the builders; use `meta.SetStatusCondition` (with `observedGeneration`) for status.
 4. **Apply strategy** — prefer **Server-Side Apply** (stable field manager `ilm-operator`, `ForceOwnership`) for a render-then-apply, multi-child or co-owned model; `controllerutil.CreateOrUpdate` is fine for a simple single-owner case.
 5. **Capabilities** — gate any dependency on an upstream CRD through the generic detector in `pkg/capabilities` (skip + non-fatal condition + requeue, never assume-and-fail).

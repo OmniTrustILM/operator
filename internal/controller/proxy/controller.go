@@ -8,11 +8,13 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -59,11 +61,14 @@ type Reconciler struct {
 	// Capabilities detects whether optional upstream CRDs (ServiceMonitor) are served.
 	// Defaulted from the manager's RESTMapper in SetupWithManager when nil.
 	Capabilities *capabilities.Detector
+	// OperatorNamespace is the namespace the operator runs in. Each proxy's NetworkPolicy admits
+	// the operator's pods from it. Empty admits no operator.
+	OperatorNamespace string
 }
 
 // The Proxy reconciler creates Deployments/Services/ServiceAccounts via CreateOrUpdate
 // with owner references (removed by owner-ref GC), so those need no delete verb. It
-// DOES explicitly Delete a now-disabled PodDisruptionBudget / ServiceMonitor. The
+// DOES explicitly Delete a now-disabled PodDisruptionBudget / ServiceMonitor / NetworkPolicy. The
 // child-resource and Secret/ConfigMap/event rules are shared with the Connector
 // reconciler's markers; only the proxies rules are new.
 // +kubebuilder:rbac:groups=otilm.com,resources=proxies,verbs=get;list;watch;update;patch
@@ -330,6 +335,9 @@ func (r *Reconciler) reconcileChildResources(ctx context.Context, px *otilmv1alp
 	if err := r.reconcileService(ctx, px); err != nil {
 		return false, err
 	}
+	if err := r.reconcileNetworkPolicy(ctx, px); err != nil {
+		return false, err
+	}
 	if err := r.reconcilePDB(ctx, px); err != nil {
 		return false, err
 	}
@@ -386,6 +394,42 @@ func (r *Reconciler) reconcileService(ctx context.Context, px *otilmv1alpha1.Pro
 		svc.Spec.Ports = desired.Spec.Ports
 		return ctrl.SetControllerReference(px, svc, r.Scheme)
 	})
+	return err
+}
+
+// errNetworkPolicyNotOwned stops CreateOrUpdate before it adopts a same-named NetworkPolicy the
+// Proxy does not control.
+var errNetworkPolicyNotOwned = errors.New("the NetworkPolicy is not controlled by the Proxy")
+
+// reconcileNetworkPolicy creates or updates the Proxy's NetworkPolicy, or deletes it when
+// spec.networkPolicy.enabled is false. It only touches the policy the Proxy controls: a same-named
+// policy it does not control belongs to the user, stays as it is, and is reported with a Warning
+// event while the setting is on.
+func (r *Reconciler) reconcileNetworkPolicy(ctx context.Context, px *otilmv1alpha1.Proxy) error {
+	desired := proxybuilder.BuildNetworkPolicy(px, r.OperatorNamespace)
+	if desired == nil {
+		np := &networkingv1.NetworkPolicy{}
+		key := types.NamespacedName{Name: proxybuilder.ChildResourceName(px), Namespace: px.Namespace}
+		if err := r.Get(ctx, key, np); err != nil || !metav1.IsControlledBy(np, px) {
+			return client.IgnoreNotFound(err)
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, np))
+	}
+
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		if np.ResourceVersion != "" && !metav1.IsControlledBy(np, px) {
+			return errNetworkPolicyNotOwned
+		}
+		np.Labels = desired.Labels
+		np.Spec = desired.Spec
+		return ctrl.SetControllerReference(px, np, r.Scheme)
+	})
+	if errors.Is(err, errNetworkPolicyNotOwned) {
+		r.Recorder.Eventf(px, corev1.EventTypeWarning, monitoring.ReasonNetworkPolicyNotOwned,
+			"NetworkPolicy %q is not owned by this Proxy; leaving it untouched", np.Name)
+		return nil
+	}
 	return err
 }
 
@@ -589,6 +633,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.findProxiesForSecret)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.findProxiesForConfigMap)).
 		Complete(r)

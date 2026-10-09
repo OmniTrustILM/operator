@@ -49,6 +49,9 @@ var (
 	fakeOIDC *fakeOIDCRegistrar
 )
 
+// testOperatorNamespace is the namespace the suite's reconciler admits the operator from.
+const testOperatorNamespace = "ilm-operator-system"
+
 // oidcCall captures one FetchClientSecret invocation for assertions.
 type oidcCall struct {
 	keycloakBaseURL string
@@ -200,6 +203,8 @@ var _ = BeforeSuite(func() {
 		OIDCRegistrar: fakeOIDC,                                // injected so OIDC-wiring specs drive the outcome
 		BrokerAdmins:  fakeBrokerAdmins.factory,                // injected so no drain ever opens a socket from a test
 		Recorder:      mgr.GetEventRecorderFor("ilm-operator"), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		// The default-deny admits the operator from this namespace.
+		OperatorNamespace: testOperatorNamespace,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

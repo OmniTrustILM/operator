@@ -251,7 +251,9 @@ model — secure but unable to break intra-platform traffic (`networking.k8s.io/
 
 1. an **ingress default-deny** selecting all of the platform's pods (by
    `app.kubernetes.io/part-of=ilm` + instance) that allows ingress only from pods in the
-   **same namespace** and denies all cross-namespace/external ingress — the high-value,
+   **same namespace** and from the **operator's pods** (its namespace plus
+   `app.kubernetes.io/name: ilm-operator`; the operator calls Core for in-cluster connector
+   registration), and denies all other cross-namespace/external ingress — the high-value,
    low-risk isolation;
 2. an **edge → api-gateway allow** permitting ingress to the api-gateway's consumer port from
    the ingress-controller namespace (`networkPolicy.ingressNamespace`, default

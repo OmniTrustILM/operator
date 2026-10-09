@@ -67,7 +67,7 @@ func TestTrustedCertsBundleKeyMatchesWiring(t *testing.T) {
 
 // coreDeployment renders the Core Deployment for a platform.
 func coreDeployment(p *otilmv1alpha1.Platform) *appsv1.Deployment {
-	objs := RenderPlatformBase(p)
+	objs := RenderPlatformBase(p, testOperatorNamespace)
 	for _, o := range objs {
 		if dep, ok := o.(*appsv1.Deployment); ok && dep.Name == coreComponentName {
 			return dep
@@ -78,7 +78,7 @@ func coreDeployment(p *otilmv1alpha1.Platform) *appsv1.Deployment {
 
 // gatewayDeployment renders the api-gateway (Kong) Deployment for a platform.
 func gatewayDeployment(p *otilmv1alpha1.Platform) *appsv1.Deployment {
-	objs := RenderPlatformBase(p)
+	objs := RenderPlatformBase(p, testOperatorNamespace)
 	for _, o := range objs {
 		if dep, ok := o.(*appsv1.Deployment); ok && dep.Name == gatewayName {
 			return dep

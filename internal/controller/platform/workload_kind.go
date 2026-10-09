@@ -177,7 +177,7 @@ func (r *Reconciler) markWorkloadKindSwitch(ctx context.Context, p *otilmv1alpha
 // migration could start into it and nothing but a watch event would bring the workload back.
 // A terminating object has not settled: it is going away, and the render has to re-create it.
 func (r *Reconciler) renderedWorkloadsSettled(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
-	for _, obj := range platformbuilder.RenderPlatformBase(p) {
+	for _, obj := range platformbuilder.RenderPlatformBase(p, r.OperatorNamespace) {
 		kind := workloadKindOf(obj)
 		if kind == "" {
 			continue
@@ -295,7 +295,7 @@ func (r *Reconciler) clearWorkloadKindSwitchIfSettled(ctx context.Context, p *ot
 // An object without THIS Platform's controller owner reference is ignored: it is somebody
 // else's, and the operator neither blocks on it nor touches it.
 func (r *Reconciler) pendingWorkloadKindChange(ctx context.Context, p *otilmv1alpha1.Platform) (workloadKindChange, bool, error) {
-	for _, obj := range platformbuilder.RenderPlatformBase(p) {
+	for _, obj := range platformbuilder.RenderPlatformBase(p, r.OperatorNamespace) {
 		old, ok := supersededWorkload(obj)
 		if !ok {
 			continue
