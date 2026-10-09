@@ -26,27 +26,27 @@ func TestResolveHealthCheck(t *testing.T) {
 		{
 			name:        "unset checks v2, then v1, every 30s within 10s",
 			healthCheck: nil,
-			want:        connector.HealthCheck{Enabled: true, Paths: []string{"/v2/health", "/v1/health"}, Period: 30 * time.Second, Timeout: 10 * time.Second},
+			want:        connector.HealthCheck{Enabled: true, Paths: []string{testV2HealthPath, testV1HealthPath}, Period: 30 * time.Second, Timeout: 10 * time.Second},
 		},
 		{
 			name:        "an empty block takes the same defaults",
 			healthCheck: &otilmv1alpha1.HealthCheckSpec{},
-			want:        connector.HealthCheck{Enabled: true, Paths: []string{"/v2/health", "/v1/health"}, Period: 30 * time.Second, Timeout: 10 * time.Second},
+			want:        connector.HealthCheck{Enabled: true, Paths: []string{testV2HealthPath, testV1HealthPath}, Period: 30 * time.Second, Timeout: 10 * time.Second},
 		},
 		{
 			name:        "an explicit path is checked alone",
-			healthCheck: &otilmv1alpha1.HealthCheckSpec{Path: "/v1/health"},
-			want:        connector.HealthCheck{Enabled: true, Paths: []string{"/v1/health"}, Period: 30 * time.Second, Timeout: 10 * time.Second},
+			healthCheck: &otilmv1alpha1.HealthCheckSpec{Path: testV1HealthPath},
+			want:        connector.HealthCheck{Enabled: true, Paths: []string{testV1HealthPath}, Period: 30 * time.Second, Timeout: 10 * time.Second},
 		},
 		{
 			name:        "period and timeout",
 			healthCheck: &otilmv1alpha1.HealthCheckSpec{PeriodSeconds: 15, TimeoutSeconds: 5},
-			want:        connector.HealthCheck{Enabled: true, Paths: []string{"/v2/health", "/v1/health"}, Period: 15 * time.Second, Timeout: 5 * time.Second},
+			want:        connector.HealthCheck{Enabled: true, Paths: []string{testV2HealthPath, testV1HealthPath}, Period: 15 * time.Second, Timeout: 5 * time.Second},
 		},
 		{
 			name:        "switched off",
 			healthCheck: &otilmv1alpha1.HealthCheckSpec{Enabled: ptr.To(false)},
-			want:        connector.HealthCheck{Enabled: false, Paths: []string{"/v2/health", "/v1/health"}, Period: 30 * time.Second, Timeout: 10 * time.Second},
+			want:        connector.HealthCheck{Enabled: false, Paths: []string{testV2HealthPath, testV1HealthPath}, Period: 30 * time.Second, Timeout: 10 * time.Second},
 		},
 	}
 	for _, tt := range tests {

@@ -485,22 +485,22 @@ func TestBuildDeploymentFSGroup(t *testing.T) {
 func TestBuildDeploymentClaimVolume(t *testing.T) {
 	conn := newTestConnector()
 	conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{
-		Name:                  "hsm-state",
+		Name:                  testHSMState,
 		MountPath:             "/var/lib/hsm-state",
-		PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: "hsm-state"},
+		PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: testHSMState},
 	}}
 
 	dep := connector.BuildDeployment(conn, testChecksum)
 
 	var vol *corev1.Volume
 	for i := range dep.Spec.Template.Spec.Volumes {
-		if dep.Spec.Template.Spec.Volumes[i].Name == "hsm-state" {
+		if dep.Spec.Template.Spec.Volumes[i].Name == testHSMState {
 			vol = &dep.Spec.Template.Spec.Volumes[i]
 		}
 	}
 	require.NotNil(t, vol, "the claim volume must reach the pod so a sidecar can mount it by name")
 	require.NotNil(t, vol.PersistentVolumeClaim)
-	assert.Equal(t, "hsm-state", vol.PersistentVolumeClaim.ClaimName)
+	assert.Equal(t, testHSMState, vol.PersistentVolumeClaim.ClaimName)
 	assert.Nil(t, vol.EmptyDir)
 }
 

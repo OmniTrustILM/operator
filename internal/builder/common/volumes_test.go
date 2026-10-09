@@ -66,15 +66,15 @@ func TestBuildVolumeEmptyDir(t *testing.T) {
 func TestBuildVolumePersistentVolumeClaim(t *testing.T) {
 	t.Run("a claim is mounted by name", func(t *testing.T) {
 		vol, mount := BuildVolume(otilmv1alpha1.VolumeSpec{
-			Name: "hsm-state", MountPath: "/var/lib/hsm-state",
-			PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: "hsm-state"},
+			Name: testHSMState, MountPath: "/var/lib/hsm-state",
+			PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: testHSMState},
 		})
 
 		require.NotNil(t, vol.PersistentVolumeClaim)
 		assert.Nil(t, vol.EmptyDir, "a claim replaces the emptyDir source")
-		assert.Equal(t, "hsm-state", vol.PersistentVolumeClaim.ClaimName)
+		assert.Equal(t, testHSMState, vol.PersistentVolumeClaim.ClaimName)
 		assert.False(t, vol.PersistentVolumeClaim.ReadOnly)
-		assert.Equal(t, "hsm-state", mount.Name, "a sidecar mounts it by this name")
+		assert.Equal(t, testHSMState, mount.Name, "a sidecar mounts it by this name")
 		assert.Equal(t, "/var/lib/hsm-state", mount.MountPath)
 		assert.False(t, mount.ReadOnly)
 	})
