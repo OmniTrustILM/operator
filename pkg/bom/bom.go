@@ -121,8 +121,8 @@ const (
 	tagCurl8160      = "8.16.0"
 )
 
-// keycloakVersion2663 is the managed Keycloak version of every current bundle; like the tags
-// above, a dedup of today's data, not a promise of cross-version alignment.
+// keycloakVersion2663 is a managed Keycloak pin several bundles share; like the tags above, a
+// dedup of today's data, not a promise of cross-version alignment.
 const keycloakVersion2663 = "26.6.3"
 
 // Image is the per-component image coordinates from a bundle. Repository is set only
