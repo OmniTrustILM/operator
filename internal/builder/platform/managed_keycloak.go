@@ -81,10 +81,10 @@ const (
 	// Keycloak CR's spec.db.vendor drives KC_DB on the pods.
 	keycloakDBVendor = "postgres"
 
-	// keycloakDBSchema is the PostgreSQL schema Keycloak uses inside the shared platform
+	// KeycloakDBSchema is the PostgreSQL schema Keycloak uses inside the shared platform
 	// database (spec.db.schema → KC_DB_SCHEMA), so Keycloak's tables do not collide with the
 	// platform's tables in the same database.
-	keycloakDBSchema = "keycloak"
+	KeycloakDBSchema = "keycloak"
 
 	// keycloakDefaultRealm is the default realm name when keycloak.realm is empty.
 	keycloakDefaultRealm = "ilm"
@@ -442,7 +442,7 @@ func keycloakDBBlock(p *otilmv1alpha1.Platform) map[string]interface{} {
 		"host":     conn.Host,
 		"port":     int64(conn.Port),
 		"database": conn.Name,
-		"schema":   keycloakDBSchema,
+		"schema":   KeycloakDBSchema,
 		// usernameSecret / passwordSecret reference the platform DB-credentials Secret by name
 		// + key (each takes {name,key}), so Keycloak authenticates to the shared DB by
 		// reference. The keys are the connection's EFFECTIVE resolved keys — the user's

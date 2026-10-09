@@ -2015,6 +2015,46 @@ func TestResolveAuthEnvDefaults(t *testing.T) {
 	assert.Equal(t, "create-only", sync, "syncPolicy defaults to create-only")
 }
 
+// TestResolveAuthCreatesUnknownUsersForPasswordAdmin: the password method creates the admin only
+// in Keycloak, so auth must be able to create its ILM user at the first sign-in — an active
+// password method renders AUTH_CREATE_UNKNOWN_USERS=true, while AUTH_CREATE_UNKNOWN_ROLES keeps
+// its own setting.
+func TestResolveAuthCreatesUnknownUsersForPasswordAdmin(t *testing.T) {
+	w := bom.Wiring()
+	cases := map[string]struct {
+		mutate    func(p *otilmv1alpha1.Platform)
+		wantUsers string
+	}{
+		"password-only admin": {wantUsers: "true"},
+		"password and certificate admins": {mutate: func(p *otilmv1alpha1.Platform) {
+			p.Spec.RegisterAdmin.Certificate = &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"}
+		}, wantUsers: "true"},
+		"certificate-only admin": {mutate: func(p *otilmv1alpha1.Platform) {
+			p.Spec.RegisterAdmin.Certificate = &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"}
+			p.Spec.RegisterAdmin.Password = nil
+		}, wantUsers: "false"},
+		"admin bootstrap disabled": {mutate: func(p *otilmv1alpha1.Platform) {
+			p.Spec.RegisterAdmin.Enabled = false
+		}, wantUsers: "false"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := passwordAdminPlatform()
+			if tc.mutate != nil {
+				tc.mutate(p)
+			}
+			c := ResolveAuth(p)
+
+			users, ok := envValue(c.Env, w.AuthCreateUsersEnv)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantUsers, users)
+			roles, ok := envValue(c.Env, w.AuthCreateRolesEnv)
+			require.True(t, ok)
+			assert.Equal(t, "false", roles, "the password admin never turns on role creation")
+		})
+	}
+}
+
 // TestResolveAuthConnectionStringIsSecretBacked is the security-critical
 // assertion: the DB connection string is referenced via secretKeyRef from the
 // operator-managed Secret (auth-db) and never appears inline anywhere in

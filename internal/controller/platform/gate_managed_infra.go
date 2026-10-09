@@ -339,9 +339,10 @@ func mergeManagedObjects(primary, extra []client.Object) []client.Object {
 //   - not managed → no-op (the operator provisions nothing to tear down).
 //   - Retain (default) → leave the managed CRs + their data intact; record a Warning Event
 //     naming the retained component (object name only — no coordinate). Deletes nothing.
-//   - Delete → delete every managed CR (the upstream operator GCs its PVCs); a NotFound is
-//     ignored (already gone); any other delete error is returned so the finalizer keeps the
-//     Platform and the teardown is retried.
+//   - Delete → delete every managed CR (the upstream operator GCs its PVCs); a NotFound
+//     (already gone) or a kind the cluster does not serve (nothing to delete) is ignored; any
+//     other delete error is returned so the finalizer keeps the Platform and the teardown is
+//     retried.
 //
 // retainReason/deleteReason are the Event reasons (e.g. "RetainedDatabase"); kind is the
 // human label in the messages/logs. The managed CRs carry NO owner reference and are
@@ -363,7 +364,7 @@ func (r *Reconciler) handleManagedInfraDeletion(ctx context.Context, p *otilmv1a
 	// Delete: reclaim every managed CR. The upstream operator GCs the PVCs when the cluster
 	// is deleted, so the operator does not touch storage directly.
 	for _, obj := range g.objects {
-		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 			return fmt.Errorf("deleting managed %s %s %q: %w", g.kind,
 				obj.GetObjectKind().GroupVersionKind().Kind, obj.GetName(), err)
 		}

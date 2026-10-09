@@ -346,6 +346,8 @@ spec:
     # an idempotent realm user with the superadmin attribute (groups: ["superadmin"]) whose
     # password comes from secretRef. REQUIRES keycloak.mode: managed (a CEL rule enforces it);
     # tracked by the AdminUserReady condition. The password is read read-only and never logged.
+    # It creates the admin only in Keycloak, so enabling it also turns on
+    # auth.create.createUnknownUsers (ILM creates the admin's user at the first sign-in).
     password:
       enabled: false
       secretRef: ilm-admin-password    # REQUIRED when enabled: generic Secret holding the password

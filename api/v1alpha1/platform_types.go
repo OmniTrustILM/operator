@@ -845,7 +845,10 @@ type GatewaySpec struct {
 // container (the .NET service); credentials are never configured here.
 type AuthCreateSpec struct {
 	// CreateUnknownUsers sets AUTH_CREATE_UNKNOWN_USERS (default false): create a
-	// user for an authenticated principal not yet present in the database.
+	// user for an authenticated principal not yet present in the database. It is turned
+	// on regardless of this value while registerAdmin.enabled and
+	// registerAdmin.password.enabled are both true: the password method creates the admin
+	// only in Keycloak, so auth must create its user at the first sign-in.
 	// +kubebuilder:default=false
 	CreateUnknownUsers bool `json:"createUnknownUsers,omitempty"`
 	// CreateUnknownRoles sets AUTH_CREATE_UNKNOWN_ROLES (default false): create a
@@ -1007,7 +1010,10 @@ type RegisterAdminSpec struct {
 	// Password configures the password (Keycloak realm user) admin method. It is OFF
 	// unless present with enabled=true, and requires keycloak.mode=managed (enforced by a
 	// PlatformSpec CEL rule — the operator creates the realm user via the Keycloak admin
-	// API). The password is ALWAYS a referenced Secret, never operator-minted.
+	// API). The password is ALWAYS a referenced Secret, never operator-minted. This method
+	// creates the admin only in Keycloak, so enabling it also turns on
+	// auth.create.createUnknownUsers, letting auth create the admin's user at the first
+	// sign-in.
 	// +optional
 	Password *AdminPasswordSpec `json:"password,omitempty"`
 }

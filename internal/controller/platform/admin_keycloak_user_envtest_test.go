@@ -13,6 +13,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,10 +63,12 @@ var _ = Describe("Password admin reconcile action", func() {
 	// ---------------------------------------------------------------
 	// Managed Keycloak (Operator absent in envtest) + password method enabled →
 	// AdminUserReady=False/WaitingForKeycloak, the platform is NOT Degraded, the
-	// registrar is never called, and the password never leaks into status.
+	// registrar is never called, the password never leaks into status, and auth is
+	// rendered with AUTH_CREATE_UNKNOWN_USERS=true (the password method creates the admin
+	// only in Keycloak).
 	// ---------------------------------------------------------------
 	Context("ManagedKeycloakNotReady", func() {
-		It("defers to WaitingForKeycloak, stays non-Degraded, and never leaks the password", func() {
+		It("defers to WaitingForKeycloak, stays non-Degraded, never leaks the password, and lets auth create the admin's user", func() {
 			const ns = "ilm-adminuser-kc-notready"
 			const adminPWSecret = "admin-pw"
 			const theLivePassword = "live-secret-admin-pw-4c1d"
@@ -116,6 +119,19 @@ var _ = Describe("Password admin reconcile action", func() {
 			b, err := json.Marshal(got.Status)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(string(b)).NotTo(ContainSubstring(theLivePassword))
+
+			By("verifying auth creates unknown users, so the admin's first sign-in creates its ILM user")
+			var auth appsv1.Deployment
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "auth", Namespace: ns}, &auth)).To(Succeed())
+			Expect(auth.Spec.Template.Spec.Containers).To(HaveLen(1))
+			var createUsers []string
+			for _, e := range auth.Spec.Template.Spec.Containers[0].Env {
+				if e.Name == "AUTH_CREATE_UNKNOWN_USERS" {
+					createUsers = append(createUsers, e.Value)
+				}
+			}
+			Expect(createUsers).To(Equal([]string{"true"}),
+				"exactly one AUTH_CREATE_UNKNOWN_USERS entry, set to true, is the effective value")
 		})
 	})
 })

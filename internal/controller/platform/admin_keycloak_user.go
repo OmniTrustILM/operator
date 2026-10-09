@@ -57,10 +57,9 @@ const (
 // when the password method is disabled or the realm user is already ensured for the current
 // spec generation.
 //
-// Gate: registerAdmin enabled AND registerAdmin.password present and enabled AND Keycloak
-// managed. Otherwise it is inactive and drops any stale AdminUserReady condition. (The CRD's
-// PlatformSpec CEL already requires keycloak.mode=managed for an enabled password method, so the
-// managed check is belt-and-suspenders for a hand-mutated object.)
+// Gate: platformbuilder.RegisterAdminPasswordEnabled — registerAdmin and its password method
+// enabled, on a managed Keycloak. Otherwise it is inactive and drops any stale AdminUserReady
+// condition.
 //
 // Flow:
 //   - inactive (password disabled / external Keycloak) → drop the stale condition, no requeue.
@@ -76,7 +75,7 @@ const (
 // and handed to the registrar once; condition messages are generic (a step name + at most an
 // HTTP status code), and the username is non-sensitive.
 func (r *Reconciler) reconcileAdminKeycloakUser(ctx context.Context, p *otilmv1alpha1.Platform) bool {
-	if !passwordAdminActive(p) {
+	if !platformbuilder.RegisterAdminPasswordEnabled(p) {
 		meta.RemoveStatusCondition(&p.Status.Conditions, conditionAdminUserReady)
 		return false
 	}
@@ -139,17 +138,6 @@ func (r *Reconciler) reconcileAdminKeycloakUser(ctx context.Context, p *otilmv1a
 
 	r.setAdminUserReady(p, metav1.ConditionTrue, reasonAdminUserReady, "admin Keycloak user ensured")
 	return false
-}
-
-// passwordAdminActive reports whether the PASSWORD admin method is active: the bootstrap is
-// enabled, the password sub-block is present and enabled, AND Keycloak is managed. Otherwise the
-// action is a no-op (and drops any stale condition).
-func passwordAdminActive(p *otilmv1alpha1.Platform) bool {
-	ra := p.Spec.RegisterAdmin
-	if ra == nil || !ra.Enabled || ra.Password == nil || !ra.Password.Enabled {
-		return false
-	}
-	return platformbuilder.KeycloakManaged(p)
 }
 
 // readAdminPassword reads the admin password read-only from registerAdmin.password.secretRef
