@@ -103,7 +103,7 @@ matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 ### Other
 | Sample | Shows |
 |---|---|
-| [`platform_quickstart_develop_latest.yaml`](./platform_quickstart_develop_latest.yaml) | Everything managed on the ILM `develop-latest` images (maintainer/CI use). |
+| [`platform_quickstart_develop_latest.yaml`](./platform_quickstart_develop_latest.yaml) | Everything managed on the ILM `develop-latest` images, following the newest bundle with `spec.version: develop` (maintainer/CI use, development builds of the operator only). |
 
 ## Connector samples
 
