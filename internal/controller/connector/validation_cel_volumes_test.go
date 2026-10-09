@@ -25,7 +25,7 @@ var _ = Describe("Connector volume CEL validation", func() {
 			conn := newConnector("cel-volume-both", ns)
 			conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{
 				Name:                  "state",
-				MountPath:             "/var/lib/state",
+				MountPath:             testStateMountPath,
 				EmptyDir:              &otilmv1alpha1.EmptyDirSpec{},
 				PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: "state"},
 			}}
@@ -47,7 +47,7 @@ var _ = Describe("Connector volume CEL validation", func() {
 			conn := newConnector("cel-volume-claim", ns)
 			conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{
 				Name:                  "state",
-				MountPath:             "/var/lib/state",
+				MountPath:             testStateMountPath,
 				PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{ClaimName: "state"},
 			}}
 
@@ -64,7 +64,7 @@ var _ = Describe("Connector volume CEL validation", func() {
 
 		It("should accept a volume naming no source, which stays an emptyDir", func() {
 			conn := newConnector("cel-volume-none", ns)
-			conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{Name: "state", MountPath: "/var/lib/state"}}
+			conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{Name: "state", MountPath: testStateMountPath}}
 
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 		})
@@ -81,7 +81,7 @@ var _ = Describe("Connector volume CEL validation", func() {
 			conn := newConnector("cel-volume-empty-claim", ns)
 			conn.Spec.Volumes = []otilmv1alpha1.VolumeSpec{{
 				Name:                  "state",
-				MountPath:             "/var/lib/state",
+				MountPath:             testStateMountPath,
 				PersistentVolumeClaim: &otilmv1alpha1.PVCSpec{},
 			}}
 
