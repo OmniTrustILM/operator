@@ -9,9 +9,9 @@ A Kubernetes operator that manages the **ILM (Identity Lifecycle Management) pla
   (either referenced as *external* infrastructure or *managed* for you via upstream
   operators), with an optional **edge** (Ingress / Gateway API + cert-manager TLS), an
   optional **managed Keycloak** OIDC provider, and an optional first-admin bootstrap.
-- **`Connector`** — deploys an ILM connector: Deployment, Service, ServiceAccount, health
-  probes, config injection, metrics, an optional PodDisruptionBudget, and optional
-  registration with the ILM platform.
+- **`Connector`** — deploys an ILM connector: Deployment, Service, ServiceAccount,
+  NetworkPolicy, health probes, config injection, metrics, an optional
+  PodDisruptionBudget, and optional registration with the ILM platform.
 - **`Proxy`** — deploys the ILM proxy, the outbound-only broker bridge for restricted
   network zones, configured solely by the provisioning-issued config token (a Secret
   reference — no credentials or broker settings in the CR).
@@ -110,6 +110,8 @@ See the [samples index](config/samples/README.md) for more Connector, Platform, 
 - Secret/ConfigMap injection (as env vars or mounted volumes) with config-drift detection.
 - Configurable health probes, optional PodDisruptionBudget, Prometheus metrics + optional
   ServiceMonitor, and optional platform registration.
+- A default-on NetworkPolicy that admits the connector's port only from its own namespace
+  and the operator.
 - Security hardened — non-root, read-only root filesystem, dropped capabilities.
 
 ### Proxy
@@ -117,7 +119,8 @@ See the [samples index](config/samples/README.md) for more Connector, Platform, 
 - Declarative ILM proxy deployment from the provisioning-issued config token (a Secret
   reference — credential rotation rolls the proxy automatically).
 - Deployment, two-port Service (health/metrics + the connector-facing API),
-  ServiceAccount, optional PodDisruptionBudget and ServiceMonitor.
+  ServiceAccount, a default-on NetworkPolicy (both ports, own namespace and the operator
+  only), optional PodDisruptionBudget and ServiceMonitor.
 - Same configurability surface as Connector: secret/configMap refs, volumes,
   SCC-hardened sidecars/init containers, scheduling, workload identity.
 

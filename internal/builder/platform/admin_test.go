@@ -102,7 +102,7 @@ func TestResolveAdminCertGeneratedDefaultCommonName(t *testing.T) {
 		Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
 	}))
 	cert := adminCertificate(t, objs)
-	assert.Equal(t, adminCertCommonName, cert.Object["spec"].(map[string]interface{})["commonName"])
+	assert.Equal(t, "Administrator", cert.Object["spec"].(map[string]interface{})["commonName"])
 }
 
 func TestResolveAdminCertGeneratedReusesEdgeInternalCA(t *testing.T) {
@@ -299,6 +299,49 @@ func TestAdminCertDependenciesMatchRender(t *testing.T) {
 			requiresCertManager := len(AdminCertDependencies(p)) > 0
 			assert.Equal(t, rendersCertManager, requiresCertManager,
 				"a cert-manager dependency must be present iff a cert-manager object is rendered")
+		})
+	}
+}
+
+// --- Password admin method ---------------------------------------------------------
+
+// passwordAdminPlatform returns the base platform on a managed Keycloak with a password-only
+// registerAdmin (the certificate method disabled).
+func passwordAdminPlatform() *otilmv1alpha1.Platform {
+	p := adminPlatform(&otilmv1alpha1.RegisterAdminSpec{
+		Enabled:     true,
+		Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(false)},
+		Password:    &otilmv1alpha1.AdminPasswordSpec{Enabled: true, SecretRef: "admin-pw"},
+	})
+	p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{
+		Mode: "managed", Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1},
+	}
+	return p
+}
+
+// TestRegisterAdminPasswordEnabled locks the password method's gate: the bootstrap and the
+// password sub-block must both be enabled, on a managed Keycloak.
+func TestRegisterAdminPasswordEnabled(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(p *otilmv1alpha1.Platform)
+		want   bool
+	}{
+		"password enabled on a managed Keycloak": {want: true},
+		"registerAdmin unset":                    {mutate: func(p *otilmv1alpha1.Platform) { p.Spec.RegisterAdmin = nil }},
+		"bootstrap disabled":                     {mutate: func(p *otilmv1alpha1.Platform) { p.Spec.RegisterAdmin.Enabled = false }},
+		"password block unset":                   {mutate: func(p *otilmv1alpha1.Platform) { p.Spec.RegisterAdmin.Password = nil }},
+		"password disabled":                      {mutate: func(p *otilmv1alpha1.Platform) { p.Spec.RegisterAdmin.Password.Enabled = false }},
+		"external Keycloak": {mutate: func(p *otilmv1alpha1.Platform) {
+			p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external"}
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := passwordAdminPlatform()
+			if tc.mutate != nil {
+				tc.mutate(p)
+			}
+			assert.Equal(t, tc.want, RegisterAdminPasswordEnabled(p))
 		})
 	}
 }

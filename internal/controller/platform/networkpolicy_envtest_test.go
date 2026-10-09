@@ -32,7 +32,7 @@ var _ = Describe("Platform NetworkPolicies", func() {
 			p := lifecyclePlatform(ns, nil) // networkPolicy unset => default ON
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
 
-			By("applying the ingress default-deny selecting all platform pods, intra-namespace allow")
+			By("applying the ingress default-deny selecting all platform pods, intra-namespace and operator allow")
 			Eventually(func(g Gomega) {
 				var np networkingv1.NetworkPolicy
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: npDenyIngress, Namespace: ns}, &np)).To(Succeed())
@@ -40,11 +40,18 @@ var _ = Describe("Platform NetworkPolicies", func() {
 				g.Expect(np.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/instance", "ilm"))
 				g.Expect(np.Spec.PolicyTypes).To(ContainElement(networkingv1.PolicyTypeIngress))
 				g.Expect(np.Spec.Ingress).To(HaveLen(1))
-				g.Expect(np.Spec.Ingress[0].From).To(HaveLen(1))
+				g.Expect(np.Spec.Ingress[0].From).To(HaveLen(2))
 				// Intra-namespace allow: an empty podSelector, no namespaceSelector.
 				g.Expect(np.Spec.Ingress[0].From[0].PodSelector).NotTo(BeNil())
 				g.Expect(np.Spec.Ingress[0].From[0].PodSelector.MatchLabels).To(BeEmpty())
 				g.Expect(np.Spec.Ingress[0].From[0].NamespaceSelector).To(BeNil())
+				// The operator's pods, from the operator namespace.
+				g.Expect(np.Spec.Ingress[0].From[1].NamespaceSelector).NotTo(BeNil())
+				g.Expect(np.Spec.Ingress[0].From[1].NamespaceSelector.MatchLabels).
+					To(HaveKeyWithValue("kubernetes.io/metadata.name", testOperatorNamespace))
+				g.Expect(np.Spec.Ingress[0].From[1].PodSelector).NotTo(BeNil())
+				g.Expect(np.Spec.Ingress[0].From[1].PodSelector.MatchLabels).
+					To(HaveKeyWithValue("app.kubernetes.io/name", "ilm-operator"))
 				// Owner-referenced by THIS Platform (so it is GC'd with the Platform and the
 				// prune's owner-ref check authorizes deletes).
 				g.Expect(np.OwnerReferences).NotTo(BeEmpty())

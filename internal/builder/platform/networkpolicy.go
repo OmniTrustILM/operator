@@ -26,7 +26,7 @@ const (
 	networkPolicyRole = "network-policy"
 
 	// npDefaultDenyIngressName denies cross-namespace/external ingress to the platform's
-	// pods while allowing intra-namespace ingress (the platform's own components).
+	// pods while allowing intra-namespace ingress (the platform's own components) and the operator.
 	npDefaultDenyIngressName = "ilm-default-deny-ingress"
 	// npAllowEdgeName allows ingress to the api-gateway from the ingress-controller /
 	// Gateway namespace so the edge entrypoint keeps working.
@@ -100,9 +100,10 @@ func platformPodSelectorLabels(p *otilmv1alpha1.Platform) map[string]string {
 // when spec.networkPolicy.enabled is false. The three policies are a SAFE default-deny —
 // secure but unable to break intra-platform traffic (see NetworkPolicySpec):
 //
-//  1. default-deny ingress + intra-namespace allow (buildDefaultDenyIngress): the
-//     high-value isolation — external/cross-namespace ingress is denied, the platform's
-//     own components talk freely.
+//  1. default-deny ingress + intra-namespace and operator allow (buildDefaultDenyIngress):
+//     the high-value isolation — external/cross-namespace ingress is denied, the platform's
+//     own components talk freely, and the operator's pods from operatorNamespace reach Core
+//     for in-cluster connector registration ("" admits no operator).
 //  2. edge -> api-gateway allow (buildAllowEdgeToGateway): keeps the edge entrypoint
 //     working (ingress to the gateway's consumer port from the ingress-controller
 //     namespace).
@@ -114,12 +115,12 @@ func platformPodSelectorLabels(p *otilmv1alpha1.Platform) map[string]string {
 // owner-referenced + labeled by the controller's apply, and pruned like every other
 // rendered child (networkpolicies are in the prune list + RBAC). They carry NO connection
 // coordinates — only label selectors and the (non-secret) ingress-controller namespace.
-func ResolveNetworkPolicies(p *otilmv1alpha1.Platform) []client.Object {
+func ResolveNetworkPolicies(p *otilmv1alpha1.Platform, operatorNamespace string) []client.Object {
 	if !networkPolicyEnabled(p) {
 		return nil
 	}
 	return []client.Object{
-		buildDefaultDenyIngress(p),
+		buildDefaultDenyIngress(p, operatorNamespace),
 		buildAllowEdgeToGateway(p),
 		buildAllowEgress(p),
 	}
@@ -136,24 +137,26 @@ func networkPolicyMeta(p *otilmv1alpha1.Platform, name string) metav1.ObjectMeta
 }
 
 // buildDefaultDenyIngress renders the ingress default-deny: it selects every platform pod
-// and, because policyTypes includes Ingress, denies all ingress EXCEPT the single allowed
-// source — pods in the SAME namespace (an empty podSelector under `from` matches all pods
-// in the policy's namespace). So the platform's own components reach each other freely
-// while cross-namespace / external ingress is denied. NetworkPolicies are additive, so the
-// edge-allow policy layers the gateway's external entrypoint on top of this.
-func buildDefaultDenyIngress(p *otilmv1alpha1.Platform) *networkingv1.NetworkPolicy {
+// and, because policyTypes includes Ingress, denies all ingress EXCEPT from two sources —
+// pods in the SAME namespace (an empty podSelector under `from` matches all pods in the
+// policy's namespace) and the operator's pods (common.OperatorPeers; none when
+// operatorNamespace is empty), which call Core when a Connector registers through the
+// in-cluster address. So the platform's own components reach each other freely while
+// every other cross-namespace / external source is denied. NetworkPolicies are additive,
+// so the edge-allow policy layers the gateway's external entrypoint on top of this.
+func buildDefaultDenyIngress(p *otilmv1alpha1.Platform, operatorNamespace string) *networkingv1.NetworkPolicy {
 	return &networkingv1.NetworkPolicy{
 		ObjectMeta: networkPolicyMeta(p, npDefaultDenyIngressName),
 		Spec: networkingv1.NetworkPolicySpec{
 			PodSelector: metav1.LabelSelector{MatchLabels: platformPodSelectorLabels(p)},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{{
-				// Empty podSelector => all pods in THIS namespace (intra-platform). No
-				// namespaceSelector, so cross-namespace traffic is NOT matched and is
-				// therefore denied by the default-deny.
-				From: []networkingv1.NetworkPolicyPeer{{
+				// Empty podSelector => all pods in THIS namespace (intra-platform), then the
+				// operator's pods. No other namespaceSelector, so every other cross-namespace
+				// source is NOT matched and is therefore denied by the default-deny.
+				From: append([]networkingv1.NetworkPolicyPeer{{
 					PodSelector: &metav1.LabelSelector{},
-				}},
+				}}, common.OperatorPeers(operatorNamespace)...),
 			}},
 		},
 	}

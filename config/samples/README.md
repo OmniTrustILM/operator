@@ -82,7 +82,7 @@ matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 ### Edge & TLS
 | Sample | Shows |
 |---|---|
-| [`platform_edge_issuerref.yaml`](./platform_edge_issuerref.yaml) | Ingress edge signed by an existing cert-manager Issuer/ClusterIssuer. |
+| [`platform_edge_issuerref.yaml`](./platform_edge_issuerref.yaml) | Ingress edge signed by an existing cert-manager issuer. |
 | [`platform_edge_letsencrypt.yaml`](./platform_edge_letsencrypt.yaml) | Ingress edge with Let's Encrypt (ACME) TLS. |
 | [`platform_edge_byo_secret.yaml`](./platform_edge_byo_secret.yaml) | Ingress edge with a bring-your-own TLS Secret (no cert-manager). |
 | [`platform_gatewayapi.yaml`](./platform_gatewayapi.yaml) | Gateway API edge (HTTPRoute) instead of Ingress. |

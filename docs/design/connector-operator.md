@@ -171,6 +171,10 @@ spec:
       interval: 30s
       labels: {}
 
+  # Network isolation: ingress to the Service port only from this namespace and the operator
+  networkPolicy:
+    enabled: true                  # default
+
   # Placement, workload identity, and extra containers (all optional). Sidecars and
   # init containers are SCC-hardened by the operator (restricted-v2 fields forced),
   # so a CR cannot weaken pod security. Container/affinity schemas are embedded
@@ -245,6 +249,7 @@ func (r *ConnectorReconciler) SetupWithManager(mgr ctrl.Manager) error {
         Owns(&corev1.Service{}).
         Owns(&corev1.ServiceAccount{}).
         Owns(&policyv1.PodDisruptionBudget{}).
+        Owns(&networkingv1.NetworkPolicy{}).
         Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.findConnectorsForSecret)).
         Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.findConnectorsForConfigMap)).
         Complete(r)
@@ -263,6 +268,7 @@ Each Kubernetes resource type has a dedicated builder function in `internal/buil
 | `BuildService()` | Connector spec | `*corev1.Service` |
 | `BuildServiceAccount()` | Connector spec | `*corev1.ServiceAccount` |
 | `BuildPDB()` | Connector spec | `*policyv1.PodDisruptionBudget` |
+| `BuildNetworkPolicy()` | Connector spec, operator namespace | `*networkingv1.NetworkPolicy` |
 | `BuildServiceMonitor()` | Connector spec | `*monitoringv1.ServiceMonitor` |
 
 ### Reconciliation Flow
@@ -275,8 +281,9 @@ Each Kubernetes resource type has a dedicated builder function in `internal/buil
    - a. ServiceAccount
    - b. Deployment (with checksum annotation on pod template to trigger rollout on config change)
    - c. Service
-   - d. PodDisruptionBudget (if `lifecycle.podDisruptionBudget.enabled`)
-   - e. ServiceMonitor (if `metrics.serviceMonitor.enabled`)
+   - d. NetworkPolicy (unless `networkPolicy.enabled` is false): ingress to the Service port from the connector's namespace and the operator
+   - e. PodDisruptionBudget (if `lifecycle.podDisruptionBudget.enabled`)
+   - f. ServiceMonitor (if `metrics.serviceMonitor.enabled`)
 6. **Check Deployment status:**
    - All replicas ready → phase = `Running`, `Available` = True
    - Rolling update in progress → phase = `Updating`, `Progressing` = True
@@ -341,6 +348,7 @@ All ILM connectors implement common interfaces. The operator's responsibility fo
 | `services` | get, list, watch, create, update, patch, delete | Manage connector Services |
 | `serviceaccounts` | get, list, watch, create, update, patch, delete | Manage connector ServiceAccounts |
 | `poddisruptionbudgets.policy` | get, list, watch, create, update, patch, delete | Manage PDBs |
+| `networkpolicies.networking.k8s.io` | get, list, watch, create, update, patch, delete | Manage connector NetworkPolicies |
 | `secrets` | get, list, watch | Read referenced Secrets (never create/modify) |
 | `configmaps` | get, list, watch | Read referenced ConfigMaps |
 | `events` | create, patch | Emit Kubernetes events |

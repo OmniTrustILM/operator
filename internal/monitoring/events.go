@@ -24,4 +24,7 @@ const (
 	// ReasonServiceMonitorMissing reports the ServiceMonitor capability gate: the
 	// monitoring.coreos.com CRD is not served on this cluster.
 	ReasonServiceMonitorMissing = "ServiceMonitorCRDNotInstalled"
+	// ReasonNetworkPolicyNotOwned reports a NetworkPolicy that carries a Connector's or Proxy's
+	// name but is not controlled by it: the operator leaves it untouched and renders none.
+	ReasonNetworkPolicyNotOwned = "NetworkPolicyNotOwned"
 )

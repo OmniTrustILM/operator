@@ -38,6 +38,9 @@ var (
 	connectors *fakeConnectors
 )
 
+// testOperatorNamespace is the namespace the suite's reconciler admits the operator from.
+const testOperatorNamespace = "ilm-operator-system"
+
 func TestConnectorController(t *testing.T) {
 	RegisterFailHandler(Fail)
 
@@ -70,10 +73,11 @@ var _ = BeforeSuite(func() {
 
 	connectors = newFakeConnectors()
 	err = (&Reconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Recorder:     mgr.GetEventRecorderFor("connector-controller"), //nolint:staticcheck
-		HealthClient: connectors.client(),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor("connector-controller"), //nolint:staticcheck
+		HealthClient:      connectors.client(),
+		OperatorNamespace: testOperatorNamespace,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

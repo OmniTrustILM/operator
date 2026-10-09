@@ -11,9 +11,11 @@ package platform
 // single source of truth.
 const (
 	// Cert-manager / Gateway API coordinates referenced in the edge tests.
-	testVaultIssuer     = "vault-issuer"
-	testCorpCA          = "corp-ca"
-	testGatewayAPIGroup = "gateway.networking.k8s.io"
+	testVaultIssuer         = "vault-issuer"
+	testCorpCA              = "corp-ca"
+	testExternalIssuerGroup = "issuer.example.com"
+	testExternalIssuerKind  = "ExampleClusterIssuer"
+	testGatewayAPIGroup     = "gateway.networking.k8s.io"
 
 	// Common identifiers/hosts shared by multiple test files.
 	testEdgeHost     = "ilm.example.com"
@@ -21,6 +23,10 @@ const (
 	testClientCrt    = "client.crt"
 	testILMDB        = "ilm-db"
 	testProvURL      = "https://prov.example.com"
+
+	// testOperatorNamespace is the namespace the operator renders from; the ingress default-deny
+	// admits the operator's pods from it.
+	testOperatorNamespace = "ilm-operator-system"
 
 	// admin_test.go.
 	testClientKey = "client.key"
@@ -39,6 +45,7 @@ const (
 
 	// managed_database_test.go.
 	testDefaultKeptMsg = "default kept when not overridden"
+	testKindDatabase   = "Database"
 
 	// managed_keycloak_test.go.
 	testPGHost       = "pg.example.com"

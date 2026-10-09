@@ -190,6 +190,13 @@ type ProxySpec struct {
 	// +optional
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
 
+	// NetworkPolicy controls the NetworkPolicy the operator renders for this proxy. It admits
+	// ingress to the proxy's http and api ports only from pods in the proxy's namespace and from
+	// the operator. Egress, including the connection to the broker, is not restricted. Unset, the
+	// policy is rendered.
+	// +optional
+	NetworkPolicy *WorkloadNetworkPolicySpec `json:"networkPolicy,omitempty"`
+
 	// PodAnnotations are arbitrary annotations added to the proxy pod template.
 	// +optional
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
@@ -237,7 +244,7 @@ type ProxyStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=prx
 // +operator-sdk:csv:customresourcedefinitions:displayName="Proxy"
-// +operator-sdk:csv:customresourcedefinitions:resources={{Deployments,apps/v1},{Services,v1},{ServiceAccounts,v1},{PodDisruptionBudgets,policy/v1}}
+// +operator-sdk:csv:customresourcedefinitions:resources={{Deployment,apps/v1},{Service,v1},{ServiceAccount,v1},{PodDisruptionBudget,policy/v1},{NetworkPolicy,networking.k8s.io/v1}}
 
 // Proxy is the Schema for the proxies API. It deploys one ILM proxy instance — the
 // outbound-only broker bridge for restricted network zones — from a

@@ -311,6 +311,7 @@ type ProxySpec struct {
     Probes  *ProbeSpec        `json:"probes,omitempty"`
     Metrics *ProxyMetricsSpec `json:"metrics,omitempty"`
     PodDisruptionBudget *PDBSpec      `json:"podDisruptionBudget,omitempty"`
+    NetworkPolicy *WorkloadNetworkPolicySpec `json:"networkPolicy,omitempty"`
     PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
     PodLabels      map[string]string `json:"podLabels,omitempty"`
 }
@@ -404,7 +405,7 @@ workload; revisit if proxy/platform version skew ever becomes breaking.)
 
 `internal/controller/proxy/` — a thin reconciler following the `Connector` shape:
 
-- `For(&Proxy{})`, `Owns(Deployment, Service, ServiceAccount, PDB)`,
+- `For(&Proxy{})`, `Owns(Deployment, Service, ServiceAccount, PDB, NetworkPolicy)`,
   `Watches(Secret/ConfigMap)` mapped through references for config-drift detection.
   **ServiceMonitor is deliberately not in `Owns`**: a controller-runtime watch on a
   GVK whose CRD is not served fails its ListWatch and stalls the manager's cache sync
@@ -435,8 +436,9 @@ workload; revisit if proxy/platform version skew ever becomes breaking.)
 Deployment (SCC-clean pod security: `runAsNonRoot`, no hard-coded `runAsUser`, drop
 all capabilities, `seccompProfile: RuntimeDefault`), Service (two ports: `http` 8080
 for health/metrics, `api` 8081 — the connector-facing registration endpoint),
-ServiceAccount, optional PDB and ServiceMonitor. The config surface the
-builders render is deliberately tiny:
+ServiceAccount, a NetworkPolicy admitting both ports from the proxy's namespace and
+the operator (opt-out via `spec.networkPolicy.enabled`), optional PDB and
+ServiceMonitor. The config surface the builders render is deliberately tiny:
 
 | Source | Env |
 |---|---|
@@ -469,9 +471,9 @@ New rules, mirroring the `Connector` set: `proxies` get/list/watch/update/patch
 (create/delete of the primary belongs to the user), `proxies/status` get/update/patch,
 `proxies/finalizers` update. Children: `deployments`/`services`/`serviceaccounts`
 get/list/watch/create/update/patch — no delete verb, ownerRef GC removes them;
-`poddisruptionbudgets` and `servicemonitors` additionally carry delete, because the
-reconciler explicitly prunes them when disabled. `secrets`/`configmaps` remain
-**get/list/watch read-only**.
+`poddisruptionbudgets`, `networkpolicies` and `servicemonitors` additionally carry
+delete, because the reconciler explicitly prunes them when disabled.
+`secrets`/`configmaps` remain **get/list/watch read-only**.
 
 ## Security model
 

@@ -854,6 +854,12 @@ spec:
   ingress:
   - from:
     - podSelector: {}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ilm-operator-system
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ilm-operator
   podSelector:
     matchLabels:
       app.kubernetes.io/instance: ilm
@@ -958,7 +964,7 @@ data:
     # identity is inert data — an apostrophe in a surname included. Only the certificate placeholder
     # is substituted, from the base64 $CERT above.
     read -r BODY <<'EOF'
-    {"username":"","firstName":"","email":"","enabled":true,"certificateData":"__ADMIN_CERT__"}
+    {"username":"Administrator","firstName":"","email":"","enabled":true,"certificateData":"__ADMIN_CERT__"}
     EOF
     BODY=$(printf '%s' "$BODY" | sed "s|__ADMIN_CERT__|${CERT}|")
 

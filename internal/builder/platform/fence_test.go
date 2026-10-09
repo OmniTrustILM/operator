@@ -158,7 +158,7 @@ func TestRenderFencedStatefulSetOmitsReplicas(t *testing.T) {
 	p.Spec.Gateway.Replicas = i32Ptr(2)
 
 	var gw *appsv1.StatefulSet
-	for _, o := range RenderPlatform(p) {
+	for _, o := range RenderPlatform(p, testOperatorNamespace) {
 		if s, ok := o.(*appsv1.StatefulSet); ok && s.Name == gatewayName {
 			gw = s
 		}

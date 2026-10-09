@@ -10,7 +10,7 @@ A `Proxy` deploys one proxy instance from a config token the platform issued for
 
 A proxy is the outbound-only broker bridge that lets a restricted network zone reach a platform running somewhere else. It dials **out** to the platform's message broker and serves nothing to the outside world: the operator renders no Ingress and no LoadBalancer for it, only a ClusterIP Service carrying the in-cluster health and metrics endpoint on port `8080` and the connector-facing API on port `8081`.
 
-The `Proxy` custom resource (`otilm.com/v1alpha1`, short name `prx`) renders a Deployment, that Service, and a dedicated ServiceAccount, plus a PodDisruptionBudget and a Prometheus ServiceMonitor when you ask for them.
+The `Proxy` custom resource (`otilm.com/v1alpha1`, short name `prx`) renders a Deployment, that Service, a dedicated ServiceAccount, and a NetworkPolicy, plus a PodDisruptionBudget and a Prometheus ServiceMonitor when you ask for them.
 
 What makes it unlike a `Connector` is where its configuration lives. The broker URL, the queue coordinates, the credentials, and the tuning all travel inside a signed config token, and the custom resource deliberately models none of them. The reconciler is a **pure consumer** of that token: it never calls the platform, and it never reads the token's configuration claims — it hands the token to the proxy process and lets the proxy interpret it.
 
@@ -102,6 +102,7 @@ Everything beyond the token reference is optional. None of it configures the pro
 | `probes` | Override the liveness, readiness, and startup probes. The defaults match the proxy's own endpoints: `/health` for liveness and startup, `/ready` for readiness, both on the HTTP port. |
 | `podDisruptionBudget` | `enabled` plus `minAvailable` or `maxUnavailable` (mutually exclusive; `minAvailable` wins). |
 | `metrics` | `enabled`, `path` (default `/metrics`), and an optional `serviceMonitor`. |
+| `networkPolicy` | `enabled` (default `true`); see [Network isolation](#network-isolation). |
 | `terminationGracePeriodSeconds` | How long the pod gets to drain in-flight broker messages before shutdown. |
 | `nodeSelector` / `tolerations` / `affinity` | Scheduling — for example pinning the proxy to nodes permitted outbound egress. |
 | `serviceAccount` | Override the ServiceAccount's name and stamp extra annotations on it, such as a cloud workload-identity binding. |
@@ -114,6 +115,14 @@ Everything beyond the token reference is optional. None of it configures the pro
 The metrics path is `/metrics`, not the `/v1/metrics` the platform's own components serve — the `Proxy` has its own metrics block for exactly that reason. A ServiceMonitor is rendered only when **both** `metrics.enabled` and `metrics.serviceMonitor.enabled` are true — turning the sub-block on without enabling metrics renders nothing. When both are set, the ServiceMonitor scrapes that path on the `http` port.
 
 Every optional field above, annotated, is in [`proxy_full.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/proxy_full.yaml); the minimal shape is [`proxy_minimal.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/proxy_minimal.yaml).
+
+## Network isolation
+
+The proxy's API port accepts connector registrations without authentication and forwards them to the platform. The operator therefore renders a `networking.k8s.io/v1` NetworkPolicy for each `Proxy`, named after it. The policy admits traffic to ports `8080` and `8081` from pods in the proxy's own namespace and from the operator's pods. All other inbound traffic is dropped. Outbound traffic, including the connection to the broker, is not restricted.
+
+The policy is on by default; `networkPolicy.enabled: false` removes it, for example on a CNI that does not enforce NetworkPolicy. NetworkPolicies add up, so to admit another source, such as Prometheus scraping the ServiceMonitor from another namespace, add a policy of your own that selects `otilm.com/proxy: <name>`. A NetworkPolicy of yours that already carries the proxy's name is never changed or deleted: the operator renders none of its own and reports a `NetworkPolicyNotOwned` warning event.
+
+Run a proxy in the same namespace as the connectors behind it. The proxy calls those connectors, and each connector's own NetworkPolicy admits only its namespace and the operator; see [Network isolation](./connector.md#network-isolation).
 
 ## Observing a Proxy
 
@@ -174,7 +183,7 @@ Two of these are worth more than a table row.
 kubectl delete proxy <name> -n <namespace>
 ```
 
-The operator adds the `otilm.com/finalizer` finalizer before it does any work, so deletion is orderly: the finalizer holds the object while the operator emits a deletion event and releases it. The Deployment, Service, ServiceAccount, PodDisruptionBudget, and ServiceMonitor all carry owner references to the `Proxy` and are garbage-collected with it.
+The operator adds the `otilm.com/finalizer` finalizer before it does any work, so deletion is orderly: the finalizer holds the object while the operator emits a deletion event and releases it. The Deployment, Service, ServiceAccount, NetworkPolicy, PodDisruptionBudget, and ServiceMonitor all carry owner references to the `Proxy` and are garbage-collected with it.
 
 The config-token Secret is **not** removed. It is yours — the operator only ever read it — so delete it yourself when the proxy is gone for good. Nothing is torn down on the platform side either: the reconciler makes no calls to the platform at any point, deletion included, so retire the proxy in the administration UI as a separate step.
 

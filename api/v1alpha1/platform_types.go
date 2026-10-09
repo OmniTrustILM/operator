@@ -845,7 +845,10 @@ type GatewaySpec struct {
 // container (the .NET service); credentials are never configured here.
 type AuthCreateSpec struct {
 	// CreateUnknownUsers sets AUTH_CREATE_UNKNOWN_USERS (default false): create a
-	// user for an authenticated principal not yet present in the database.
+	// user for an authenticated principal not yet present in the database. It is turned
+	// on regardless of this value while registerAdmin.enabled and
+	// registerAdmin.password.enabled are both true: the password method creates the admin
+	// only in Keycloak, so auth must create its user at the first sign-in.
 	// +kubebuilder:default=false
 	CreateUnknownUsers bool `json:"createUnknownUsers,omitempty"`
 	// CreateUnknownRoles sets AUTH_CREATE_UNKNOWN_ROLES (default false): create a
@@ -919,7 +922,7 @@ type LetsEncryptSpec struct {
 // EdgeTLSSpec configures how the edge obtains its serving certificate: "internal"
 // provisions a self-signed CA and a cert-manager ingress-shim leaf certificate;
 // "letsEncrypt" provisions an ACME issuer; "issuerRef" points the cert-manager shim at
-// any existing Issuer/ClusterIssuer (Vault, corporate CA, Venafi, ...) the operator does
+// any existing issuer (Vault, corporate CA, Venafi, ...) the operator does
 // not create; "secret" uses a caller-provided (bring-your-own) TLS Secret with no
 // cert-manager objects. No certificate or key material is ever held here — TLS is
 // always referenced by Secret name only.
@@ -934,7 +937,7 @@ type LetsEncryptSpec struct {
 type EdgeTLSSpec struct {
 	// Source selects how the serving certificate is obtained: "internal" (self-signed
 	// CA via cert-manager), "letsEncrypt" (ACME), "issuerRef" (any existing
-	// cert-manager Issuer/ClusterIssuer signs the leaf via the shim), or "secret"
+	// cert-manager issuer signs the leaf via the shim), or "secret"
 	// (bring-your-own TLS Secret, no cert-manager objects).
 	// +kubebuilder:validation:Enum=internal;letsEncrypt;secret;issuerRef
 	// +kubebuilder:default=internal
@@ -946,7 +949,7 @@ type EdgeTLSSpec struct {
 	SecretRef *string `json:"secretRef,omitempty"`
 	// LetsEncrypt configures the ACME issuer; required when source="letsEncrypt".
 	LetsEncrypt *LetsEncryptSpec `json:"letsEncrypt,omitempty"`
-	// IssuerRef references an existing cert-manager Issuer/ClusterIssuer that signs
+	// IssuerRef references an existing cert-manager issuer that signs
 	// the edge serving certificate. Required when source="issuerRef".
 	IssuerRef *CertManagerIssuerRef `json:"issuerRef,omitempty"`
 }
@@ -1007,7 +1010,10 @@ type RegisterAdminSpec struct {
 	// Password configures the password (Keycloak realm user) admin method. It is OFF
 	// unless present with enabled=true, and requires keycloak.mode=managed (enforced by a
 	// PlatformSpec CEL rule — the operator creates the realm user via the Keycloak admin
-	// API). The password is ALWAYS a referenced Secret, never operator-minted.
+	// API). The password is ALWAYS a referenced Secret, never operator-minted. This method
+	// creates the admin only in Keycloak, so enabling it also turns on
+	// auth.create.createUnknownUsers, letting auth create the admin's user at the first
+	// sign-in.
 	// +optional
 	Password *AdminPasswordSpec `json:"password,omitempty"`
 }
@@ -1054,7 +1060,7 @@ type AdminCertificateSpec struct {
 	// applies to source=provided only (see CertKey).
 	// +optional
 	PrivateKeyKey string `json:"privateKeyKey,omitempty"`
-	// IssuerRef (source=generated) is the cert-manager Issuer/ClusterIssuer that signs
+	// IssuerRef (source=generated) is the cert-manager issuer that signs
 	// the admin certificate. When unset, the operator defaults to the platform internal
 	// CA: it reuses the edge's internal CA issuer when the edge already provisions one
 	// (edge.tls.source=internal), otherwise it provisions a dedicated self-signed admin
@@ -1091,20 +1097,27 @@ type AdminPasswordSpec struct {
 	PasswordKey string `json:"passwordKey,omitempty"`
 }
 
-// CertManagerIssuerRef references an existing cert-manager Issuer or ClusterIssuer
-// the cert-manager ingress/gateway shim uses to mint the edge serving certificate.
+// CertManagerIssuerRef references an existing cert-manager Issuer or ClusterIssuer,
+// or an external issuer by its own kind and API group, that the cert-manager
+// ingress/gateway shim uses to mint the edge serving certificate.
 // The operator creates no Issuer of its own for this source — it only stamps the
 // shim annotations naming this issuer onto the Ingress/Gateway, and cert-manager
 // provisions the leaf into the edge TLS Secret. No certificate or key material is
 // ever held here.
+//
+// The XValidation rule keeps a cert-manager.io issuer to Issuer or ClusterIssuer, so a
+// mistyped kind fails at admission instead of naming an issuer that never resolves.
+// +kubebuilder:validation:XValidation:rule="self.kind in ['Issuer', 'ClusterIssuer'] || (self.group.size() > 0 && self.group != 'cert-manager.io')",message="issuerRef.kind must be Issuer or ClusterIssuer unless issuerRef.group names an external issuer"
 type CertManagerIssuerRef struct {
-	// Name of the Issuer/ClusterIssuer.
+	// Name of the issuer.
 	Name string `json:"name"`
-	// Kind is Issuer (namespaced) or ClusterIssuer.
-	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
+	// Kind is Issuer (namespaced) or ClusterIssuer, or an external issuer's own kind
+	// (for example AWSPCAClusterIssuer) when Group is that issuer's API group.
 	// +kubebuilder:default=Issuer
+	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind,omitempty"`
-	// Group defaults to cert-manager.io.
+	// Group defaults to cert-manager.io; set it to an external issuer's API group (for
+	// example awspca.cert-manager.io).
 	// +kubebuilder:default=cert-manager.io
 	// +optional
 	Group string `json:"group,omitempty"`

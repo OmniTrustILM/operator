@@ -34,6 +34,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/controller/connector"
 	"github.com/OmniTrustILM/operator/internal/controller/platform"
 	proxyctrl "github.com/OmniTrustILM/operator/internal/controller/proxy"
+	"github.com/OmniTrustILM/operator/internal/incluster"
 	"github.com/OmniTrustILM/operator/internal/monitoring"
 
 	// Import monitoring package for Prometheus metrics registration side effects.
@@ -191,6 +192,11 @@ func main() {
 	cfg := parseFlags()
 	setupLog.Info("starting ilm-operator", "version", version.Version, "commit", version.GitCommit)
 
+	// The NetworkPolicies the operator renders admit its pods from this namespace. Outside a
+	// cluster it is empty, and they admit no operator.
+	operatorNamespace := incluster.Namespace()
+	setupLog.Info("operator namespace", "namespace", operatorNamespace)
+
 	tlsOpts := buildTLSOpts(cfg.enableHTTP2)
 
 	webhookCertWatcher, err := setupCertWatcher(cfg.webhookCertPath, cfg.webhookCertName, cfg.webhookCertKey, "webhook")
@@ -222,25 +228,28 @@ func main() {
 	}
 
 	if err := (&connector.Reconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, errCreateController, "controller", "Connector")
 		os.Exit(1)
 	}
 	if err := (&platform.Reconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, errCreateController, "controller", "Platform")
 		os.Exit(1)
 	}
 	if err := (&proxyctrl.Reconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor(recorderName), //nolint:staticcheck // the controller-runtime record.EventRecorder API is intentionally retained (the newer events.EventRecorder is not adopted)
+		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, errCreateController, "controller", "Proxy")
 		os.Exit(1)

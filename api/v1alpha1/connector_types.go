@@ -256,6 +256,13 @@ type ConnectorSpec struct {
 	// +optional
 	ServiceAccount *ServiceAccountSpec `json:"serviceAccount,omitempty"`
 
+	// NetworkPolicy controls the NetworkPolicy the operator renders for this connector. It admits
+	// ingress to the connector's Service port only from pods in the connector's namespace and from
+	// the operator, which checks the connector's health. Egress is not restricted. Unset, the
+	// policy is rendered.
+	// +optional
+	NetworkPolicy *WorkloadNetworkPolicySpec `json:"networkPolicy,omitempty"`
+
 	// Registration defines the platform registration configuration.
 	// +optional
 	Registration *RegistrationSpec `json:"registration,omitempty"`
@@ -311,7 +318,7 @@ type ConnectorStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=conn
 // +operator-sdk:csv:customresourcedefinitions:displayName="Connector"
-// +operator-sdk:csv:customresourcedefinitions:resources={{Deployments,apps/v1},{Services,v1},{ServiceAccounts,v1},{PodDisruptionBudgets,policy/v1}}
+// +operator-sdk:csv:customresourcedefinitions:resources={{Deployment,apps/v1},{Service,v1},{ServiceAccount,v1},{PodDisruptionBudget,policy/v1},{NetworkPolicy,networking.k8s.io/v1}}
 
 // Connector is the Schema for the connectors API.
 type Connector struct {

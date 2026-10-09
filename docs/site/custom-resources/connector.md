@@ -10,7 +10,7 @@ A `Connector` deploys one provider service and, when you ask it to, registers th
 
 A connector is a provider service the platform calls out to — a compliance provider, a certificate authority integration, a timestamping service. It runs as its own workload with its own image, and the platform talks to it over HTTP.
 
-The `Connector` custom resource (`otilm.com/v1alpha1`, short name `conn`) is how the operator deploys one. From a single object it renders a Deployment, a Service, and a dedicated ServiceAccount, plus a PodDisruptionBudget and a Prometheus ServiceMonitor when you ask for them. It then keeps all of that converged, exactly as it does for a `Platform`.
+The `Connector` custom resource (`otilm.com/v1alpha1`, short name `conn`) is how the operator deploys one. From a single object it renders a Deployment, a Service, a dedicated ServiceAccount, and a NetworkPolicy, plus a PodDisruptionBudget and a Prometheus ServiceMonitor when you ask for them. It then keeps all of that converged, exactly as it does for a `Platform`.
 
 Registration is separate and optional. Deploying a connector makes it *reachable*; registering it makes the platform *aware* of it, so it appears in the administration UI and can be used. Omit `spec.registration` and the operator only deploys — useful when the platform registers the connector by some other route, or when you are bringing a workload up before a platform exists.
 
@@ -84,7 +84,7 @@ spec:
         content: "complianceProvider"
 ```
 
-`name`, `platformUrl`, and `authType` are all required. The operator supplies the connector's URL itself — the in-cluster Service address, `http://<name>.<namespace>.svc.cluster.local:<service.port>` — so the platform reaches the connector over the cluster network and you never write that address down.
+`name`, `platformUrl`, and `authType` are all required. The operator supplies the connector's URL itself — the in-cluster Service address, `http://<name>.<namespace>.svc.cluster.local:<service.port>` — so the platform reaches the connector over the cluster network and you never write that address down. That holds when the connector runs in the platform's namespace: the connector's NetworkPolicy admits only its own namespace and the operator, so a platform in another namespace needs the extra policy described in [Network isolation](#network-isolation).
 
 Registration runs exactly once. The operator skips it while the connector is any phase other than `Running`, and skips it again on every later reconcile once `status.registration.uuid` is set, so a rolling update or a spec change never re-registers an already-known connector.
 
@@ -259,7 +259,55 @@ spec:
 `enabled: false` turns the check off and removes the condition.
 
 :::note[NetworkPolicy]
-The check is a request from the operator's pod to the connector's Service. A NetworkPolicy that admits only Core to a connector must also admit the operator. Otherwise `Healthy` stays `Unknown`, and each check holds one of the operator's reconcile workers until it times out.
+The check is a request from the operator's pod to the connector's Service. The connector's own NetworkPolicy admits the operator; see [Network isolation](#network-isolation). With that policy turned off, a NetworkPolicy of yours that selects the connector must admit the operator. Otherwise `Healthy` stays `Unknown`, and each check holds one of the operator's reconcile workers until it times out.
+:::
+
+## Network isolation
+
+A connector serves its API without authentication, so the operator renders a `networking.k8s.io/v1` NetworkPolicy for each `Connector`, named after it. The policy admits traffic to the connector's Service port from two sources:
+
+- pods in the connector's own namespace, so run a connector in its platform's namespace, where Core runs, or next to the proxy in front of it;
+- the operator's pods, which [check the connector's health](#checking-what-the-connector-depends-on).
+
+All other inbound traffic is dropped. Outbound traffic is not restricted.
+
+The policy is on by default. Turn it off on a CNI that does not enforce NetworkPolicy, or when you manage the connector's isolation yourself:
+
+```yaml
+spec:
+  networkPolicy:
+    enabled: false   # default true
+```
+
+The operator only ever changes or deletes the policy it created. If a NetworkPolicy of yours already carries the connector's name, the operator leaves it as it is, renders none of its own, and reports a `NetworkPolicyNotOwned` warning event; rename or delete yours to let the operator manage the connector's policy.
+
+NetworkPolicies add up, so a source the policy does not cover needs one more policy of your own, not the operator's policy turned off. These sources need one:
+
+- Prometheus scraping the connector's ServiceMonitor from another namespace;
+- a platform or a proxy that runs in another namespace than the connector;
+- clients outside the cluster, when `service.type` is `NodePort` or `LoadBalancer`.
+
+For example, to let Prometheus in the `monitoring` namespace scrape `x509-compliance-provider`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: x509-compliance-provider-allow-monitoring
+spec:
+  podSelector:
+    matchLabels:
+      otilm.com/connector: x509-compliance-provider
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+```
+
+:::note[How the operator recognizes itself]
+The policy matches the operator by its namespace and by the `app.kubernetes.io/name: ilm-operator` label that every install channel puts on the operator's pod. The operator reads its namespace from its own pod when it starts. Run outside a cluster, it has none, and the policy admits only the connector's namespace. A Helm `nameOverride` changes that label, so the policy no longer admits the operator.
 :::
 
 ## The shipped samples
@@ -343,7 +391,7 @@ A `uuid` means the platform accepted the connector. `status` is then the platfor
 kubectl delete connector <name> -n <namespace>
 ```
 
-The operator adds the `otilm.com/finalizer` finalizer before it does any work, so deletion is orderly rather than abrupt: the finalizer holds the object while the operator emits a deletion event and releases it. The Deployment, Service, ServiceAccount, PodDisruptionBudget, and ServiceMonitor all carry owner references to the `Connector`, so Kubernetes garbage-collects them once the object is gone.
+The operator adds the `otilm.com/finalizer` finalizer before it does any work, so deletion is orderly rather than abrupt: the finalizer holds the object while the operator emits a deletion event and releases it. The Deployment, Service, ServiceAccount, NetworkPolicy, PodDisruptionBudget, and ServiceMonitor all carry owner references to the `Connector`, so Kubernetes garbage-collects them once the object is gone.
 
 :::note[Deleting a Connector does not de-register it]
 The operator never calls the platform on delete, so a connector that was registered stays in the platform's connector inventory. Remove it there as a separate step.

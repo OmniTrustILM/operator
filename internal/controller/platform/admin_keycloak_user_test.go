@@ -240,31 +240,6 @@ func TestReconcileAdminUserNoLeakOnSuccess(t *testing.T) {
 	assert.NotContains(t, string(b), theAdminPassword, "the admin password must never appear in conditions on success")
 }
 
-// TestPasswordAdminActive locks the gate predicate's truth table.
-func TestPasswordAdminActive(t *testing.T) {
-	t.Run("nil registerAdmin → inactive", func(t *testing.T) {
-		assert.False(t, passwordAdminActive(oidcPlatformCR()))
-	})
-	t.Run("password enabled + managed Keycloak → active", func(t *testing.T) {
-		assert.True(t, passwordAdminActive(passwordAdminPlatform()))
-	})
-	t.Run("password enabled + external Keycloak → inactive", func(t *testing.T) {
-		p := passwordAdminPlatform()
-		p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external"}
-		assert.False(t, passwordAdminActive(p))
-	})
-	t.Run("password present but disabled → inactive", func(t *testing.T) {
-		p := passwordAdminPlatform()
-		p.Spec.RegisterAdmin.Password.Enabled = false
-		assert.False(t, passwordAdminActive(p))
-	})
-	t.Run("bootstrap disabled → inactive", func(t *testing.T) {
-		p := passwordAdminPlatform()
-		p.Spec.RegisterAdmin.Enabled = false
-		assert.False(t, passwordAdminActive(p))
-	})
-}
-
 // TestReconcileAdminUserDefaultUsername verifies that with registerAdmin.username unset, the
 // realm user defaults to "Administrator" (mirroring the certificate method's default Subject CN).
 func TestReconcileAdminUserDefaultUsername(t *testing.T) {
@@ -275,7 +250,7 @@ func TestReconcileAdminUserDefaultUsername(t *testing.T) {
 
 	require.False(t, r.reconcileAdminKeycloakUser(context.Background(), p))
 	require.Equal(t, 1, len(reg.userCalls))
-	assert.Equal(t, adminUserDefaultUsername, reg.userCalls[0].user.Username)
+	assert.Equal(t, "Administrator", reg.userCalls[0].user.Username)
 	// Sanity: confirm the realm passed matches the platform's realm name.
 	assert.Equal(t, platformbuilder.KeycloakRealmName(p), reg.userCalls[0].realm)
 }
