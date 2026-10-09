@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"reflect"
 	"regexp"
 	"testing"
 
@@ -375,6 +376,25 @@ func TestTopologyHasUserRole(t *testing.T) {
 		b, _ := BundleFor(v)
 		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), testBundleContext, v)
 		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), testBundleContext, v)
+	}
+}
+
+// TestQueueArgumentsNotShared guards bundles that derive one topology from another: a queue's
+// Arguments map shared between two bundles would let a change to one silently change the other.
+func TestQueueArgumentsNotShared(t *testing.T) {
+	owner := map[uintptr]string{}
+	for _, v := range AllVersions() {
+		b, _ := BundleFor(v)
+		for _, q := range b.Messaging.Queues {
+			if q.Arguments == nil {
+				continue
+			}
+			p := reflect.ValueOf(q.Arguments).Pointer()
+			if prev, seen := owner[p]; seen {
+				t.Errorf("queue %s in %s shares its Arguments map with %s", q.Name, v, prev)
+			}
+			owner[p] = v + "/" + q.Name
+		}
 	}
 }
 
