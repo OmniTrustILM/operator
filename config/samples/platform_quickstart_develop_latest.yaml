@@ -8,6 +8,11 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
+  # develop follows the newest bundle the operator build carries, usually the next release's
+  # preview, so the develop-latest images run against the contract they are built for.
+  # Only a development build of the operator accepts it.
+  version: develop
+
   common:
     hostName: ilm.example.com        # canonical public FQDN — the edge, Keycloak, OIDC, CORS all use it
     image:

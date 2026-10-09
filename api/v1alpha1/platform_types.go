@@ -1285,6 +1285,12 @@ type PlatformSpec struct {
 	// validating webhook) against the bundles this build carries. An unknown version does
 	// not crash the operator — it surfaces as a Degraded condition listing the supported
 	// versions. status.observedVersion reports the resolved version.
+	//
+	// "develop" follows the newest bundle this operator build carries, the next release's
+	// preview included, for a development platform that tracks the operator's main branch: a
+	// newer operator build that carries a newer bundle moves the platform to it. Only
+	// development builds of the operator accept it; a released operator reports it as
+	// unsupported.
 	// +optional
 	Version string `json:"version,omitempty"`
 	// Common holds configuration applied to EVERY platform component: shared image
@@ -1582,11 +1588,11 @@ type PlatformStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ObservedVersion is the platform version bundle the operator resolved and
-	// reconciled this Platform against — spec.version when set and known, otherwise the
-	// operator's default version (not necessarily the newest one it carries). It lags
-	// spec.version only while a reconcile is in flight; an unknown spec.version leaves it
-	// at the last successfully-reconciled version and surfaces the error on the Degraded
-	// condition.
+	// reconciled this Platform against — spec.version when set and known (for "develop",
+	// the concrete version it resolved to), otherwise the operator's default version (not
+	// necessarily the newest one it carries). It lags the version spec.version resolves to
+	// only while a reconcile is in flight; an unknown spec.version leaves it at the last
+	// successfully-reconciled version and surfaces the error on the Degraded condition.
 	// +optional
 	ObservedVersion string `json:"observedVersion,omitempty"`
 	// Conditions represent the latest available observations of the platform's state.

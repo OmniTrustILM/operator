@@ -192,7 +192,7 @@ Version moves have their own vocabulary, and it splits cleanly into the two cate
 
 **Refused — `Degraded`, and terminal until you edit the spec:**
 
-- **`UnsupportedVersion`** — `spec.version` names a version this operator build does not carry. The message lists the versions it does support, so a live cluster tells you the answer. Upgrade the operator, or correct the value.
+- **`UnsupportedVersion`** — `spec.version` names a version this operator build does not carry. The message lists the versions it does support, so a live cluster tells you the answer. Upgrade the operator, or correct the value. A released operator reports `develop` this way too: only development builds accept it.
 - **`DowngradeForbidden`** — `spec.version` is older than the running `status.observedVersion`. Nothing is applied and the running version keeps serving. Upgrades are forward-only; returning to an older version means restoring from a backup.
 - **The messaging-migration refusals** — `ExternalMessagingMigrationRequired`, `SteppingStoneRequired`, `MigrationTimeQualityMonitorEnabled`, `WorkloadKindSwitchPending`, `MigrationVirtualHostPinned`, `MigrationRunningVersionUnrecorded`, `MigrationSourceVersionUnknown`, `MigrationInputsChanged`, and `MigrationWorkloadKindChanged`. Each comes from a spec the operator cannot act on, each carries an actionable message naming its own remedy, and each is accompanied by a `Warning` event with the same text. What each one means and how to clear it is in [Upgrading](./upgrading.md#preconditions-the-engine-enforces).
 

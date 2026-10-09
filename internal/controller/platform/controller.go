@@ -623,13 +623,13 @@ func (r *Reconciler) resolvePlatformVersion(ctx context.Context, platform *otilm
 	// Refuse an explicit DOWNGRADE (spec.version strictly older than the running
 	// observedVersion): a stateful platform that already self-migrated its schema cannot be
 	// rolled back safely. Terminal steady state (Degraded + actionable message, no apply) until
-	// the user corrects spec.version. Compared on the ORIGINAL spec.version, before the
-	// in-memory pin below.
+	// the user corrects spec.version. Compared on the version spec.version RESOLVES to (develop
+	// names the newest bundle this build carries), before the in-memory pin below.
 	if platform.Spec.Version != "" && platform.Status.ObservedVersion != "" &&
-		isPlatformDowngrade(platform.Spec.Version, platform.Status.ObservedVersion) {
+		isPlatformDowngrade(effectiveVersion, platform.Status.ObservedVersion) {
 		res, err = r.steadyState(ctx, platform, reasonDowngradeForbidden,
 			fmt.Sprintf("platform downgrade to %q is not supported (running %q); set spec.version to %q or higher",
-				platform.Spec.Version, platform.Status.ObservedVersion, platform.Status.ObservedVersion))
+				effectiveVersion, platform.Status.ObservedVersion, platform.Status.ObservedVersion))
 		return "", bundle, true, res, err
 	}
 

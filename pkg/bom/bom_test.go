@@ -229,10 +229,7 @@ func TestSupportedVersionsExplicit(t *testing.T) {
 // (not-yet-released) bundle would behave. The key is a version string no production bundle will
 // ever use, and t.Cleanup removes it before any other test in this package runs.
 func TestSupportedVersionsExcludesPreviewBundle(t *testing.T) {
-	const previewVersion = "9.9.9-preview-synthetic"
-	require.NotContains(t, bundles, previewVersion, "the synthetic key must not collide with real bundle data")
-	bundles[previewVersion] = Bundle{Released: false}
-	t.Cleanup(func() { delete(bundles, previewVersion) })
+	previewVersion := addSyntheticPreviewBundle(t)
 
 	assert.NotContains(t, SupportedVersions(), previewVersion,
 		"a preview (Released=false) bundle must never appear in the advertised set")
@@ -242,6 +239,28 @@ func TestSupportedVersionsExcludesPreviewBundle(t *testing.T) {
 	b, ok := BundleFor(previewVersion)
 	assert.True(t, ok, "an explicit spec.version reaches a preview bundle exactly like a released one")
 	assert.False(t, b.Released)
+}
+
+// TestNewestVersionIncludesPreviewBundle proves NewestVersion reaches past the advertised set: a
+// platform that follows the newest bundle must land on the next version's preview while it is
+// still unreleased, not on the newest released bundle. The synthetic preview sorts above every
+// real bundle, so only an implementation that considers previews returns it.
+func TestNewestVersionIncludesPreviewBundle(t *testing.T) {
+	previewVersion := addSyntheticPreviewBundle(t)
+
+	assert.Equal(t, previewVersion, NewestVersion())
+}
+
+// addSyntheticPreviewBundle inserts an unreleased bundle into the package-level bundles map under
+// a version string no production bundle will ever use, newer than every real bundle, and removes
+// it when the test ends. It returns that version.
+func addSyntheticPreviewBundle(t *testing.T) string {
+	t.Helper()
+	const previewVersion = "9.9.9-preview-synthetic"
+	require.NotContains(t, bundles, previewVersion, "the synthetic key must not collide with real bundle data")
+	bundles[previewVersion] = Bundle{Released: false}
+	t.Cleanup(func() { delete(bundles, previewVersion) })
+	return previewVersion
 }
 
 // TestDefaultVersionIsReleased is the ONE invariant DefaultVersion must satisfy: it must name

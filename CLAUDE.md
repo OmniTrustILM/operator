@@ -204,8 +204,9 @@ Each platform version is a bundle in `pkg/bom/bom.go` carrying a `Released` flag
 - It resolves **only** via an explicit `spec.version`; `SupportedVersions()` excludes it, so it never appears in advertised or defaulted output.
 - `DefaultVersion` must name a **released** bundle (`TestDefaultVersionIsReleased` enforces this) — an empty `spec.version` can never land on a preview.
 - A **live** platform reaches a preview only by the same explicit `spec.version` opt-in, and the move is governed like any other version move — including the messaging migration when the managed topology changes between the two bundles. There is no separate preview-upgrade guard.
+- `spec.version: develop` is that opt-in for development platforms: it resolves to `bom.NewestVersion()` (the newest bundle, preview included) on development builds only — a release build (`version.IsRelease()`) reports it as unsupported. While a messaging migration is in flight it resolves to that migration's target on any build, so an operator update can neither retarget nor strand it. The concrete version is pinned on `status.observedVersion`, so a move between bundles stays governed: the downgrade guard compares the resolved version, never the alias.
 
-Release day is a data-only flip: set `Released: true` on the bundle and move `DefaultVersion` to it. Treat a preview bundle as opt-in, maintainer-facing surface — samples that use one must say so.
+Release day is a data-only flip: set `Released: true` on the bundle and move `DefaultVersion` to it, and add the next version's preview in the same PR so `main` always carries a bundle ahead of the last release for `develop` platforms. Contract changes for the next release land in that preview before, or together with, the component change that needs them. Treat a preview bundle as opt-in, maintainer-facing surface — samples that use one must say so.
 
 ## Quality Requirements
 
