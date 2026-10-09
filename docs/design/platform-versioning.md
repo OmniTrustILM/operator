@@ -81,6 +81,12 @@ major-version guard already gates **managed-infra** (CNPG/RabbitMQ/Keycloak) eng
      applies nothing (stateful downgrade after a schema migration is unsafe). CEL cannot read
      status, so the reconciler is the enforcement point; a validating webhook can add create-time
      UX later.
+   - **`develop` follows the newest bundle** — on a development build of the operator,
+     `spec.version: develop` resolves to the newest bundle the build carries, preview included,
+     so a development platform moves whenever a newer operator build brings a newer bundle (a
+     messaging migration in flight finishes first). The resolved version is pinned on
+     `status.observedVersion` and passes the downgrade guard like any explicit version; a release
+     build reports `develop` as unsupported.
 4. **Migration model (new):**
    - **Config/wiring changes** (env renames, added/removed components) are handled automatically
      by re-rendering against the new bundle → rolling update. No explicit migration.
@@ -94,6 +100,7 @@ major-version guard already gates **managed-infra** (CNPG/RabbitMQ/Keycloak) eng
 
 - **pin-on-create** for an unset `spec.version`.
 - **downgrade = refuse** (reconciler-enforced, semver vs `status.ObservedVersion`).
+- **`develop`** follows the newest bundle, on development builds of the operator only.
 - **app-self-migrates + operator-orders** for data migrations.
 
 ## 5. What each supported version must provide (the per-version contract)

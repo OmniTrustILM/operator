@@ -1285,6 +1285,12 @@ type PlatformSpec struct {
 	// validating webhook) against the bundles this build carries. An unknown version does
 	// not crash the operator — it surfaces as a Degraded condition listing the supported
 	// versions. status.observedVersion reports the resolved version.
+	//
+	// "develop" follows the newest bundle this operator build carries, the next release's
+	// preview included, for a development platform that tracks the operator's main branch: a
+	// newer operator build that carries a newer bundle moves the platform to it. Only
+	// development builds of the operator accept it; a released operator reports it as
+	// unsupported.
 	// +optional
 	Version string `json:"version,omitempty"`
 	// Common holds configuration applied to EVERY platform component: shared image

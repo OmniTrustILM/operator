@@ -10,6 +10,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	"github.com/OmniTrustILM/operator/internal/version"
 	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
@@ -17,11 +18,17 @@ import (
 // older than the version already running (status.observedVersion).
 const reasonDowngradeForbidden = "DowngradeForbidden"
 
+// developVersion is the spec.version value a development platform sets to follow the newest
+// bundle this operator build carries, preview included.
+const developVersion = "develop"
+
 // effectivePlatformVersion implements the PIN-ON-CREATE policy: the version the operator
 // reconciles a Platform against, in precedence order, is
 //
 //  1. spec.version when the user set it explicitly — an explicit version is the ONLY upgrade
-//     trigger;
+//     trigger. developVersion is that explicit request to follow the newest bundle this build
+//     carries (resolveDevelopVersion), so a development platform moves when a newer operator
+//     build brings a newer bundle;
 //  2. otherwise status.observedVersion — the version the platform was first reconciled
 //     against. An empty spec.version therefore FOLLOWS the pinned version, so upgrading the
 //     operator (which changes the built-in DefaultVersion) never silently upgrades a running
@@ -35,9 +42,27 @@ const reasonDowngradeForbidden = "DowngradeForbidden"
 // status, never in spec, so the policy does NOT fight a GitOps actor that owns the spec.
 func effectivePlatformVersion(p *otilmv1alpha1.Platform) string {
 	if p.Spec.Version != "" {
-		return p.Spec.Version
+		return resolveDevelopVersion(p, version.IsRelease())
 	}
 	return p.Status.ObservedVersion
+}
+
+// resolveDevelopVersion returns spec.version with developVersion resolved: to the target of a
+// messaging migration in flight, on any build, so the migration finishes before the platform moves
+// on, and otherwise to the newest bundle this operator build carries. A release build otherwise
+// leaves developVersion as it is, so the reconciler reports it as unsupported and never moves a
+// platform onto an unreleased bundle.
+func resolveDevelopVersion(p *otilmv1alpha1.Platform, releaseBuild bool) string {
+	switch {
+	case p.Spec.Version != developVersion:
+		return p.Spec.Version
+	case migrationInFlight(p):
+		return p.Status.Upgrade.ToVersion
+	case releaseBuild:
+		return developVersion
+	default:
+		return bom.NewestVersion()
+	}
 }
 
 // teardownPlatformVersion resolves the version the DELETION teardown renders against, with the
@@ -59,7 +84,7 @@ func teardownPlatformVersion(p *otilmv1alpha1.Platform) string {
 	if p.Status.ObservedVersion != "" {
 		return p.Status.ObservedVersion
 	}
-	return p.Spec.Version
+	return resolveDevelopVersion(p, version.IsRelease())
 }
 
 // teardownRenderPlatforms returns the platform copies the DELETION teardown renders against —
