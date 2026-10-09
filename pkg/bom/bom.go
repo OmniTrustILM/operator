@@ -393,6 +393,14 @@ func AllVersions() []string {
 	return sortVersions(out)
 }
 
+// NewestVersion returns the newest bundle this operator build carries, preview included: the
+// last entry of AllVersions. It is what a development platform follows, so a preview opened for
+// the next release is reached before it is released.
+func NewestVersion() string {
+	all := AllVersions()
+	return all[len(all)-1]
+}
+
 // sortVersions sorts a version list ASCENDING by semver IN PLACE and returns it. It is the
 // single ordering used by SupportedVersions and AllVersions, so the advertised set and the
 // full key set can never disagree on "newest is last" — the invariant the CLI relies on to

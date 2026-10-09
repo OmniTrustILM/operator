@@ -12,7 +12,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,6 +38,7 @@ func TestEffectivePlatformVersion(t *testing.T) {
 		{"empty spec.version follows the pinned observedVersion", "", platformVersion217, platformVersion217},
 		{"first reconcile: nothing pinned yet → empty (default resolved downstream)", "", "", ""},
 		{"explicit spec.version with no pin yet", platformVersion218, "", platformVersion218},
+		{"the develop alias follows the newest bundle this build carries", developVersion, platformVersion217, bom.NewestVersion()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -58,6 +62,7 @@ func TestTeardownPlatformVersion(t *testing.T) {
 		{"no pin yet: fall back to the requested spec.version", platformVersion218, "", platformVersion218},
 		{"nothing set: empty (the bundle layer resolves the default)", "", "", ""},
 		{"agreeing spec and pin", platformVersion218, platformVersion218, platformVersion218},
+		{"no pin yet: the develop alias resolves as the reconcile does", developVersion, "", bom.NewestVersion()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -67,6 +72,60 @@ func TestTeardownPlatformVersion(t *testing.T) {
 			assert.Equal(t, c.want, teardownPlatformVersion(p))
 		})
 	}
+}
+
+// TestReleaseBuildKeepsDevelopUnresolved proves the develop alias exists only in development
+// builds: a release build keeps it as the literal version, which no bundle matches, so the
+// reconciler refuses it as unsupported instead of moving the platform onto an unreleased bundle.
+func TestReleaseBuildKeepsDevelopUnresolved(t *testing.T) {
+	p := &otilmv1alpha1.Platform{}
+	p.Spec.Version = developVersion
+	assert.Equal(t, developVersion, resolveDevelopVersion(p, true))
+}
+
+// TestDevelopFinishesAnInFlightMigrationFirst proves a newer operator build cannot retarget a
+// messaging migration that is already running: while one is in flight, develop resolves to its
+// recorded target, so the migration resumes instead of being refused, with its producers still
+// fenced, as a request for a third version. The recorded target is older than the newest bundle,
+// as it is when an operator update lands mid-migration.
+func TestDevelopFinishesAnInFlightMigrationFirst(t *testing.T) {
+	p := &otilmv1alpha1.Platform{}
+	p.Spec.Version = developVersion
+	p.Status.ObservedVersion = platformVersion217
+	p.Status.Upgrade = &otilmv1alpha1.UpgradeStatus{
+		FromVersion: platformVersion217, ToVersion: platformVersion218, Phase: otilmv1alpha1.MigrationPhaseDraining,
+	}
+	require.NotEqual(t, platformVersion218, bom.NewestVersion(), "the recorded target must be older than the newest bundle")
+
+	assert.Equal(t, migrationActionResume, decideInFlightMigration(p).Action)
+	assert.Equal(t, platformVersion218, resolveDevelopVersion(p, true),
+		"a release build that replaces a development build mid-migration lets it finish too")
+}
+
+// TestResolvePlatformVersionRefusesDevelopBehindTheRunningVersion proves the downgrade guard
+// compares the version develop RESOLVES to, not the alias itself. When the platform already runs
+// a newer version than every bundle this build carries (an operator rolled back to an older
+// build), following develop would move it backwards, so the reconcile stops instead.
+func TestResolvePlatformVersionRefusesDevelopBehindTheRunningVersion(t *testing.T) {
+	const runningVersion = "99.0.0"
+	s := runtime.NewScheme()
+	require.NoError(t, otilmv1alpha1.AddToScheme(s))
+	seed := &otilmv1alpha1.Platform{ObjectMeta: metav1.ObjectMeta{Name: "ilm", Namespace: "ns"}}
+	seed.Spec.Version = developVersion
+	seed.Status.ObservedVersion = runningVersion
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(seed).WithStatusSubresource(seed).Build()
+	r := &Reconciler{Client: c, Scheme: s}
+
+	p := &otilmv1alpha1.Platform{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(seed), p))
+	_, _, handled, _, err := r.resolvePlatformVersion(context.Background(), p)
+
+	require.NoError(t, err)
+	assert.True(t, handled, "the reconcile must stop before rendering anything")
+	cond := meta.FindStatusCondition(p.Status.Conditions, conditionDegraded)
+	require.NotNil(t, cond, "a refused downgrade sets the Degraded condition")
+	assert.Equal(t, reasonDowngradeForbidden, cond.Reason)
+	assert.Equal(t, runningVersion, p.Status.ObservedVersion, "the running version stays in effect")
 }
 
 // TestTeardownRenderPlatforms locks the version SET teardown renders against, for an

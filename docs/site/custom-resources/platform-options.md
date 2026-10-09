@@ -12,7 +12,7 @@ The fields on `spec` itself; [How configuration is organized](./platform.md#how-
 
 | Field | Default | Purpose |
 |---|---|---|
-| `version` | the operator's default bundle | The platform version bundle ([Upgrading](../upgrading.md#how-a-version-is-resolved)). |
+| `version` | the operator's default bundle | The platform version bundle, or `develop` to follow the newest bundle on a development build of the operator ([Upgrading](../upgrading.md#how-a-version-is-resolved)). |
 | `common` | — | Fleet-wide configuration (see below). |
 | `database` | *required* | The database connection — `external` or `managed`, plus `pgBouncer`. |
 | `messaging` | *required* | The AMQP broker — `external` or `managed`, plus `management.expose`, `timeQuality.enabled` (default `false`), and `migrationAcknowledgedForVersion` for an external-broker migration. |

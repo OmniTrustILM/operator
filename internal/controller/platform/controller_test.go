@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
+	platformbuilder "github.com/OmniTrustILM/operator/internal/builder/platform"
 	"github.com/OmniTrustILM/operator/pkg/bom"
 )
 
@@ -1270,6 +1271,28 @@ var _ = Describe("Platform Controller", func() {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
 				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
 				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion219))
+			}, platformTimeout, platformInterval).Should(Succeed())
+		})
+
+		It("follows the newest bundle when spec.version is develop", func() {
+			// develop must resolve to the newest bundle this build carries and pin that CONCRETE
+			// version on status, so every later move is an ordinary version move that the
+			// downgrade and messaging-migration guards can compare.
+			const ns = "ilm-version-develop"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, developVersion))).To(Succeed())
+			markRequiredDeploymentsReady(ns)
+
+			By("verifying the platform runs the newest bundle and status.observedVersion names it")
+			Eventually(func(g Gomega) {
+				var got otilmv1alpha1.Platform
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
+				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
+				g.Expect(got.Status.ObservedVersion).To(Equal(bom.NewestVersion()))
+
+				var core appsv1.Deployment
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "core", Namespace: ns}, &core)).To(Succeed())
+				g.Expect(core.Spec.Template.Annotations).To(
+					HaveKeyWithValue(platformbuilder.PlatformVersionAnnotation, bom.NewestVersion()))
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 

@@ -39,13 +39,16 @@ spec:
   messaging: { mode: managed }
 ```
 
-An operator build may also carry a **preview** bundle — a version whose platform artifacts are not published yet. Only one thing about that is visible to you: a preview version resolves **only** when `spec.version` names it explicitly. It never appears in the supported-versions list the operator reports, and it is never the default. Everything else about it behaves exactly like a released version — the same resolution rules, the same downgrade refusal, and the same messaging migration if the move renames the managed topology.
+An operator build may also carry a **preview** bundle — a version whose platform artifacts are not published yet. Only one thing about that is visible to you: a preview version resolves **only** when `spec.version` names it explicitly, or through `develop` on a development build of the operator (below). It never appears in the supported-versions list the operator reports, and it is never the default. Everything else about it behaves exactly like a released version — the same resolution rules, the same downgrade refusal, and the same messaging migration if the move renames the managed topology.
+
+A development platform can follow the operator's development line with **`spec.version: develop`**, which resolves to the newest bundle the running operator build carries — usually the next release's preview. Every operator build except a release accepts it, the `main` builds and local builds alike; a released operator reports it as `UnsupportedVersion`. A preview's component images are not published yet, so such a platform also overrides them with development builds, preferably by digest ([component image overrides](#component-image-overrides-still-apply)).
 
 ## How a version is resolved
 
 The operator follows a **pin-on-create** policy, so upgrading the *operator* never silently upgrades a *running platform*:
 
 - **`spec.version` set to a supported version** — that bundle is used. Setting it to a newer version is the explicit, and only, way to upgrade the platform.
+- **`spec.version` set to `develop`** — the operator resolves it to the newest bundle it carries and records that version on `status.observedVersion`. A newer operator build that carries a newer bundle moves the platform to it as an ordinary upgrade, with the same downgrade refusal and messaging migration as any version move; a messaging migration already under way finishes first. Replacing `develop` with a version number pins the platform again; that version must not be older than `status.observedVersion`.
 - **`spec.version` empty, first reconcile** — the operator resolves its **default** bundle, records it on `status.observedVersion`, and thereby **pins** it.
 - **`spec.version` empty, thereafter** — the operator keeps using the pinned `status.observedVersion`, not whatever a newer operator build defaults to. A platform created today stays on today's version even after you upgrade the operator binary; it moves only when you set `spec.version` explicitly.
 - **`spec.version` older than the running version** — the platform goes **`Degraded`** with reason **`DowngradeForbidden`** and applies nothing. A stateful platform that has already migrated its schema cannot be rolled back safely; set `spec.version` back to the running version or higher.

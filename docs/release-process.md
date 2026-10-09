@@ -195,13 +195,19 @@ The flip itself is an ordinary PR to `main`, not part of the release branch:
    two flags are independent, so a released bundle can be reachable by explicit `spec.version`
    before the default moves) but it is the **exception**: do it only deliberately, and say why in
    the PR description.
-3. Update the supported-version table (the engine matrix) and the default marker in the
+3. Add the next version's bundle as a **preview** (`Released: false`) in the same PR, starting
+   as a copy of the bundle you just released, with its BOM test and golden render like any
+   bundle. Development platforms set `spec.version: develop`, which follows the newest bundle an
+   operator build carries, so `main` must always carry one ahead of the last release. Contract
+   changes for the next release (a new queue, a permission, a setting without a default) land in
+   that preview before, or together with, the component change that needs them.
+4. Update the supported-version table (the engine matrix) and the default marker in the
    **canonical** user guide — [docs/site/upgrading.md](site/upgrading.md), under its
    *Supported versions* heading — and drop the preview wording from any sample that pinned the
    bundle while it was a preview. `docs/site/` is the canonical source for every end-user fact;
    `docs/versions.md` and `docs/upgrades.md` are stubs that redirect there, so do not add or
    correct facts in them.
-4. `make test` — the BOM tests, the samples specs and the golden renders all move with this.
+5. `make test` — the BOM tests, the samples specs and the golden renders all move with this.
 
 Merge that PR to `main` and let CI go green before cutting the release branch.
 
