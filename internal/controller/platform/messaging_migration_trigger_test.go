@@ -162,6 +162,38 @@ func TestDecideMigration(t *testing.T) {
 			wantAction: migrationActionNone,
 		},
 		{
+			// 2.20.0 adds the discovery-work queue on the same vhost and exchanges.
+			name:       "managed: 2.19.0 -> 2.20.0 adds a queue on the same vhost, so no migration",
+			platform:   migrationPlatform(modeManaged, platformVersion219, platformVersion220),
+			from:       platformVersion219,
+			to:         platformVersion220,
+			wantAction: migrationActionNone,
+		},
+		{
+			name:       "external: 2.19.0 -> 2.20.0 renames no exchange, so no acknowledgement",
+			platform:   migrationPlatform(modeExternal, platformVersion219, platformVersion220),
+			from:       platformVersion219,
+			to:         platformVersion220,
+			wantAction: migrationActionNone,
+		},
+		{
+			// Skipping 2.19.0 still moves the vhost, so the engine runs the same migration.
+			name:       "managed: 2.18.0 -> 2.20.0 changes the bundle default vhost → start",
+			platform:   migrationPlatform(modeManaged, platformVersion218, platformVersion220),
+			from:       platformVersion218,
+			to:         platformVersion220,
+			wantAction: migrationActionStart,
+		},
+		{
+			name:         "external: 2.18.0 -> 2.20.0 renames the exchanges and nothing acknowledges it",
+			platform:     migrationPlatform(modeExternal, platformVersion218, platformVersion220),
+			from:         platformVersion218,
+			to:           platformVersion220,
+			wantAction:   migrationActionRefuse,
+			wantReason:   reasonExternalMessagingMigrationRequired,
+			messageParts: []string{"spec.messaging.migrationAcknowledgedForVersion", platformVersion220},
+		},
+		{
 			name:         "managed: a 2.17.0 source must pass through the stepping stone",
 			platform:     migrationPlatform(modeManaged, platformVersion217, platformVersion219),
 			from:         platformVersion217,
@@ -304,5 +336,6 @@ func TestMessagingExchangesRenamed(t *testing.T) {
 
 	assert.True(t, messagingExchangesRenamed(b218, b219), "the 2.19.0 exchange rename must be detected")
 	assert.False(t, messagingExchangesRenamed(b217, b218), "adding an exchange is not a rename")
+	assert.False(t, messagingExchangesRenamed(b219, bundleFor(t, platformVersion220)), "adding a queue is not a rename")
 	assert.False(t, messagingExchangesRenamed(b218, b218), "a bundle is never a rename of itself")
 }

@@ -18,6 +18,8 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,6 +73,7 @@ const (
 	version2170 = "2.17.0"
 	version2180 = "2.18.0"
 	version2190 = "2.19.0"
+	version2200 = "2.20.0"
 )
 
 // componentAuthOPAPolicies is the operator's component identity for the
@@ -117,6 +120,10 @@ const (
 	tagOpa1100Static = "1.10.0-static"
 	tagCurl8160      = "8.16.0"
 )
+
+// keycloakVersion2663 is a managed Keycloak pin several bundles share; like the tags above, a
+// dedup of today's data, not a promise of cross-version alignment.
+const keycloakVersion2663 = "26.6.3"
 
 // Image is the per-component image coordinates from a bundle. Repository is set only
 // for components published outside the default repository (e.g. ilm-private) — empty
@@ -176,6 +183,13 @@ type Bundle struct {
 	RabbitMQVersion string
 	CNPGVersion     string
 	KeycloakVersion string
+
+	// CoreStartupFailureThreshold is Core's startup-probe failure budget (in 10-second periods)
+	// for this platform version; 0 keeps the operator's default. A version whose migrations can
+	// run long raises it: Core migrates before it answers the probe, and a pod killed
+	// mid-migration rolls the migration back and starts over. Older bundles leave it 0, so
+	// upgrading the operator does not change their pod template and roll Core.
+	CoreStartupFailureThreshold int32
 }
 
 // Lookup returns the bundle's image coordinates for a component name. The wiring
@@ -238,7 +252,7 @@ var bundles = map[string]Bundle{
 		// guard's per-bundle reasoning and document the validated set.
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
-		KeycloakVersion: "26.6.3",
+		KeycloakVersion: keycloakVersion2663,
 	},
 	// 2.19.0 — the operator's DEFAULT and newest RELEASED bundle. Image coordinates verified
 	// against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
@@ -248,28 +262,32 @@ var bundles = map[string]Bundle{
 	// the "/" virtual host with the ilm / ilm-proxy exchanges, and the provider.status-poll
 	// queue.
 	version2190: {
-		Components: map[string]Image{
-			"core":                   {Name: "core", Tag: version2190},
-			"auth":                   {Name: "auth", Tag: "1.7.0"},
-			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
-			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
-			"curl":                   {Name: "curl", Tag: tagCurl8160},
-			"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
-			componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
-			componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
-			componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
-			"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
-			componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
-			"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
-		},
+		Components:      images2190,
 		Wiring:          wiring2190,
 		Messaging:       messagingTopology2190,
 		HasProvisioning: true,
 		Released:        true,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
-		KeycloakVersion: "26.6.3",
+		KeycloakVersion: keycloakVersion2663,
+	},
+	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
+	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
+	// queue (see messagingTopology2200), the core and frontend-administrator 2.20.0 images, and
+	// scheduler 1.2.0.
+	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default.
+	version2200: {
+		Components:      images2200,
+		Wiring:          wiring2190,
+		Messaging:       messagingTopology2200,
+		HasProvisioning: true,
+		Released:        false,
+		RabbitMQVersion: "4.3.1",
+		CNPGVersion:     "18",
+		KeycloakVersion: keycloakVersion2663,
+		// About 30 minutes: V202608291000 rewrites discovery_certificate under an exclusive
+		// lock and indexes it, which can outlast the default on a large installation.
+		CoreStartupFailureThreshold: 180,
 	},
 	version2170: {
 		// 2.17.0 is the pre-rebrand CZERTAINLY release. Its images are republished under the
@@ -307,6 +325,34 @@ var bundles = map[string]Bundle{
 		KeycloakVersion: "26.4.0",
 	},
 }
+
+// images2190 is the 2.19.0 image set (see the 2.19.0 bundle for where it was verified).
+var images2190 = map[string]Image{
+	"core":                   {Name: "core", Tag: version2190},
+	"auth":                   {Name: "auth", Tag: "1.7.0"},
+	componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
+	ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
+	"opa":                    {Name: "opa", Tag: tagOpa1100Static},
+	"curl":                   {Name: "curl", Tag: tagCurl8160},
+	"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
+	componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
+	componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
+	componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
+	"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+	componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
+	"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+}
+
+// images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0 and
+// scheduler at 1.2.0; every other component keeps its 2.19.0 release. A clone, so the two
+// bundles never share a map.
+var images2200 = func() map[string]Image {
+	m := maps.Clone(images2190)
+	m["core"] = Image{Name: "core", Tag: version2200}
+	m[componentFeAdministrator] = Image{Name: imageNameFeAdministrator, Tag: version2200}
+	m["scheduler"] = Image{Name: "scheduler", Tag: "1.2.0"}
+	return m
+}()
 
 // BundleFor returns the bundle for a platform version. An empty version selects the
 // DefaultVersion bundle (the operator's fresh-install default — not necessarily the newest
@@ -909,6 +955,10 @@ const (
 	queueProviderStatusPoll = "provider.status-poll"
 )
 
+// provider.discovery-work is the 2.20.0-new Discovery v2 work queue Core consumes for its run
+// ticks (Core's DiscoveryWorkJmsEndpointConfig; queue and routing key in its application.yml).
+const queueProviderDiscoveryWork = "provider.discovery-work"
+
 // Routing keys used by the czertainly/ilm-exchange→queue bindings (app-level publish
 // keys). They are unchanged by the 2.19.0 exchange rename and repeat once per topology
 // below, so they are named once here.
@@ -989,63 +1039,89 @@ var messagingTopology2180 = MessagingTopology{
 // messagingTopology2190 is the 2.19.0 topology: vhost "/", ilm/ilm-proxy exchanges,
 // the 2.18.0 queue set plus provider.status-poll, and the user permission regexes
 // retargeted to the renamed exchanges (core additionally reads provider.status-poll).
-var messagingTopology2190 = MessagingTopology{
-	DefaultVirtualHost: "/",
-	Users: []MessagingUser{
-		// administrator + provisioner have admin tags and full ".*" permissions.
-		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
-		{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
-		// proxy: no configure; write only to ilm-proxy; read only proxy.* queues.
-		{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
-		// core: no configure; write ilm or ilm-proxy; read core.* / core-* AND the 2.19.0-new
-		// provider.status-poll queue AND the time-quality monitor's request/result queues. Core
-		// consumes the monitor's config-request and results queues at startup — without this read
-		// grant the broker denies access and Core crash-loops ("read access ... refused").
-		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.status-poll$|^time-quality\.(config-request|results)$`},
-		// monitor (time-quality): publish on the ilm exchange; consume the time-quality.config
-		// queue. Serves the operator-rendered time-quality-monitor SIDECAR on Core's pod when
-		// spec.core.timeQualityMonitor.enabled (managed messaging wires this role's
-		// generated credentials automatically), or an external monitor when messaging is
-		// external.
-		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
-	},
-	Exchanges: []MessagingExchange{
-		{Name: exchangeIlm, Type: ExchangeTypeDirect, Durable: true},
-		{Name: exchangeIlmProxy, Type: ExchangeTypeTopic, Durable: true},
-	},
-	Queues: []MessagingQueue{
-		{Name: "core", Durable: true},
-		{Name: queueCoreAuditLogs, Durable: true},
-		{Name: queueCoreNotifications, Durable: true},
-		{Name: queueCoreScheduler, Durable: true},
-		{Name: queueCoreActions, Durable: true},
-		{Name: queueCoreValidation, Durable: true},
-		{Name: queueCoreEvents, Durable: true},
-		// provider.status-poll is the 2.19.0-new provider status queue.
-		{Name: queueProviderStatusPoll, Durable: true},
-		// time-quality monitor queues (carried over from 2.18.0). config + config-request keep
-		// only the latest message (x-max-length 1, drop-head); results is a plain queue. Core
-		// publishes its config snapshot here at startup and consumes config-request/results.
-		{Name: queueTimeQualityConfig, Durable: true, Arguments: latestOnlyQueueArguments()},
-		{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: latestOnlyQueueArguments()},
-		{Name: queueTimeQualityResults, Durable: true},
-	},
-	// Bindings from the renamed ilm direct exchange to each queue (routing key = the app's
-	// publish key). The provider.status-poll binding is new in 2.19.0; the rest carry over from
-	// 2.18.0 retargeted to the ilm exchange.
-	Bindings: []MessagingBinding{
-		{Source: exchangeIlm, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
-		{Source: exchangeIlm, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
-		{Source: exchangeIlm, Destination: queueCoreActions, RoutingKey: routingKeyAction},
-		{Source: exchangeIlm, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
-		{Source: exchangeIlm, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
-		{Source: exchangeIlm, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
-		{Source: exchangeIlm, Destination: queueProviderStatusPoll, RoutingKey: queueProviderStatusPoll},
-		{Source: exchangeIlm, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
-		{Source: exchangeIlm, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
-		{Source: exchangeIlm, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},
-	},
+var messagingTopology2190 = newMessagingTopology2190()
+
+// newMessagingTopology2190 returns a fresh 2.19.0 topology on every call, so a later topology
+// can derive from it without sharing its slices or queue Arguments maps.
+func newMessagingTopology2190() MessagingTopology {
+	return MessagingTopology{
+		DefaultVirtualHost: "/",
+		Users: []MessagingUser{
+			// administrator + provisioner have admin tags and full ".*" permissions.
+			{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+			{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+			// proxy: no configure; write only to ilm-proxy; read only proxy.* queues.
+			{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
+			// core: no configure; write ilm or ilm-proxy; read core.* / core-* AND the 2.19.0-new
+			// provider.status-poll queue AND the time-quality monitor's request/result queues. Core
+			// consumes the monitor's config-request and results queues at startup — without this read
+			// grant the broker denies access and Core crash-loops ("read access ... refused").
+			{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.status-poll$|^time-quality\.(config-request|results)$`},
+			// monitor (time-quality): publish on the ilm exchange; consume the time-quality.config
+			// queue. Serves the operator-rendered time-quality-monitor SIDECAR on Core's pod when
+			// spec.core.timeQualityMonitor.enabled (managed messaging wires this role's
+			// generated credentials automatically), or an external monitor when messaging is
+			// external.
+			{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
+		},
+		Exchanges: []MessagingExchange{
+			{Name: exchangeIlm, Type: ExchangeTypeDirect, Durable: true},
+			{Name: exchangeIlmProxy, Type: ExchangeTypeTopic, Durable: true},
+		},
+		Queues: []MessagingQueue{
+			{Name: "core", Durable: true},
+			{Name: queueCoreAuditLogs, Durable: true},
+			{Name: queueCoreNotifications, Durable: true},
+			{Name: queueCoreScheduler, Durable: true},
+			{Name: queueCoreActions, Durable: true},
+			{Name: queueCoreValidation, Durable: true},
+			{Name: queueCoreEvents, Durable: true},
+			// provider.status-poll is the 2.19.0-new provider status queue.
+			{Name: queueProviderStatusPoll, Durable: true},
+			// time-quality monitor queues (carried over from 2.18.0). config + config-request keep
+			// only the latest message (x-max-length 1, drop-head); results is a plain queue. Core
+			// publishes its config snapshot here at startup and consumes config-request/results.
+			{Name: queueTimeQualityConfig, Durable: true, Arguments: latestOnlyQueueArguments()},
+			{Name: queueTimeQualityConfigRequest, Durable: true, Arguments: latestOnlyQueueArguments()},
+			{Name: queueTimeQualityResults, Durable: true},
+		},
+		// Bindings from the renamed ilm direct exchange to each queue (routing key = the app's
+		// publish key). The provider.status-poll binding is new in 2.19.0; the rest carry over from
+		// 2.18.0 retargeted to the ilm exchange.
+		Bindings: []MessagingBinding{
+			{Source: exchangeIlm, Destination: queueCoreAuditLogs, RoutingKey: routingKeyAuditLogs},
+			{Source: exchangeIlm, Destination: queueCoreNotifications, RoutingKey: routingKeyNotification},
+			{Source: exchangeIlm, Destination: queueCoreActions, RoutingKey: routingKeyAction},
+			{Source: exchangeIlm, Destination: queueCoreScheduler, RoutingKey: routingKeyScheduler},
+			{Source: exchangeIlm, Destination: queueCoreValidation, RoutingKey: routingKeyValidation},
+			{Source: exchangeIlm, Destination: queueCoreEvents, RoutingKey: routingKeyEvent},
+			{Source: exchangeIlm, Destination: queueProviderStatusPoll, RoutingKey: queueProviderStatusPoll},
+			{Source: exchangeIlm, Destination: queueTimeQualityConfig, RoutingKey: queueTimeQualityConfig},
+			{Source: exchangeIlm, Destination: queueTimeQualityConfigRequest, RoutingKey: queueTimeQualityConfigRequest},
+			{Source: exchangeIlm, Destination: queueTimeQualityResults, RoutingKey: queueTimeQualityResults},
+		},
+	}
 }
+
+// messagingTopology2200 is the 2.20.0 topology: the 2.19.0 topology plus the
+// provider.discovery-work queue, its binding from the ilm exchange, and Core's read grant on it.
+// The vhost and the exchanges are unchanged, so 2.19.0 -> 2.20.0 is an additive apply, not a
+// messaging migration.
+var messagingTopology2200 = func() MessagingTopology {
+	t := newMessagingTopology2190()
+	for i := range t.Users {
+		if t.Users[i].Role == MessagingUserCore {
+			// Without the grant the broker refuses Core's consumer and Core crash-loops.
+			t.Users[i].Read = `^core(\..+|-.+)?$|^provider\.(status-poll|discovery-work)$|^time-quality\.(config-request|results)$`
+		}
+	}
+	afterQueue := slices.IndexFunc(t.Queues, func(q MessagingQueue) bool { return q.Name == queueProviderStatusPoll }) + 1
+	t.Queues = slices.Insert(t.Queues, afterQueue, MessagingQueue{Name: queueProviderDiscoveryWork, Durable: true})
+	afterBinding := slices.IndexFunc(t.Bindings, func(b MessagingBinding) bool { return b.Destination == queueProviderStatusPoll }) + 1
+	t.Bindings = slices.Insert(t.Bindings, afterBinding,
+		MessagingBinding{Source: exchangeIlm, Destination: queueProviderDiscoveryWork, RoutingKey: queueProviderDiscoveryWork})
+	return t
+}()
 
 // messagingTopology2170 is the platform's managed-RabbitMQ topology for platform version
 // 2.17.0: a SINGLE broker user (2.17.0 used one messaging credential, not the five-user 2.18.0

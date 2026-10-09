@@ -759,6 +759,58 @@ func TestResolveManagedMessaging2190(t *testing.T) {
 	assert.Contains(t, queueNames, "provider.status-poll")
 }
 
+// TestResolveManagedMessaging2200IsAdditive proves a spec.version 2.20.0 platform renders the
+// 2.19.0 topology under the SAME object names plus exactly the discovery-work Queue and Binding.
+// Keeping every 2.19.0 identity is what lets 2.19.0 -> 2.20.0 converge by an ordinary apply
+// instead of a migration: a renamed CR would orphan the live one, since rabbitmq.com kinds are
+// never pruned.
+func TestResolveManagedMessaging2200IsAdditive(t *testing.T) {
+	src := renderedNames(t, ResolveManagedMessaging(managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion219 })))
+	objs := ResolveManagedMessaging(managedMQPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion220 }))
+	tgt := renderedNames(t, objs)
+
+	assert.Len(t, objs, 37, "35 objects of 2.19.0 plus one Queue and one Binding")
+	kept := map[string]bool{}
+	for _, n := range src {
+		assert.Contains(t, tgt, n, "the 2.19.0 object %q must keep its name in 2.20.0", n)
+		kept[n] = true
+	}
+	var added []string
+	for _, n := range tgt {
+		if !kept[n] {
+			added = append(added, n)
+		}
+	}
+	assert.Equal(t, []string{
+		"ilm-messaging-default-binding-ilm-provider-discovery-work",
+		"ilm-messaging-default-queue-provider-discovery-work",
+	}, added)
+
+	queue := findByName(findManagedObjs(objs, rmqKindQueue), "ilm-messaging-default-queue-provider-discovery-work")
+	require.NotNil(t, queue)
+	name, _, _ := unstructured.NestedString(queue.Object, "spec", "name")
+	assert.Equal(t, testQueueDiscovery, name)
+	durable, _, _ := unstructured.NestedBool(queue.Object, "spec", "durable")
+	assert.True(t, durable)
+	_, hasArgs, _ := unstructured.NestedMap(queue.Object, "spec", "arguments")
+	assert.False(t, hasArgs, "provider.discovery-work is a plain queue")
+
+	binding := findByName(findManagedObjs(objs, rmqKindBinding), "ilm-messaging-default-binding-ilm-provider-discovery-work")
+	require.NotNil(t, binding)
+	source, _, _ := unstructured.NestedString(binding.Object, "spec", "source")
+	rk, _, _ := unstructured.NestedString(binding.Object, "spec", "routingKey")
+	dest, _, _ := unstructured.NestedString(binding.Object, "spec", "destination")
+	assert.Equal(t, "ilm", source)
+	assert.Equal(t, testQueueDiscovery, dest)
+	assert.Equal(t, testQueueDiscovery, rk)
+
+	perm := findByName(findManagedObjs(objs, rmqKindPermission), "ilm-messaging-default-core-permission")
+	require.NotNil(t, perm)
+	read, _, _ := unstructured.NestedString(perm.Object, "spec", "permissions", "read")
+	assert.Equal(t, `^core(\..+|-.+)?$|^provider\.(status-poll|discovery-work)$|^time-quality\.(config-request|results)$`, read,
+		"Core's grant must cover the new queue, or the broker refuses its consumer")
+}
+
 // TestManagedMessagingReclaimKinds pins the one list in the builder that authorises DELETION:
 // the classes a messaging migration reclaims from the virtual host it moved away from, in the
 // order the Topology Operator's finalizers require, with the two Kinds that must never be

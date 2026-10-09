@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"reflect"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,23 +16,24 @@ import (
 )
 
 // Test-local version literals. These are DELIBERATELY independent of the production
-// version2170/version2180/version2190 consts in bom.go: this suite is a full-matrix
-// characterization of the bundle DATA, and reusing the production consts here would let
-// a bundle's key silently drift with its own const instead of being pinned by an
+// version2170/version2180/version2190/version2200 consts in bom.go: this suite is a
+// full-matrix characterization of the bundle DATA, and reusing the production consts here
+// would let a bundle's key silently drift with its own const instead of being pinned by an
 // independent literal.
 const (
 	testVersion2170 = "2.17.0"
 	testVersion2180 = "2.18.0"
 	testVersion2190 = "2.19.0"
+	testVersion2200 = "2.20.0"
 	testVersion2100 = "2.10.0"
 	testVersion290  = "2.9.0"
 )
 
-// Test-local literals for the 2.19.0 time-quality/provider queue names, independent of
-// the production queue name consts in bom.go for the same reason as the version
-// literals above.
+// Test-local literals for the time-quality/provider queue names, independent of the
+// production queue name consts in bom.go for the same reason as the version literals above.
 const (
 	testQueueProviderStatusPoll       = "provider.status-poll"
+	testQueueProviderDiscoveryWork    = "provider.discovery-work"
 	testQueueTimeQualityConfig        = "time-quality.config"
 	testQueueTimeQualityConfigRequest = "time-quality.config-request"
 	testQueueTimeQualityResults       = "time-quality.results"
@@ -220,10 +223,11 @@ func TestSupportedVersionsExplicit(t *testing.T) {
 }
 
 // TestSupportedVersionsExcludesPreviewBundle pins the Released filter with a SYNTHETIC preview
-// bundle, because the production data alone cannot: all three shipped bundles are Released
-// today, so a mutation that deletes the `if b.Released` guard in SupportedVersions leaves
-// TestSupportedVersionsExplicit and TestSupportedVersionsIncludesDefault equally green either
-// way. Inserting an unreleased bundle directly into the package-level bundles map — the seam
+// bundle, because the production data cannot be relied on to carry one: every preview is flipped
+// to Released on its release day, after which a mutation that deletes the `if b.Released` guard
+// in SupportedVersions leaves TestSupportedVersionsExplicit and
+// TestSupportedVersionsIncludesDefault equally green either way. Inserting an unreleased bundle
+// directly into the package-level bundles map — the seam
 // this internal test package has — makes the filter's absence observable again: SupportedVersions
 // must drop the synthetic key while AllVersions and BundleFor still reach it, exactly as a real
 // (not-yet-released) bundle would behave. The key is a version string no production bundle will
@@ -318,10 +322,10 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 	for _, v := range SupportedVersions() {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
-	assert.Equal(t, testVersion2190, AllVersions()[len(AllVersions())-1],
-		"the newest bundle is last in both lists")
+	assert.Equal(t, testVersion2200, AllVersions()[len(AllVersions())-1],
+		"the newest bundle is last in the full key set")
 	assert.Equal(t, testVersion2190, SupportedVersions()[len(SupportedVersions())-1],
-		"2.19.0 is released, so it is advertised too")
+		"the newest RELEASED bundle is last in the advertised set; the 2.20.0 preview is not advertised")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -387,10 +391,29 @@ func TestTopologyHasUserRole(t *testing.T) {
 	assert.False(t, b217.Messaging.HasUserRole(MessagingUserAdministrator))
 	assert.True(t, b217.Messaging.HasUserRole(MessagingUserCore))
 
-	for _, v := range []string{testVersion2180, testVersion2190} {
+	for _, v := range []string{testVersion2180, testVersion2190, testVersion2200} {
 		b, _ := BundleFor(v)
 		assert.True(t, b.Messaging.HasUserRole(MessagingUserAdministrator), testBundleContext, v)
 		assert.True(t, b.Messaging.HasUserRole(MessagingUserProvisioner), testBundleContext, v)
+	}
+}
+
+// TestQueueArgumentsNotShared guards bundles that derive one topology from another: a queue's
+// Arguments map shared between two bundles would let a change to one silently change the other.
+func TestQueueArgumentsNotShared(t *testing.T) {
+	owner := map[uintptr]string{}
+	for _, v := range AllVersions() {
+		b, _ := BundleFor(v)
+		for _, q := range b.Messaging.Queues {
+			if q.Arguments == nil {
+				continue
+			}
+			p := reflect.ValueOf(q.Arguments).Pointer()
+			if prev, seen := owner[p]; seen {
+				t.Errorf("queue %s in %s shares its Arguments map with %s", q.Name, v, prev)
+			}
+			owner[p] = v + "/" + q.Name
+		}
 	}
 }
 
@@ -415,6 +438,7 @@ func TestLatestOnlyRetentionQueues(t *testing.T) {
 	want := []string{testQueueTimeQualityConfig, "time-quality.config-request"}
 	assert.ElementsMatch(t, want, retention(testVersion2180))
 	assert.ElementsMatch(t, want, retention(testVersion2190))
+	assert.ElementsMatch(t, want, retention(testVersion2200), "provider.discovery-work is a plain work queue, expected to empty")
 	assert.Empty(t, retention(testVersion2170), "2.17.0 declares no time-quality queues at all")
 
 	assert.False(t, MessagingQueue{Name: "plain"}.IsLatestOnlyRetention(), "a queue with no arguments retains nothing")
@@ -437,7 +461,7 @@ func TestBundle2190(t *testing.T) {
 
 	// Advertised set now carries 2.19.0, and it is the fresh-install default.
 	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, AllVersions())
+	assert.Contains(t, AllVersions(), testVersion2190)
 	assert.Equal(t, testVersion2190, DefaultVersion)
 
 	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag
@@ -514,4 +538,109 @@ func TestBundle2190(t *testing.T) {
 	assert.Equal(t, b18.RabbitMQVersion, b.RabbitMQVersion)
 	assert.Equal(t, b18.CNPGVersion, b.CNPGVersion)
 	assert.Equal(t, b18.KeycloakVersion, b.KeycloakVersion)
+}
+
+// TestBundle2200 pins the ENTIRE 2.20.0 contract: the 2.19.0 bundle plus the Discovery v2 work
+// queue (helm-charts 72704da) and the core and frontend-administrator 2.20.0 images.
+// Full-matrix for the same reason as TestBundle2190.
+func TestBundle2200(t *testing.T) {
+	b, ok := BundleFor(testVersion2200)
+	require.True(t, ok, "2.20.0 must resolve via explicit spec.version")
+	assert.False(t, b.Released, "2.20.0 stays a preview until its platform images are published")
+	assert.True(t, b.HasProvisioning)
+
+	assert.NotContains(t, SupportedVersions(), testVersion2200, "a preview is never advertised")
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200}, AllVersions())
+	assert.Equal(t, testVersion2190, DefaultVersion, "a preview is never the fresh-install default")
+
+	assert.Equal(t, map[string]Image{
+		"core":                 {Name: "core", Tag: testVersion2200},
+		"auth":                 {Name: "auth", Tag: "1.7.0"},
+		"auth-opa-policies":    {Name: "auth-opa-policies", Tag: "1.4.1"},
+		"proxy":                {Name: "proxy", Tag: "1.0.0"},
+		"opa":                  {Name: "opa", Tag: "1.10.0-static"},
+		"curl":                 {Name: "curl", Tag: "8.16.0"},
+		"scheduler":            {Name: "scheduler", Tag: "1.2.0"},
+		"fe-administrator":     {Name: "frontend-administrator", Tag: testVersion2200},
+		"utils":                {Name: "utils-service", Tag: "1.0.2"},
+		"api-gateway":          {Name: "kong", Tag: "3.9.1"},
+		"provisioning":         {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+		"keycloak-theme":       {Name: "keycloak-theme", Tag: "0.1.4"},
+		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+	}, b.Components)
+
+	// Every variable Core 2.20.0 adds has an in-image default, so the wiring is 2.19.0's.
+	b19, _ := BundleFor(testVersion2190)
+	assert.Equal(t, b19.Wiring, b.Wiring)
+
+	m := b.Messaging
+	assert.Equal(t, "/", m.DefaultVirtualHost, "the vhost is unchanged, so 2.19.0 -> 2.20.0 applies additively")
+	assert.Equal(t, b19.Messaging.Exchanges, m.Exchanges, "no exchange is renamed, so an external broker needs no acknowledgement")
+	assert.Equal(t, []MessagingUser{
+		{Role: MessagingUserAdministrator, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProvisioner, Tags: []string{"administrator"}, Configure: ".*", Write: ".*", Read: ".*"},
+		{Role: MessagingUserProxy, Tags: nil, Configure: "", Write: "^ilm-proxy$", Read: `^proxy\..*$`},
+		{Role: MessagingUserCore, Tags: nil, Configure: "", Write: "^ilm(-proxy)?$", Read: `^core(\..+|-.+)?$|^provider\.(status-poll|discovery-work)$|^time-quality\.(config-request|results)$`},
+		{Role: MessagingUserMonitor, Tags: nil, Configure: "", Write: "^ilm$", Read: `^time-quality\.config$`},
+	}, m.Users)
+	assert.Equal(t, []MessagingQueue{
+		{Name: "core", Durable: true},
+		{Name: "core.audit-logs", Durable: true},
+		{Name: "core.notifications", Durable: true},
+		{Name: "core.scheduler", Durable: true},
+		{Name: "core.actions", Durable: true},
+		{Name: "core.validation", Durable: true},
+		{Name: "core.events", Durable: true},
+		{Name: testQueueProviderStatusPoll, Durable: true},
+		{Name: testQueueProviderDiscoveryWork, Durable: true},
+		{Name: testQueueTimeQualityConfig, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
+		{Name: testQueueTimeQualityConfigRequest, Durable: true, Arguments: map[string]interface{}{"x-max-length": int64(1), "x-overflow": "drop-head"}},
+		{Name: testQueueTimeQualityResults, Durable: true},
+	}, m.Queues)
+	assert.Equal(t, []MessagingBinding{
+		{Source: "ilm", Destination: "core.audit-logs", RoutingKey: "audit-logs"},
+		{Source: "ilm", Destination: "core.notifications", RoutingKey: "notification"},
+		{Source: "ilm", Destination: "core.actions", RoutingKey: "action"},
+		{Source: "ilm", Destination: "core.scheduler", RoutingKey: "scheduler"},
+		{Source: "ilm", Destination: "core.validation", RoutingKey: "validation"},
+		{Source: "ilm", Destination: "core.events", RoutingKey: "event"},
+		{Source: "ilm", Destination: testQueueProviderStatusPoll, RoutingKey: testQueueProviderStatusPoll},
+		{Source: "ilm", Destination: testQueueProviderDiscoveryWork, RoutingKey: testQueueProviderDiscoveryWork},
+		{Source: "ilm", Destination: testQueueTimeQualityConfig, RoutingKey: testQueueTimeQualityConfig},
+		{Source: "ilm", Destination: testQueueTimeQualityConfigRequest, RoutingKey: testQueueTimeQualityConfigRequest},
+		{Source: "ilm", Destination: testQueueTimeQualityResults, RoutingKey: testQueueTimeQualityResults},
+	}, m.Bindings)
+
+	assert.Equal(t, b19.RabbitMQVersion, b.RabbitMQVersion)
+	assert.Equal(t, b19.CNPGVersion, b.CNPGVersion)
+	assert.Equal(t, b19.KeycloakVersion, b.KeycloakVersion)
+
+	assert.Equal(t, int32(180), b.CoreStartupFailureThreshold,
+		"2.20.0 migrations can outlast the default startup budget, so this bundle raises it (about 30 minutes, as the chart)")
+	assert.Zero(t, b19.CoreStartupFailureThreshold, "older bundles keep the default, so an operator upgrade does not roll their Core")
+}
+
+// TestCoreReadGrantCoversItsQueues checks Core's read regex by behaviour, not by spelling: the
+// broker refuses a consumer the grant does not match, and Core crash-loops on that refusal. Each
+// queue Core consumes must match, and the queues other users own must not.
+func TestCoreReadGrantCoversItsQueues(t *testing.T) {
+	b, ok := BundleFor(testVersion2200)
+	require.True(t, ok)
+	var read string
+	for _, u := range b.Messaging.Users {
+		if u.Role == MessagingUserCore {
+			read = u.Read
+		}
+	}
+	grant := regexp.MustCompile(read)
+
+	for _, q := range []string{
+		"core", "core.audit-logs", "core.events", testQueueProviderStatusPoll, testQueueProviderDiscoveryWork,
+		testQueueTimeQualityConfigRequest, testQueueTimeQualityResults,
+	} {
+		assert.True(t, grant.MatchString(q), "core must be able to read %s", q)
+	}
+	for _, q := range []string{testQueueTimeQualityConfig, "proxy.instance", "provider.other", "provider.discovery-work-x"} {
+		assert.False(t, grant.MatchString(q), "core must not be able to read %s", q)
+	}
 }

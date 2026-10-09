@@ -23,7 +23,7 @@ Every command below uses these variables. Set them in the shell you run the rele
 version=1.0.0                      # the operator release version, no leading "v"
 tag="v${version}"
 platform_version=2.19.0            # the ILM platform version this release must support
-charts=/path/to/helm-charts        # a local checkout of OmniTrustILM/helm-charts
+core=/path/to/core                 # a local checkout of OmniTrustILM/core
 ```
 
 ## 1. Pre-release checklist
@@ -64,32 +64,35 @@ The blocks are `managed-postgres`, `managed-rabbitmq`, `managed-keycloak`, `full
 is to dispatch the **E2E Managed** workflow on GitHub Actions, which runs all seven in parallel,
 each on its own Kind cluster.
 
-**Verify the BOM against the tagged charts release.** The per-version contract in
+**Verify the BOM against the component releases.** The bundle for `$platform_version` in
 `pkg/bom/bom.go` — image coordinates, wiring env-var names, Secret keys, managed messaging
-topology — must match what the platform actually ships. Take that from the **rendered** output
-of the **tagged** chart, never from eyeballed `values.yaml` defaults, which do not show what the
-templates compose:
+topology — is the platform's deployment contract, and the Helm chart follows it, not the other
+way round (see [step 2](#2-the-platform-release-trigger)). Check it against the components
+themselves:
 
-```bash
-git -C "$charts" fetch --tags
-git -C "$charts" worktree add "/tmp/ilm-charts-${platform_version}" "$platform_version"
-helm dependency update "/tmp/ilm-charts-${platform_version}/charts/ilm"
-helm template ilm "/tmp/ilm-charts-${platform_version}/charts/ilm" \
-  > "/tmp/ilm-${platform_version}.rendered.yaml"
+- **Every pinned image is published.** For each entry of the bundle's `Components`, the
+  component's own release has pushed the tag:
 
-# The contract matrix: every image the release ships, and the env names Core consumes.
-grep -E '^[[:space:]]+image:' "/tmp/ilm-${platform_version}.rendered.yaml" | sort -u
-grep -E '^[[:space:]]+- name: [A-Z_]+$' "/tmp/ilm-${platform_version}.rendered.yaml" | sort -u
-```
+  ```bash
+  docker manifest inspect "hub.omnitrustregistry.com/<repository>/<name>:<tag>" > /dev/null
+  ```
 
-Compare that against the bundle for `$platform_version` and against the operator's own golden
-renders under `test/golden/testdata`. Clean up the worktree when you are done:
+- **Core's configuration matches the wiring and the topology.** Read it at Core's release tag:
+  every variable Core reads is either in the bundle's wiring or has an in-image default, every
+  queue and routing key Core uses is in the bundle's messaging topology, and Core's read grant
+  covers the queues it consumes.
 
-```bash
-git -C "$charts" worktree remove "/tmp/ilm-charts-${platform_version}"
-```
+  ```bash
+  git -C "$core" fetch --tags
+  git -C "$core" show "${platform_version}:src/main/resources/application.yml" > "/tmp/core-${platform_version}.yml"
+  grep -oE '\$\{[A-Z_][A-Z0-9_]*' "/tmp/core-${platform_version}.yml" | sort -u   # every variable Core reads
+  grep -A24 -E '^[[:space:]]+queue:' "/tmp/core-${platform_version}.yml"           # its queues and routing keys
+  ```
 
-This is the same method the version model was derived from — see
+Compare that against the bundle and against the operator's own golden renders under
+`test/golden/testdata`.
+
+The bundles up to 2.19.0 were derived from the rendered charts instead — see
 [docs/design/platform-versioning.md](design/platform-versioning.md), sections 1 and 6a.
 
 ### The documentation-site pre-flight (a pre-tag gate)
@@ -176,8 +179,11 @@ Only once this is clean do you proceed to the release commit and the tag.
 
 ## 2. The platform-release trigger
 
-The charts release **first**. `OmniTrustILM/helm-charts` tags `$platform_version`, which is what
-publishes the platform's own artifacts; only then can the operator advertise that version.
+The operator **leads** the platform release. A platform version is ready to advertise once every
+image its bundle pins is published — each component's own release publishes its image, and a
+Helm chart tag publishes no images — so the flip does not wait on `OmniTrustILM/helm-charts`. The
+charts follow: their release pins the same images as this bundle, so both deployment paths ship
+the same platform.
 
 The flip itself is an ordinary PR to `main`, not part of the release branch:
 
