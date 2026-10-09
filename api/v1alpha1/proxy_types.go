@@ -237,7 +237,7 @@ type ProxyStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:resource:shortName=prx
 // +operator-sdk:csv:customresourcedefinitions:displayName="Proxy"
-// +operator-sdk:csv:customresourcedefinitions:resources={{Deployments,apps/v1},{Services,v1},{ServiceAccounts,v1},{PodDisruptionBudgets,policy/v1}}
+// +operator-sdk:csv:customresourcedefinitions:resources={{Deployment,apps/v1},{Service,v1},{ServiceAccount,v1},{PodDisruptionBudget,policy/v1}}
 
 // Proxy is the Schema for the proxies API. It deploys one ILM proxy instance — the
 // outbound-only broker bridge for restricted network zones — from a
