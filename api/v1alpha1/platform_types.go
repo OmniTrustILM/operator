@@ -1588,8 +1588,9 @@ type PlatformStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// ObservedVersion is the platform version bundle the operator resolved and
-	// reconciled this Platform against — spec.version when set and known, otherwise the
-	// operator's default version (not necessarily the newest one it carries). It lags
+	// reconciled this Platform against — spec.version when set and known (for "develop",
+	// the concrete version it resolved to), otherwise the operator's default version (not
+	// necessarily the newest one it carries). It lags
 	// spec.version only while a reconcile is in flight; an unknown spec.version leaves it
 	// at the last successfully-reconciled version and surfaces the error on the Degraded
 	// condition.

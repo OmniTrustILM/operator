@@ -41,7 +41,7 @@ spec:
 
 An operator build may also carry a **preview** bundle — a version whose platform artifacts are not published yet. Only one thing about that is visible to you: a preview version resolves **only** when `spec.version` names it explicitly, or through `develop` on a development build of the operator (below). It never appears in the supported-versions list the operator reports, and it is never the default. Everything else about it behaves exactly like a released version — the same resolution rules, the same downgrade refusal, and the same messaging migration if the move renames the managed topology.
 
-A development platform can follow the operator's development line with **`spec.version: develop`**, which resolves to the newest bundle the running operator build carries — usually the next release's preview. Only development builds of the operator, built from `main`, accept it; a released operator reports it as `UnsupportedVersion`. A preview's component images are not published yet, so such a platform also overrides them with development builds, preferably by digest ([component image overrides](#component-image-overrides-still-apply)).
+A development platform can follow the operator's development line with **`spec.version: develop`**, which resolves to the newest bundle the running operator build carries — usually the next release's preview. Every operator build except a release accepts it, the `main` builds and local builds alike; a released operator reports it as `UnsupportedVersion`. A preview's component images are not published yet, so such a platform also overrides them with development builds, preferably by digest ([component image overrides](#component-image-overrides-still-apply)).
 
 ## How a version is resolved
 
