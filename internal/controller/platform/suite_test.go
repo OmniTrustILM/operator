@@ -38,6 +38,7 @@ var (
 	cfg       *rest.Config
 	k8sClient client.Client
 	mgr       ctrl.Manager
+	mgrDone   chan struct{}
 	// fakeCaps is the capability detector the suite injects into the reconciler so
 	// edge-gating specs control which upstream CRDs (cert-manager / Gateway API)
 	// appear "served" — envtest itself loads only the operator's own CRDs, so the
@@ -208,8 +209,10 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	mgrDone = make(chan struct{})
 	go func() {
 		defer GinkgoRecover()
+		defer close(mgrDone)
 		Expect(mgr.Start(ctx)).To(Succeed())
 	}()
 })
@@ -217,5 +220,7 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
 	cancel()
+	// A manager still shutting down holds kube-apiserver past envtest's stop timeout.
+	Eventually(mgrDone, "1m").Should(BeClosed())
 	Expect(testEnv.Stop()).To(Succeed())
 })
