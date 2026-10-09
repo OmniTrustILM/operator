@@ -59,7 +59,7 @@ func TestNetworkPolicyDefaultOn(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			objs := ResolveNetworkPolicies(withNetworkPolicy(tc.spec))
+			objs := ResolveNetworkPolicies(withNetworkPolicy(tc.spec), testOperatorNamespace)
 			require.Equal(t, 3, countNetworkPolicies(objs),
 				"default-on must render the ingress default-deny + edge-allow + egress policies")
 			assert.NotNil(t, npByName(objs, npDefaultDenyIngressName))
@@ -72,7 +72,7 @@ func TestNetworkPolicyDefaultOn(t *testing.T) {
 // TestNetworkPolicyDisabledRendersNone asserts that an explicit enabled=false renders no
 // policies — the opt-out the prune then reclaims.
 func TestNetworkPolicyDisabledRendersNone(t *testing.T) {
-	objs := ResolveNetworkPolicies(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(false)}))
+	objs := ResolveNetworkPolicies(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(false)}), testOperatorNamespace)
 	assert.Nil(t, objs, "disabled networkPolicy must render no policies")
 	assert.Equal(t, 0, countNetworkPolicies(objs))
 }
@@ -81,10 +81,10 @@ func TestNetworkPolicyDisabledRendersNone(t *testing.T) {
 // full base render when disabled (so the post-apply prune reclaims any that exist) and
 // present when enabled — the enable/disable transition the prune relies on.
 func TestNetworkPolicyDisabledPrunedFromRenderBase(t *testing.T) {
-	on := RenderPlatformBase(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(true)}))
+	on := RenderPlatformBase(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(true)}), testOperatorNamespace)
 	assert.Equal(t, 3, countNetworkPolicies(on), "enabled => policies present in the base render")
 
-	off := RenderPlatformBase(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(false)}))
+	off := RenderPlatformBase(withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{Enabled: boolPtr(false)}), testOperatorNamespace)
 	assert.Equal(t, 0, countNetworkPolicies(off),
 		"disabled => no policies in the base render, so the prune reclaims any that exist")
 }
@@ -93,7 +93,7 @@ func TestNetworkPolicyDisabledPrunedFromRenderBase(t *testing.T) {
 // the operator-only network-policy role and the platform instance — the selectors the prune
 // (managed-by + instance) and role-based lookups (component role) key on.
 func TestNetworkPolicyLabels(t *testing.T) {
-	objs := ResolveNetworkPolicies(basePlatform())
+	objs := ResolveNetworkPolicies(basePlatform(), testOperatorNamespace)
 	require.Equal(t, 3, len(objs))
 	for _, o := range objs {
 		np, ok := o.(*networkingv1.NetworkPolicy)
@@ -110,10 +110,11 @@ func TestNetworkPolicyLabels(t *testing.T) {
 
 // TestNetworkPolicyDefaultDenyIngressSelectsPlatformPods asserts the ingress default-deny
 // selects EVERY platform pod (part-of=ilm scoped to the instance), is an Ingress-type
-// policy, and allows ONLY intra-namespace ingress (an empty podSelector under `from`, with
-// no namespaceSelector) so cross-namespace/external ingress is denied.
+// policy, and — rendered without an operator namespace — allows ONLY intra-namespace ingress
+// (an empty podSelector under `from`, with no namespaceSelector) so cross-namespace/external
+// ingress is denied.
 func TestNetworkPolicyDefaultDenyIngressSelectsPlatformPods(t *testing.T) {
-	np := npByName(ResolveNetworkPolicies(basePlatform()), npDefaultDenyIngressName)
+	np := npByName(ResolveNetworkPolicies(basePlatform(), ""), npDefaultDenyIngressName)
 	require.NotNil(t, np)
 
 	// Selects all platform pods, instance-scoped.
@@ -138,11 +139,27 @@ func TestNetworkPolicyDefaultDenyIngressSelectsPlatformPods(t *testing.T) {
 	assert.Empty(t, np.Spec.Ingress[0].Ports)
 }
 
+// TestNetworkPolicyDefaultDenyIngressAdmitsOperator asserts the ingress default-deny admits the
+// operator's pods from the operator namespace next to the platform's own namespace: the operator
+// calls Core when a Connector registers through the in-cluster address.
+func TestNetworkPolicyDefaultDenyIngressAdmitsOperator(t *testing.T) {
+	np := npByName(ResolveNetworkPolicies(basePlatform(), testOperatorNamespace), npDefaultDenyIngressName)
+	require.NotNil(t, np)
+	require.Len(t, np.Spec.Ingress, 1)
+	from := np.Spec.Ingress[0].From
+	require.Len(t, from, 2)
+	assert.Nil(t, from[0].NamespaceSelector, "the first peer is the platform's own namespace")
+	require.NotNil(t, from[1].NamespaceSelector)
+	require.NotNil(t, from[1].PodSelector)
+	assert.Equal(t, map[string]string{"kubernetes.io/metadata.name": testOperatorNamespace}, from[1].NamespaceSelector.MatchLabels)
+	assert.Equal(t, map[string]string{"app.kubernetes.io/name": "ilm-operator"}, from[1].PodSelector.MatchLabels)
+}
+
 // TestNetworkPolicyAllowEdgeSelectsGateway asserts the edge-allow policy selects the
 // api-gateway pods and allows ingress on the gateway consumer port from the ingress
 // controller namespace (defaulting to ingress-nginx).
 func TestNetworkPolicyAllowEdgeSelectsGateway(t *testing.T) {
-	np := npByName(ResolveNetworkPolicies(basePlatform()), npAllowEdgeName)
+	np := npByName(ResolveNetworkPolicies(basePlatform(), testOperatorNamespace), npAllowEdgeName)
 	require.NotNil(t, np)
 
 	// Selects the api-gateway workload only, instance-scoped.
@@ -170,7 +187,7 @@ func TestNetworkPolicyAllowEdgeSelectsGateway(t *testing.T) {
 // honors spec.networkPolicy.ingressNamespace for a non-default ingress controller / Gateway.
 func TestNetworkPolicyAllowEdgeRespectsIngressNamespaceOverride(t *testing.T) {
 	p := withNetworkPolicy(&otilmv1alpha1.NetworkPolicySpec{IngressNamespace: "istio-system"})
-	np := npByName(ResolveNetworkPolicies(p), npAllowEdgeName)
+	np := npByName(ResolveNetworkPolicies(p, testOperatorNamespace), npAllowEdgeName)
 	require.NotNil(t, np)
 	require.Len(t, np.Spec.Ingress, 1)
 	require.Len(t, np.Spec.Ingress[0].From, 1)
@@ -183,7 +200,7 @@ func TestNetworkPolicyAllowEdgeRespectsIngressNamespaceOverride(t *testing.T) {
 // is an Egress-type policy, and allows ALL egress (a single empty egress rule) so
 // managed-infra / external connectivity is never broken.
 func TestNetworkPolicyEgressPermissive(t *testing.T) {
-	np := npByName(ResolveNetworkPolicies(basePlatform()), npAllowEgressName)
+	np := npByName(ResolveNetworkPolicies(basePlatform(), testOperatorNamespace), npAllowEgressName)
 	require.NotNil(t, np)
 
 	assert.Equal(t, common.PartOfValue, np.Spec.PodSelector.MatchLabels[common.PartOfLabel])
@@ -199,7 +216,7 @@ func TestNetworkPolicyEgressPermissive(t *testing.T) {
 // TestNetworkPolicyAPIVersion guards the rendered GVK (networking.k8s.io/v1) is what the
 // controller's Owns/prune/RBAC target.
 func TestNetworkPolicyAPIVersion(t *testing.T) {
-	for _, o := range ResolveNetworkPolicies(basePlatform()) {
+	for _, o := range ResolveNetworkPolicies(basePlatform(), testOperatorNamespace) {
 		np, ok := o.(*networkingv1.NetworkPolicy)
 		require.True(t, ok)
 		// The typed object's scheme GVK is networking.k8s.io/v1 NetworkPolicy; the

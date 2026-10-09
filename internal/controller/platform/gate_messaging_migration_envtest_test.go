@@ -91,7 +91,7 @@ func workloadImages(ns, name string) string {
 // workloadImages answers about what has already landed, asked one step earlier.
 func renderedImages(p *otilmv1alpha1.Platform) string {
 	var images []string
-	for _, obj := range platformbuilder.RenderPlatformBase(p) {
+	for _, obj := range platformbuilder.RenderPlatformBase(p, testOperatorNamespace) {
 		var pod *corev1.PodSpec
 		switch w := obj.(type) {
 		case *appsv1.Deployment:

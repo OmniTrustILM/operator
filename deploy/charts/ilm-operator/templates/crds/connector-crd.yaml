@@ -304,6 +304,20 @@ spec:
                 required:
                 - enabled
                 type: object
+              networkPolicy:
+                description: |-
+                  NetworkPolicy controls the NetworkPolicy the operator renders for this connector. It admits
+                  ingress to the connector's Service port only from pods in the connector's namespace and from
+                  the operator, which checks the connector's health. Egress is not restricted. Unset, the
+                  policy is rendered.
+                properties:
+                  enabled:
+                    default: true
+                    description: |-
+                      Enabled renders the NetworkPolicy. Unset counts as true. False removes the policy, for
+                      example on a CNI that does not enforce NetworkPolicy or when you manage isolation yourself.
+                    type: boolean
+                type: object
               nodeSelector:
                 additionalProperties:
                   type: string

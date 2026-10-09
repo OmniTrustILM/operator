@@ -50,15 +50,16 @@ func ServiceMonitorDependencies(p *otilmv1alpha1.Platform) []CRDDependency {
 // bootstrap (ResolveAdminCertObjects). The controller applies each gated set separately
 // so it can gate them on their upstream-CRD prerequisites (CloudNativePG / cert-manager /
 // Gateway API) without affecting the rest of the platform; this function returns the
-// combined set.
-func RenderPlatform(p *otilmv1alpha1.Platform) []client.Object {
+// combined set. operatorNamespace is the namespace the operator runs in; the ingress
+// default-deny admits the operator's pods from it ("" admits none).
+func RenderPlatform(p *otilmv1alpha1.Platform, operatorNamespace string) []client.Object {
 	// Default the effective shared image registry/repository (hub.omnitrustregistry.com
 	// /ilm) before rendering, so an out-of-the-box CR resolves the ILM component images
 	// to the public registry. The controller's Reconcile applies the same default on its
 	// fetched copy; doing it here too keeps RenderPlatform (used by tests and other render
 	// callers) self-contained. Idempotent — only fills empty fields.
 	DefaultImageRegistry(p)
-	objs := RenderPlatformBase(p)
+	objs := RenderPlatformBase(p, operatorNamespace)
 
 	// Managed database (optional): the CloudNativePG Cluster (+ optional Pooler, and the
 	// Database keeping a managed Keycloak's schema) when database.mode=managed, gated on the
@@ -161,7 +162,9 @@ func buildWorkload(c common.Component) client.Object {
 // controller applies this set unconditionally; the edge (ResolveEdge) is applied
 // separately and only when its upstream-CRD prerequisites are present, so a missing
 // cert-manager / Gateway API never blocks the rest of the platform from converging.
-func RenderPlatformBase(p *otilmv1alpha1.Platform) []client.Object {
+// operatorNamespace is the namespace the operator runs in; the ingress default-deny admits
+// the operator's pods from it ("" admits none).
+func RenderPlatformBase(p *otilmv1alpha1.Platform, operatorNamespace string) []client.Object {
 	var objs []client.Object
 
 	// Shared config: the messaging ConfigMap publishes the broker's non-secret
@@ -273,11 +276,11 @@ func RenderPlatformBase(p *otilmv1alpha1.Platform) []client.Object {
 
 	// Network isolation: the default-deny NetworkPolicies (default ON, opt-out via
 	// spec.networkPolicy.enabled=false). They deny cross-namespace/external ingress to the
-	// platform's pods while leaving intra-platform traffic and the edge -> api-gateway path
-	// open (egress stays permissive). networking.k8s.io/v1 is a core, always-served API —
-	// no capability gating. Operator-owned children pruned like the rest (networkpolicies
-	// are in the prune list + RBAC markers).
-	objs = append(objs, ResolveNetworkPolicies(p)...)
+	// platform's pods while leaving intra-platform traffic, the operator, and the edge ->
+	// api-gateway path open (egress stays permissive). networking.k8s.io/v1 is a core,
+	// always-served API — no capability gating. Operator-owned children pruned like the rest
+	// (networkpolicies are in the prune list + RBAC markers).
+	objs = append(objs, ResolveNetworkPolicies(p, operatorNamespace)...)
 
 	// NOTE: As the operator implements more of the platform (the shared config/RBAC
 	// objects), append their builders here.

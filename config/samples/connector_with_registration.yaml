@@ -2,7 +2,8 @@ apiVersion: otilm.com/v1alpha1
 kind: Connector
 metadata:
   name: x509-compliance-provider-registered
-  namespace: default
+  # The platform's namespace: the connector's NetworkPolicy admits Core only from its own namespace.
+  namespace: ilm
 spec:
   image:
     repository: hub.omnitrustregistry.com/ilm/x509-compliance-provider

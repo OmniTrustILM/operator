@@ -68,6 +68,10 @@ spec:
     periodSeconds: 30
     timeoutSeconds: 10
 
+  # Admits the connector's port only from this namespace and the operator (on by default).
+  networkPolicy:
+    enabled: true
+
   env:
     - name: SERVER_PORT
       value: "8443"

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 
@@ -99,6 +100,24 @@ var _ = Describe("Connector samples", func() {
 		_, found, err = unstructured.NestedSlice(tsf.Object, "spec", "secretRefs")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(found).To(BeFalse(), "this connector needs no Secret of its own")
+	})
+
+	It("a sample that registers through an in-cluster Core runs in Core's namespace", func() {
+		// The connector's NetworkPolicy admits only its own namespace and the operator, so Core
+		// reaches a connector it registered only when both share a namespace.
+		inClusterCore := regexp.MustCompile(`^https?://core\.([a-z0-9-]+)\.svc[.:/]`)
+		for _, path := range connectorSampleFiles() {
+			obj, err := decodeConnectorSample(path)
+			Expect(err).NotTo(HaveOccurred())
+			url, found, err := unstructured.NestedString(obj.Object, "spec", "registration", "platformUrl")
+			Expect(err).NotTo(HaveOccurred())
+			match := inClusterCore.FindStringSubmatch(url)
+			if !found || match == nil {
+				continue
+			}
+			Expect(obj.GetNamespace()).To(Equal(match[1]),
+				"%s registers with Core in %q, which cannot reach a connector in another namespace", path, match[1])
+		}
 	})
 })
 

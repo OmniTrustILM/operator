@@ -73,7 +73,7 @@ func countHPAs(objs []client.Object) int {
 // --- baseline: nothing rendered when no availability primitives are configured ---
 
 func TestRenderPlatformNoAvailabilityObjectsByDefault(t *testing.T) {
-	objs := RenderPlatform(basePlatform())
+	objs := RenderPlatform(basePlatform(), testOperatorNamespace)
 	assert.Zero(t, countPDBs(objs), "no PDB rendered when HA off and no component PDB set")
 	assert.Zero(t, countHPAs(objs), "no HPA rendered when no component autoscaling set")
 	// And every Deployment carries an explicit replica count (none HPA-owned).
@@ -91,7 +91,7 @@ func TestRenderPlatformComponentPDB(t *testing.T) {
 	minA := intstr.FromInt32(2)
 	p.Spec.Core.PodDisruptionBudget = &otilmv1alpha1.PDBSpec{Enabled: true, MinAvailable: &minA}
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	pdb := pdbByName(objs, "core")
 	require.NotNil(t, pdb, "a component with podDisruptionBudget must render a PDB")
 	require.NotNil(t, pdb.Spec.MinAvailable)
@@ -105,7 +105,7 @@ func TestRenderPlatformComponentPDB(t *testing.T) {
 func TestRenderPlatformComponentPDBDisabledRendersNothing(t *testing.T) {
 	p := basePlatform()
 	p.Spec.Core.PodDisruptionBudget = &otilmv1alpha1.PDBSpec{Enabled: false}
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	assert.Nil(t, pdbByName(objs, "core"), "a disabled PDB renders nothing")
 	assert.Zero(t, countPDBs(objs))
 }
@@ -121,7 +121,7 @@ func TestRenderPlatformComponentHPAOmitsDeploymentReplicas(t *testing.T) {
 		MinReplicas: &minR, MaxReplicas: 5, TargetCPUUtilization: &cpu, TargetMemoryUtilization: &mem,
 	}
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 
 	// The HPA renders with the correct bounds, targets, and scaleTargetRef.
 	hpa := hpaByName(objs, "core")
@@ -154,7 +154,7 @@ func TestRenderPlatformHADefaultsOnStatelessComponents(t *testing.T) {
 	p.Spec.HighAvailability = &otilmv1alpha1.HighAvailabilitySpec{Enabled: true}
 	p.Spec.Utils.Enabled = true // include utils so its HA defaults are asserted too
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 
 	// Every stateless component gets: HA replicas (2), a PDB (minAvailable 1), and pod
 	// anti-affinity by app.kubernetes.io/name across kubernetes.io/hostname.
@@ -191,7 +191,7 @@ func TestRenderPlatformHADefaultsOnStatelessComponents(t *testing.T) {
 func TestRenderPlatformHAOffRendersNoAvailabilityObjects(t *testing.T) {
 	p := basePlatform()
 	p.Spec.HighAvailability = &otilmv1alpha1.HighAvailabilitySpec{Enabled: false}
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	assert.Zero(t, countPDBs(objs), "HA disabled renders no PDB")
 	assert.Zero(t, countHPAs(objs))
 	core := deploymentByName(objs, "core")
@@ -208,7 +208,7 @@ func TestRenderPlatformHAReplicasOverriddenByComponent(t *testing.T) {
 	five := int32(5)
 	p.Spec.Core.Replicas = &five // explicit replicas wins over the HA default (2)
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	core := deploymentByName(objs, "core")
 	require.NotNil(t, core)
 	require.NotNil(t, core.Spec.Replicas)
@@ -237,7 +237,7 @@ func TestRenderPlatformHAAffinityOverriddenByComponent(t *testing.T) {
 	}
 	p.Spec.Core.Affinity = userAffinity
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	core := deploymentByName(objs, "core")
 	require.NotNil(t, core)
 	require.NotNil(t, core.Spec.Template.Spec.Affinity)
@@ -253,7 +253,7 @@ func TestRenderPlatformHAPDBOverriddenByComponent(t *testing.T) {
 	minA := intstr.FromString("60%")
 	p.Spec.Core.PodDisruptionBudget = &otilmv1alpha1.PDBSpec{Enabled: true, MinAvailable: &minA}
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	pdb := pdbByName(objs, "core")
 	require.NotNil(t, pdb)
 	require.NotNil(t, pdb.Spec.MinAvailable)
@@ -267,7 +267,7 @@ func TestRenderPlatformHAComponentDisablesPDB(t *testing.T) {
 	// An explicit disabled PDB on a component opts that component OUT of the HA default PDB.
 	p.Spec.Core.PodDisruptionBudget = &otilmv1alpha1.PDBSpec{Enabled: false}
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	assert.Nil(t, pdbByName(objs, "core"), "an explicit disabled PDB suppresses the HA default")
 	// Other stateless components still get the HA default PDB.
 	assert.NotNil(t, pdbByName(objs, "auth"))
@@ -282,7 +282,7 @@ func TestRenderPlatformHAAutoscaledComponentOmitsReplicasAndHADefaultPDB(t *test
 	cpu := int32(75)
 	p.Spec.Core.Autoscaling = &otilmv1alpha1.AutoscalingSpec{MaxReplicas: 4, TargetCPUUtilization: &cpu}
 
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 	core := deploymentByName(objs, "core")
 	require.NotNil(t, core)
 	assert.Nil(t, core.Spec.Replicas, "autoscaling omits replicas even under the HA profile")
@@ -300,7 +300,7 @@ func TestRenderPlatformHADoesNotRenderManagedInfraPDBOrHPA(t *testing.T) {
 	// confirm the names are exactly the stateless components.
 	p := basePlatform()
 	p.Spec.HighAvailability = &otilmv1alpha1.HighAvailabilitySpec{Enabled: true}
-	objs := RenderPlatform(p)
+	objs := RenderPlatform(p, testOperatorNamespace)
 
 	pdbNames := map[string]bool{}
 	for _, o := range objs {

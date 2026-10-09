@@ -37,6 +37,9 @@ var (
 	mgr       ctrl.Manager
 )
 
+// testOperatorNamespace is the namespace the suite's reconciler admits the operator from.
+const testOperatorNamespace = "ilm-operator-system"
+
 func TestProxyController(t *testing.T) {
 	RegisterFailHandler(Fail)
 
@@ -68,9 +71,10 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	err = (&Reconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("proxy-controller"), //nolint:staticcheck
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		Recorder:          mgr.GetEventRecorderFor("proxy-controller"), //nolint:staticcheck
+		OperatorNamespace: testOperatorNamespace,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

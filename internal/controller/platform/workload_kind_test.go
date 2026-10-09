@@ -98,7 +98,7 @@ func markedSwitching(p *otilmv1alpha1.Platform, name, live, rendered string) {
 // makes the deletionTimestamp the only difference between the two cases.
 func renderedPlatformWorkloads(p *otilmv1alpha1.Platform) []client.Object {
 	var objs []client.Object
-	for _, obj := range platformbuilder.RenderPlatformBase(p) {
+	for _, obj := range platformbuilder.RenderPlatformBase(p, testOperatorNamespace) {
 		if workloadKindOf(obj) == "" {
 			continue
 		}

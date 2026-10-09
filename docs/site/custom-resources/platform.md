@@ -800,7 +800,7 @@ To project *every* key of a Secret or ConfigMap as env across the whole fleet in
 
 `networkPolicy.enabled` defaults to **true** — this is opt-out isolation. Omit the `spec.networkPolicy` block entirely and the operator still renders a safe default-deny set (`networking.k8s.io/v1`):
 
-- an **ingress default-deny** that allows only same-namespace traffic to the platform's pods, denying cross-namespace and external ingress;
+- an **ingress default-deny** that admits traffic to the platform's pods only from the same namespace and from the operator's pods, denying all other cross-namespace and external ingress;
 - an **edge allow** permitting ingress to the api-gateway on its consumer port from the ingress controller's namespace;
 - **permissive egress**, so managed-infrastructure and external connectivity is never broken.
 
@@ -812,6 +812,8 @@ spec:
 ```
 
 Set `ingressNamespace` to your ingress controller's namespace — for example a Gateway API implementation's namespace. The policies carry no connection coordinates, only label selectors and that namespace name. Tighter, allow-listed egress is a deliberate future hardening step, not on by default: the ingress default-deny is the high-value, low-risk isolation, while a too-strict egress is the easiest way to break connectivity to managed or external infrastructure.
+
+The operator is admitted because it calls Core itself when a `Connector` registers through the in-cluster address `http://core.<namespace>.svc.cluster.local:8080/api`. It is matched by its namespace, which it reads from its own pod at startup, and by the `app.kubernetes.io/name: ilm-operator` label; a Helm `nameOverride` changes that label. A `Connector` and a `Proxy` render their own policies on the same model; see [Network isolation](./connector.md#network-isolation).
 
 ## Provisioning the bundled service
 

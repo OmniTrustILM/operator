@@ -392,6 +392,39 @@ spec:
 			}, 3*time.Minute, 5*time.Second).Should(Succeed())
 		})
 
+		It("should admit the connector's port only from its own namespace", func() {
+			url := fmt.Sprintf("http://%s.%s.svc.cluster.local:8080/v1/health", connName, testNamespace)
+
+			By("reaching the connector from a pod in its own namespace")
+			Expect(curlPodPhase(testNamespace, "netpol-probe-inside", url)).To(Equal("Succeeded"))
+
+			By("being refused from a pod in another namespace")
+			Expect(curlPodPhase("default", "netpol-probe-outside", url)).To(Equal("Failed"))
+
+			By("reaching it from that namespace once networkPolicy.enabled is false")
+			cmd := exec.Command("kubectl", "patch", "connector", connName,
+				"-n", testNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"networkPolicy":{"enabled":false}}}`,
+			)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to turn the Connector's NetworkPolicy off")
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(exec.Command("kubectl", "get", "networkpolicy", connName, "-n", testNamespace))
+				g.Expect(err).To(HaveOccurred(), "the operator should delete the NetworkPolicy it rendered")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+			Expect(curlPodPhase("default", "netpol-probe-optout", url)).To(Equal("Succeeded"))
+
+			By("restoring the default")
+			cmd = exec.Command("kubectl", "patch", "connector", connName,
+				"-n", testNamespace,
+				"--type=merge",
+				"-p", `{"spec":{"networkPolicy":null}}`,
+			)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to restore the Connector's NetworkPolicy")
+		})
+
 		It("should report no health report on a path the connector does not serve", func() {
 			By("pointing the check at /v2/health alone")
 			cmd := exec.Command("kubectl", "patch", "connector", connName,
@@ -763,6 +796,51 @@ func getPodNamesForConnector(connName, ns string) []string {
 		return nil
 	}
 	return utils.GetNonEmptyLines(output)
+}
+
+// curlPodPhase runs a one-shot curl pod named pod in ns against url and returns its final phase:
+// Succeeded when url answered with a success status within five seconds, Failed when the request
+// was dropped, refused, or answered with an error. The pod is deleted when the spec ends.
+func curlPodPhase(ns, pod, url string) string {
+	DeferCleanup(func() {
+		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", pod, "-n", ns, "--ignore-not-found", "--wait=false"))
+	})
+	cmd := exec.Command("kubectl", "run", pod, "--restart=Never",
+		"--namespace", ns,
+		"--image=curlimages/curl:latest",
+		"--overrides",
+		fmt.Sprintf(`{
+			"spec": {
+				"containers": [{
+					"name": "curl",
+					"image": "curlimages/curl:latest",
+					"command": ["curl"],
+					"args": ["-sSf", "-m", "5", %q],
+					"securityContext": {
+						"allowPrivilegeEscalation": false,
+						"capabilities": {
+							"drop": ["ALL"]
+						},
+						"runAsNonRoot": true,
+						"runAsUser": 1000,
+						"seccompProfile": {
+							"type": "RuntimeDefault"
+						}
+					}
+				}]
+			}
+		}`, url))
+	_, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to create the %s pod", pod)
+
+	var phase string
+	EventuallyWithOffset(1, func(g Gomega) {
+		output, err := utils.Run(exec.Command("kubectl", "get", "pod", pod, "-n", ns, "-o", "jsonpath={.status.phase}"))
+		g.Expect(err).NotTo(HaveOccurred())
+		phase = strings.TrimSpace(output)
+		g.Expect(phase).To(BeElementOf("Succeeded", "Failed"), "the %s pod has not finished", pod)
+	}, 3*time.Minute, 2*time.Second).Should(Succeed())
+	return phase
 }
 
 // writeTempYAML writes content to a temporary YAML file and returns its path.

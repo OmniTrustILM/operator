@@ -183,7 +183,7 @@ func TestBuildCoreScriptsConfigMapNoEdgeFallsBack(t *testing.T) {
 func TestRenderPlatformBaseIncludesScriptsConfigMapForManagedKeycloak(t *testing.T) {
 	managed := managedKCPlatform(nil)
 	var found bool
-	for _, o := range RenderPlatformBase(managed) {
+	for _, o := range RenderPlatformBase(managed, testOperatorNamespace) {
 		if o.GetName() == OIDCScriptsConfigMapName(managed) {
 			found = true
 		}
@@ -193,7 +193,7 @@ func TestRenderPlatformBaseIncludesScriptsConfigMapForManagedKeycloak(t *testing
 	external := managedKCPlatform(func(p *otilmv1alpha1.Platform) {
 		p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external", Realm: "ilm"}
 	})
-	for _, o := range RenderPlatformBase(external) {
+	for _, o := range RenderPlatformBase(external, testOperatorNamespace) {
 		assert.NotEqual(t, OIDCScriptsConfigMapName(external), o.GetName(),
 			"external Keycloak must not render the core-scripts ConfigMap")
 	}

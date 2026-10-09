@@ -18,6 +18,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -70,12 +71,17 @@ type Reconciler struct {
 
 	// HealthClient replaces connectorhealth.NewHTTPClient for the health checks when set.
 	HealthClient *http.Client
+
+	// OperatorNamespace is the namespace the operator runs in. Each connector's NetworkPolicy
+	// admits the operator's pods from it, so the health check reaches the connector. Empty admits
+	// no operator.
+	OperatorNamespace string
 }
 
 // The Connector reconciler creates Deployments/Services/ServiceAccounts via
 // CreateOrUpdate with owner references (removed by owner-ref GC, never an explicit
 // Delete), so those need no delete verb. It DOES issue an explicit Delete to prune a
-// now-disabled PodDisruptionBudget / ServiceMonitor, so those two keep delete.
+// now-disabled PodDisruptionBudget / ServiceMonitor / NetworkPolicy, so those keep delete.
 // +kubebuilder:rbac:groups=otilm.com,resources=connectors,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=otilm.com,resources=connectors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=otilm.com,resources=connectors/finalizers,verbs=update
@@ -84,6 +90,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -282,8 +289,8 @@ func (r *Reconciler) computeChecksums(ctx context.Context, req ctrl.Request, con
 	return checksum.CombineChecksums(checksums), nil, nil
 }
 
-// reconcileChildResources reconciles the five child resources (SA, Deployment,
-// Service, PDB, ServiceMonitor) for the given Connector.
+// reconcileChildResources reconciles the child resources (SA, Deployment, Service,
+// NetworkPolicy, PDB, ServiceMonitor) for the given Connector.
 func (r *Reconciler) reconcileChildResources(ctx context.Context, req ctrl.Request, conn *otilmv1alpha1.Connector, combinedChecksum string) error {
 	if err := r.reconcileServiceAccount(ctx, conn); err != nil {
 		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
@@ -294,6 +301,10 @@ func (r *Reconciler) reconcileChildResources(ctx context.Context, req ctrl.Reque
 		return err
 	}
 	if err := r.reconcileService(ctx, conn); err != nil {
+		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
+		return err
+	}
+	if err := r.reconcileNetworkPolicy(ctx, conn); err != nil {
 		monitoring.ReconciliationsTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
 		return err
 	}
@@ -374,6 +385,47 @@ func (r *Reconciler) reconcileService(ctx context.Context, conn *otilmv1alpha1.C
 		return ctrl.SetControllerReference(conn, svc, r.Scheme)
 	}); err != nil {
 		logger.Error(err, "failed to reconcile Service")
+		return err
+	}
+	return nil
+}
+
+// errNetworkPolicyNotOwned stops CreateOrUpdate before it adopts a same-named NetworkPolicy the
+// Connector does not control.
+var errNetworkPolicyNotOwned = errors.New("the NetworkPolicy is not controlled by the Connector")
+
+// reconcileNetworkPolicy creates or updates the Connector's NetworkPolicy, or deletes it when
+// spec.networkPolicy.enabled is false. It only touches the policy the Connector controls: a
+// same-named policy it does not control belongs to the user, stays as it is, and is reported with
+// a Warning event while the setting is on.
+func (r *Reconciler) reconcileNetworkPolicy(ctx context.Context, conn *otilmv1alpha1.Connector) error {
+	logger := log.FromContext(ctx)
+	desired := connbuilder.BuildNetworkPolicy(conn, r.OperatorNamespace)
+	if desired == nil {
+		np := &networkingv1.NetworkPolicy{}
+		key := types.NamespacedName{Name: connbuilder.ChildResourceName(conn), Namespace: conn.Namespace}
+		if err := r.Get(ctx, key, np); err != nil || !metav1.IsControlledBy(np, conn) {
+			return client.IgnoreNotFound(err)
+		}
+		return client.IgnoreNotFound(r.Delete(ctx, np))
+	}
+
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		if np.ResourceVersion != "" && !metav1.IsControlledBy(np, conn) {
+			return errNetworkPolicyNotOwned
+		}
+		np.Labels = desired.Labels
+		np.Spec = desired.Spec
+		return ctrl.SetControllerReference(conn, np, r.Scheme)
+	})
+	switch {
+	case errors.Is(err, errNetworkPolicyNotOwned):
+		r.Recorder.Eventf(conn, corev1.EventTypeWarning, monitoring.ReasonNetworkPolicyNotOwned,
+			"NetworkPolicy %q is not owned by this Connector; leaving it untouched", np.Name)
+		return nil
+	case err != nil:
+		logger.Error(err, "failed to reconcile NetworkPolicy")
 		return err
 	}
 	return nil
@@ -800,6 +852,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.findConnectorsForSecret)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.findConnectorsForConfigMap)).
 		Complete(r)
