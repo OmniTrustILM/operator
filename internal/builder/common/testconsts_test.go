@@ -13,4 +13,7 @@ const (
 	// hpa_test.go — the scaleTargetRef API version every HPA the builder produces carries,
 	// whichever workload kind it targets.
 	testAppsV1APIVersion = "apps/v1"
+
+	// volumes_test.go — names both the claim-backed volume and the claim it mounts.
+	testHSMState = "hsm-state"
 )

@@ -36,7 +36,7 @@ var _ = Describe("Connector healthCheck validation", func() {
 
 	DescribeTable("rejects",
 		func(spec otilmv1alpha1.HealthCheckSpec, wantInError string) {
-			conn := newConnector("cel-healthcheck", ns)
+			conn := newConnector(testCELHealthCheckName, ns)
 			conn.Spec.HealthCheck = &spec
 
 			err := k8sClient.Create(ctx, conn)
@@ -57,7 +57,7 @@ var _ = Describe("Connector healthCheck validation", func() {
 
 	DescribeTable("accepts",
 		func(spec otilmv1alpha1.HealthCheckSpec) {
-			conn := newConnector("cel-healthcheck", ns)
+			conn := newConnector(testCELHealthCheckName, ns)
 			conn.Spec.HealthCheck = &spec
 
 			Expect(k8sClient.Create(ctx, conn)).To(Succeed())
@@ -69,7 +69,7 @@ var _ = Describe("Connector healthCheck validation", func() {
 	)
 
 	It("defaults an empty block to what an absent block resolves to", func() {
-		conn := newConnector("cel-healthcheck", ns)
+		conn := newConnector(testCELHealthCheckName, ns)
 		conn.Spec.HealthCheck = &otilmv1alpha1.HealthCheckSpec{}
 		Expect(k8sClient.Create(ctx, conn)).To(Succeed())
 
