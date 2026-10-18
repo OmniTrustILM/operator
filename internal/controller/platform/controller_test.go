@@ -1258,7 +1258,7 @@ var _ = Describe("Platform Controller", func() {
 		})
 
 		It("allows a fresh platform to pin the newest bundle explicitly", func() {
-			// A fresh install may always name a version explicitly. 2.20.0 is now the DEFAULT, so this
+			// A fresh install may always name a version explicitly. 2.20.0 is the DEFAULT, so this
 			// spec proves the explicit-pin path still resolves and reports the same version the
 			// version-less path lands on — the GitOps form, and the one status.observedVersion echoes.
 			const ns = "ilm-version-2200-fresh"
@@ -1298,8 +1298,8 @@ var _ = Describe("Platform Controller", func() {
 
 		It("clears the stale Degraded condition once a refused spec.version is corrected", func() {
 			// PINNED to 2.18.0: this spec needs a version move that actually RENAMES the external
-			// messaging topology, and 2.18.0 → 2.19.0 is the only one this build carries. Started on
-			// the default it would be a no-op the moment 2.19.0 becomes the default.
+			// messaging topology, as 2.18.0 → 2.19.0 does. Started on the default, which shares 2.19.0's
+			// topology names, it would be a no-op.
 			const ns = "ilm-version-degraded-cleared"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion218))).To(Succeed())
 			markRequiredDeploymentsReady(ns)

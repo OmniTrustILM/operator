@@ -11,10 +11,9 @@ package platform
 // plus the full messaging topology — Vhost, the platform Users, their Permissions, the
 // Exchanges, the Queues, and the Bindings defined by the selected version bundle's
 // messaging topology (Messaging Topology Operator) — emitted as preset-GVK
-// *unstructured.Unstructured. The topology is BOM-versioned: the default 2.20.0 bundle
-// renders 5 Users, 5 Permissions, 2 Exchanges, 12 Queues, and 11 Bindings (the 2.19.0
-// bundle has 11 Queues and 10 Bindings, the 2.18.0 bundle 10 and 9; the legacy 2.17.0 bundle
-// has a single User).
+// *unstructured.Unstructured. The topology is BOM-versioned: each bundle's messaging topology
+// defines the Users, Permissions, Exchanges, Queues and Bindings rendered (the legacy 2.17.0
+// bundle has a single User).
 //
 // It is the SECOND managed-infrastructure component and reuses, verbatim, the seams the
 // managed PostgreSQL work (managed_database.go) factored out: managedLabels,
@@ -34,9 +33,7 @@ package platform
 // (v1.19.2) by the managed-messaging e2e: the Cluster Operator accepts the rendered
 // RabbitmqCluster, round-trips its spec fields, and reconciles it to Ready; the Topology
 // Operator accepts the full topology (Vhost + the bundle's Users + Permissions + Exchanges +
-// Queues + Bindings — for the default 2.20.0 bundle 5 Users, 5 Permissions, 2 Exchanges,
-// 12 Queues and 11 Bindings; the 2.19.0 bundle has 11 Queues and 10 Bindings, the 2.18.0
-// bundle 10 and 9, and the legacy 2.17.0 bundle has a single User) and reconciles EVERY CR to its Ready condition; and it
+// Queues + Bindings) and reconciles EVERY CR to its Ready condition; and it
 // generates the per-user "<user>-user-credentials" Secrets the readback consumes.
 // spec.resources and the overrides protected-path set (spec.rabbitmq.additionalConfig) are
 // not exercised end-to-end; their field paths are taken from the CRDs. NO credential is ever
@@ -226,9 +223,7 @@ func vhostIsUserPinned(p *otilmv1alpha1.Platform) bool {
 // managed broker, or nil when messaging is external (or managed but mis-specified). It
 // renders, in a stable order, the RabbitmqCluster, the Vhost, the Users, their
 // Permissions, the Exchanges, the Queues, and the Bindings from the selected bundle's
-// messaging topology (the default 2.20.0 bundle: 5 Users, 5 Permissions, 2 Exchanges,
-// 12 Queues and 11 Bindings; the 2.19.0 bundle has 11 Queues and 10 Bindings, the 2.18.0
-// bundle 10 and 9, and the legacy 2.17.0 bundle has a single User) — all as preset-GVK unstructured objects with NO owner
+// messaging topology — all as preset-GVK unstructured objects with NO owner
 // reference (the reconciler decides ownership per the deletion-safety contract: managed CRs
 // carry no controller ownerRef and are prune-excluded, so a transient de-render never
 // deletes the broker).

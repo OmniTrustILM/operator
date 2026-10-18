@@ -17,7 +17,7 @@ import (
 )
 
 // Test-local version literals. These are DELIBERATELY independent of the production
-// version2170/version2180/version2190/version2200/version2210 consts in bom.go: this suite is a
+// versionNNNN consts in bom.go: this suite is a
 // full-matrix characterization of the bundle DATA, and reusing the production consts here
 // would let a bundle's key silently drift with its own const instead of being pinned by an
 // independent literal.

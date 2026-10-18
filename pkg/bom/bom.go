@@ -259,12 +259,12 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 	},
-	// 2.19.0 — image coordinates verified against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
-	// operator now renders: the LOGGING_LEVEL_COM_OTILM rename, the time-quality integration
-	// env (spec.messaging.timeQuality), the platform instance id (spec.core.instanceId), the
-	// time-quality-monitor sidecar image (private repository, spec.core.timeQualityMonitor),
-	// the "/" virtual host with the ilm / ilm-proxy exchanges, and the provider.status-poll
-	// queue.
+	// 2.19.0 — image coordinates verified against the released helm-charts 2.19.0 tag. It
+	// carries the full 2.19.0 contract the operator now renders: the LOGGING_LEVEL_COM_OTILM
+	// rename, the time-quality integration env (spec.messaging.timeQuality), the platform
+	// instance id (spec.core.instanceId), the time-quality-monitor sidecar image (private
+	// repository, spec.core.timeQualityMonitor), the "/" virtual host with the ilm / ilm-proxy
+	// exchanges, and the provider.status-poll queue.
 	version2190: {
 		Components:      images2190,
 		Wiring:          wiring2190,

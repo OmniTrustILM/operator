@@ -1098,7 +1098,7 @@ func heredocParts(t *testing.T, script string) (body, outside string) {
 // exchange the provision-instance-queue script binds the pod's queue to.
 //
 // RESOLUTION: it is the SAME proxy exchange the provisioning builder declares — the selected
-// bundle's default (2.19.0, the default: ilm-proxy; 2.18.0: czertainly-proxy) or the
+// bundle's default (2.19.0+: ilm-proxy; 2.18.0: czertainly-proxy) or the
 // spec.provisioning.deploy.exchange override. A hard-coded exchange would make Core's
 // registration retry forever on a platform whose bundle renamed it.
 //
@@ -1115,7 +1115,7 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 		notWant string
 	}{
 		{
-			name: "default version (2.19.0) uses the ilm proxy exchange",
+			name: "default version uses the ilm proxy exchange",
 			mutate: func(_ *otilmv1alpha1.Platform) {
 				// no extra spec setup: default version resolves without explicit mutation
 			},
