@@ -391,6 +391,8 @@ spec:
           value: "true"
         - name: MESSAGING_TIME_QUALITY_ENABLED
           value: "false"
+        - name: PLATFORM_LOG_FORMAT
+          value: ecs
         - name: JDBC_USERNAME
           valueFrom:
             secretKeyRef:

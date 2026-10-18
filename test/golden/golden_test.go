@@ -314,14 +314,15 @@ func version2190Variant() variant {
 
 // version2200Variant: version2190Variant's CR pinned to the 2.20.0 bundle instead. Its diff
 // against version-2190's golden is the whole workload delta of 2.20.0: the core,
-// frontend-administrator and scheduler tags, the platform-version annotation and Core's larger
-// startup budget, with the wiring unchanged.
+// frontend-administrator, scheduler and auth tags, the platform-version annotation, Core's
+// larger startup budget, and the log format variable this variant sets.
 // The bundle's messaging additions render only for a managed broker, which
 // TestResolveManagedMessaging2200IsAdditive covers.
 func version2200Variant() variant {
 	spec := fullFeatureSpec()
 	spec.Version = version2200
 	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
+	spec.Common.Logging.Format = "ecs"
 	return variant{name: "version-2200", platform: platformFor(spec)}
 }
 

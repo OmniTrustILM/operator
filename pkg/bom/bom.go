@@ -282,11 +282,10 @@ var bundles = map[string]Bundle{
 	},
 	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
 	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
-	// queue (see messagingTopology2200) and the images2200 image set.
-	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default.
+	// queue (see messagingTopology2200), the images2200 image set and wiring2200.
 	version2200: {
 		Components:      images2200,
-		Wiring:          wiring2190,
+		Wiring:          wiring2200,
 		Messaging:       messagingTopology2200,
 		HasProvisioning: true,
 		Released:        false,
@@ -518,6 +517,9 @@ type WiringProfile struct {
 	// PlatformInstanceIDEnv is the env var carrying Core's certificate-serial
 	// instance id (2.19.0+; empty in earlier bundles renders nothing).
 	PlatformInstanceIDEnv string
+	// LogFormatEnv is the env var selecting Core's console log format (2.20.0+; empty in
+	// earlier bundles renders nothing).
+	LogFormatEnv string
 
 	// Trusted-certificates and provisioning-API-key Secret keys (env names + the
 	// in-Secret keys). Values are always secret-backed, never inlined.
@@ -763,6 +765,14 @@ var wiring2190 = func() WiringProfile {
 	w.PlatformInstanceIDEnv = "PLATFORM_INSTANCE_ID"
 	w.Provisioning.DefaultExchange = exchangeIlmProxy
 	w.Provisioning.LoggingLevelEnv = "LOGGING_LEVEL_COM_OTILM"
+	return w
+}()
+
+// wiring2200 is the 2.20.0 wiring: wiring2190 plus Core's log format variable. Every other
+// variable Core 2.20.0 adds has an in-image default, so the operator renders none of them.
+var wiring2200 = func() WiringProfile {
+	w := wiring2190
+	w.LogFormatEnv = "PLATFORM_LOG_FORMAT"
 	return w
 }()
 

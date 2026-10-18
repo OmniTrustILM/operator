@@ -570,9 +570,14 @@ func TestBundle2200(t *testing.T) {
 		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.1", Repository: "ilm-private"},
 	}, b.Components)
 
-	// Every variable Core 2.20.0 adds has an in-image default, so the wiring is 2.19.0's.
+	// The wiring is 2.19.0's plus the log format variable; every other variable Core 2.20.0
+	// adds has an in-image default.
 	b19, _ := BundleFor(testVersion2190)
-	assert.Equal(t, b19.Wiring, b.Wiring)
+	assert.Equal(t, "PLATFORM_LOG_FORMAT", b.Wiring.LogFormatEnv)
+	assert.Empty(t, b19.Wiring.LogFormatEnv, "Core 2.19.0 has no log format variable")
+	want := b19.Wiring
+	want.LogFormatEnv = b.Wiring.LogFormatEnv
+	assert.Equal(t, want, b.Wiring)
 
 	m := b.Messaging
 	assert.Equal(t, "/", m.DefaultVirtualHost, "the vhost is unchanged, so 2.19.0 -> 2.20.0 applies additively")

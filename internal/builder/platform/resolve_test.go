@@ -1704,6 +1704,31 @@ func TestResolveCoreProbes(t *testing.T) {
 	assert.Equal(t, int32(45), c.Probes.Startup.FailureThreshold)
 }
 
+// TestResolveCoreLogFormatFollowsTheBundle pins where spec.common.logging.format renders. An unset
+// format must render nothing, because an empty variable would override Core's in-image default,
+// and a 2.19.0 Core has no such variable at all.
+func TestResolveCoreLogFormatFollowsTheBundle(t *testing.T) {
+	const logFormatEnv = "PLATFORM_LOG_FORMAT"
+	for _, tc := range []struct {
+		name, version, format string
+		want                  string
+		rendered              bool
+	}{
+		{"2.20.0 with a format", testVersion220, "ecs", "ecs", true},
+		{"2.20.0 without a format", testVersion220, "", "", false},
+		{"2.19.0 with a format", testVersion219, "logstash", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := basePlatform()
+			p.Spec.Version = tc.version
+			p.Spec.Common.Logging.Format = tc.format
+			v, ok := envValue(ResolveCore(p).Env, logFormatEnv)
+			assert.Equal(t, tc.rendered, ok)
+			assert.Equal(t, tc.want, v)
+		})
+	}
+}
+
 // TestResolveCoreStartupBudgetFollowsTheBundle pins Core's startup budget per platform version.
 // 2.20.0 migrations can outlast 465 s on a large installation, and a pod killed mid-migration
 // rolls it back and starts over, so that bundle carries a larger budget. Older bundles keep 45,

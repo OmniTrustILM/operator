@@ -609,3 +609,13 @@ func TestConvertChartConnectorBlocksRouteToConnectorCRD(t *testing.T) {
 		"ejbcaNgConnector, externalAuthorityProvider, otpkiConnector, timestampFormattingConnector",
 		"the connector TODO lists every found connector block, sorted")
 }
+
+// TestConvertMapsLoggingFormat proves logging.format reaches spec.common.logging.format in the
+// form the CRD enum accepts: the chart trims and lower-cases the value before rendering it.
+func TestConvertMapsLoggingFormat(t *testing.T) {
+	r := Convert(vals{"logging": vals{"level": "INFO", "format": " ECS "}}, "ilm", "ilm")
+	assert.Equal(t, "ecs", r.Platform.Spec.Common.Logging.Format)
+
+	r = Convert(vals{"logging": vals{"level": "INFO"}}, "ilm", "ilm")
+	assert.Empty(t, r.Platform.Spec.Common.Logging.Format, "an unset format leaves Core's own default")
+}

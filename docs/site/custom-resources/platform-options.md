@@ -40,6 +40,7 @@ Fleet-wide configuration, applied to every component. [Cross-component configura
 | `hostName` | The canonical public FQDN: the edge host, Keycloak's `KC_HOSTNAME`, the OIDC URIs, and the CORS origin. |
 | `proxy` | The outbound HTTP(S) proxy for all components: `enabled` sets `PROXY_ENABLED`, and `http`, `https`, and `noProxy` are injected only when non-empty. |
 | `logging.level` | The platform log level (default `INFO`). |
+| `logging.format` | Core's console log format: `text`, or one JSON object per line with `ecs` or `logstash`. Unset leaves Core's default (`text`). Renders on 2.20.0 and later only. |
 | `trustedCertificates` | The CA bundle, by `secretRef` plus an optional `caKey`. |
 | `initContainers` / `sidecars` / `volumes` / `volumeMounts` / `additionalPorts` | Fleet-wide pod-template passthrough, SCC-hardened. |
 | `additionalEnvFrom` | Whole-Secret and whole-ConfigMap `envFrom` — names only, never values. |

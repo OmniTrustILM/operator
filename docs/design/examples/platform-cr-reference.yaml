@@ -78,7 +78,7 @@ spec:
       pullSecrets: []                  # e.g. [regcred]
       command: []                      # overrides the image ENTRYPOINT (rarely needed)
       args: []                         # overrides the image CMD
-    logging: { level: INFO }
+    logging: { level: INFO, format: ecs }   # format: text | ecs | logstash (2.20.0+); omit for Core's default
     # trustedCertificates.caKey is the optional in-Secret key override (default "ca.crt").
     trustedCertificates: { secretRef: ilm-trusted-ca, caKey: ca.crt }
     proxy: { enabled: false, http: "", https: "", noProxy: "" }

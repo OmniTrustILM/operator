@@ -334,6 +334,11 @@ func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 		Value: strconv.FormatBool(p.Spec.Messaging.TimeQuality.Enabled),
 	})
 
+	// An empty value would override Core's in-image default, so an unset format renders nothing.
+	if f := p.Spec.Common.Logging.Format; f != "" {
+		env = append(env, common.EnvPair{Name: w.LogFormatEnv, Value: f})
+	}
+
 	// Proxy URLs are only injected when set.
 	if p.Spec.Common.Proxy.HTTP != "" {
 		env = append(env, common.EnvPair{Name: w.HTTPProxyEnv, Value: p.Spec.Common.Proxy.HTTP})
