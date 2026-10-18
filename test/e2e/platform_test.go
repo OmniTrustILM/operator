@@ -930,7 +930,7 @@ spec:
 			}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
-		It("should have the Topology Operator ACCEPT and reconcile the FULL topology (vhost, 5 users, 5 permissions, 2 exchanges, 11 queues, 10 bindings)", func() {
+		It("should have the Topology Operator ACCEPT and reconcile the FULL topology (vhost, users, permissions, exchanges, queues, bindings)", func() {
 			// The core VERIFY validation for the topology. The Topology Operator's webhooks +
 			// controllers refute any wrong field shape: a rejected apply leaves the CR absent, and
 			// a CR whose spec the operator cannot apply to the broker never reaches its Ready
@@ -1020,7 +1020,7 @@ spec:
 				}
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying all 12 Queue CRs exist and reconcile to Ready")
+			By("verifying every Queue CR exists and reconciles to Ready")
 			Eventually(func(g Gomega) {
 				for _, q := range queues {
 					g.Expect(topologyObjectReady(g, "queue", q)).To(BeTrue(),
@@ -1028,7 +1028,7 @@ spec:
 				}
 			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
-			By("verifying all 11 Binding CRs exist and reconcile to Ready")
+			By("verifying every Binding CR exists and reconciles to Ready")
 			Eventually(func(g Gomega) {
 				for _, b := range bindings {
 					g.Expect(topologyObjectReady(g, "binding", b)).To(BeTrue(),
@@ -2215,7 +2215,7 @@ spec:
   messaging:
     mode: managed
     brokerType: rabbitmq
-    # PINNED to the legacy vhost ON PURPOSE, now that 2.19.0 is the default. This is the only
+    # PINNED to the legacy vhost ON PURPOSE, because the default bundle uses "/". This is the only
     # e2e that proves an explicit virtualHost still renders the UNSCOPED topology names live
     # 2.17.0/2.18.0 platforms carry, on the NEW default bundle — i.e. that pinning a vhost
     # survives a version move. The managed-rabbitmq block covers the unpinned path (vhost "/",
@@ -3127,6 +3127,10 @@ spec:
 					g.Expect(deploymentAvailable(g, ns, "core")).To(BeTrue(), "Core must actually run on 2.20.0")
 				}, 20*time.Minute, 15*time.Second).Should(Succeed())
 
+				By("waiting for the core rollout to finish, so Available is the 2.20.0 pod and not the old one")
+				_, err = utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/core", "-n", ns, "--timeout=20m"))
+				Expect(err).NotTo(HaveOccurred(), "the 2.20.0 Core pod must become ready with the new grant in place")
+
 				By("verifying NO messaging migration was recorded for the additive move")
 				Consistently(func(g Gomega) {
 					upgrade, err := utils.Run(exec.Command("kubectl", "get", "platform", matrixPlatformName, "-n", ns,
@@ -3185,9 +3189,8 @@ spec:
 // (plus the auth/scheduler images of that bundle, each actually rolled out), the
 // LOGGING_LEVEL_COM_OTILM env, and, read back THROUGH the Messaging Topology Operator, the
 // default "/" vhost, the ilm / ilm-proxy exchanges and the provider.status-poll and
-// provider.discovery-work queues. It is the EXPLICITLY PINNED fresh install: 2.20.0 is now the
-// operator's default, so
-// this block proves that naming the version outright (the GitOps form) resolves and reports the
+// provider.discovery-work queues. It is the EXPLICITLY PINNED fresh install: 2.20.0 is the
+// operator's default, so this block proves that naming the version outright (the GitOps form) resolves and reports the
 // same contract a version-less install lands on — a distinct path from the default install the
 // managed blocks cover, and from an upgrade of a live platform
 // (platformVersionMatrixUpgradeSpecs and platformVersionMatrixMigrationSpecs cover that half).
@@ -3299,9 +3302,9 @@ spec:
 
 				By("verifying the managed topology is the 2.20.0 one at the BROKER level (vhost /, ilm + ilm-proxy exchanges, provider.status-poll, provider.discovery-work)")
 				// Read the topology back THROUGH the Messaging Topology Operator: each renamed/new CR
-				// must exist AND reach Ready, i.e. the operator really applied the 2.19.0 topology to
+				// must exist AND reach Ready, i.e. the operator really applied the 2.20.0 topology to
 				// the live broker (a rejected or unappliable CR never gets there). Readiness is asserted
-				// on the CR, but the 2.19.0 CONTRACT is the broker-facing spec.name — the Kubernetes
+				// on the CR, but the 2.20.0 CONTRACT is the broker-facing spec.name — the Kubernetes
 				// metadata.name is sanitized ([a-z0-9-] only), so "provider.status-poll" and
 				// "provider_status_poll" would share the object name "...-queue-provider-status-poll"
 				// and only spec.name distinguishes them. Assert both.
