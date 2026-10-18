@@ -198,7 +198,7 @@ func TestResolveCoreEnvOverridesAppendedLast(t *testing.T) {
 func TestResolveCoreImageResolvedFromBOM(t *testing.T) {
 	// Shared registry/repository + bundle-provided core name/tag.
 	c := ResolveCore(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.19.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.20.0", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy), "default pull policy when unset")
 }
 
@@ -1701,7 +1701,7 @@ func TestResolveCoreProbes(t *testing.T) {
 	require.NotNil(t, c.Probes.Startup)
 	require.NotNil(t, c.Probes.Startup.HTTPGet)
 	assert.Equal(t, "/api/v1/health/liveness", c.Probes.Startup.HTTPGet.Path, "chart uses liveness path for startup")
-	assert.Equal(t, int32(45), c.Probes.Startup.FailureThreshold)
+	assert.Equal(t, int32(180), c.Probes.Startup.FailureThreshold)
 }
 
 // TestResolveCoreLogFormatFollowsTheBundle pins where spec.common.logging.format renders. An unset
@@ -1739,6 +1739,7 @@ func TestResolveCoreStartupBudgetFollowsTheBundle(t *testing.T) {
 		testVersion218: 45,
 		testVersion219: 45,
 		testVersion220: 180,
+		testVersion221: 180,
 	} {
 		p := basePlatform()
 		p.Spec.Version = version
@@ -1781,7 +1782,7 @@ func TestResolveSchedulerBasics(t *testing.T) {
 
 func TestResolveSchedulerImage(t *testing.T) {
 	c := ResolveScheduler(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.1.1", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.2.0", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy))
 }
 
@@ -2031,7 +2032,7 @@ func TestResolveAuthBasics(t *testing.T) {
 
 func TestResolveAuthImage(t *testing.T) {
 	c := ResolveAuth(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.7.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.8.0", c.Image)
 }
 
 func TestResolveAuthInlineEnv(t *testing.T) {
@@ -2264,7 +2265,7 @@ func TestResolveFeAdministratorBasics(t *testing.T) {
 
 func TestResolveFeAdministratorImage(t *testing.T) {
 	c := ResolveFeAdministrator(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.20.0", c.Image)
 }
 
 func TestResolveFeAdministratorNoEnv(t *testing.T) {

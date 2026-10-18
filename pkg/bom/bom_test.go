@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"maps"
 	"reflect"
 	"regexp"
 	"testing"
@@ -16,7 +17,7 @@ import (
 )
 
 // Test-local version literals. These are DELIBERATELY independent of the production
-// version2170/version2180/version2190/version2200 consts in bom.go: this suite is a
+// version2170/version2180/version2190/version2200/version2210 consts in bom.go: this suite is a
 // full-matrix characterization of the bundle DATA, and reusing the production consts here
 // would let a bundle's key silently drift with its own const instead of being pinned by an
 // independent literal.
@@ -25,6 +26,7 @@ const (
 	testVersion2180 = "2.18.0"
 	testVersion2190 = "2.19.0"
 	testVersion2200 = "2.20.0"
+	testVersion2210 = "2.21.0"
 	testVersion2100 = "2.10.0"
 	testVersion290  = "2.9.0"
 )
@@ -219,7 +221,7 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 // bundle changes this list only once its own release-day flip PR marks it Released and
 // updates this expectation.
 func TestSupportedVersionsExplicit(t *testing.T) {
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200}, SupportedVersions())
 }
 
 // TestSupportedVersionsExcludesPreviewBundle pins the Released filter with a SYNTHETIC preview
@@ -322,10 +324,10 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 	for _, v := range SupportedVersions() {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
-	assert.Equal(t, testVersion2200, AllVersions()[len(AllVersions())-1],
+	assert.Equal(t, testVersion2210, AllVersions()[len(AllVersions())-1],
 		"the newest bundle is last in the full key set")
-	assert.Equal(t, testVersion2190, SupportedVersions()[len(SupportedVersions())-1],
-		"the newest RELEASED bundle is last in the advertised set; the 2.20.0 preview is not advertised")
+	assert.Equal(t, testVersion2200, SupportedVersions()[len(SupportedVersions())-1],
+		"the newest RELEASED bundle is last in the advertised set; the 2.21.0 preview is not advertised")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -459,10 +461,8 @@ func TestBundle2190(t *testing.T) {
 	assert.True(t, b.Released, "2.19.0 is released: the operator reached CR parity with the Helm chart")
 	assert.True(t, b.HasProvisioning)
 
-	// Advertised set now carries 2.19.0, and it is the fresh-install default.
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
+	assert.Contains(t, SupportedVersions(), testVersion2190)
 	assert.Contains(t, AllVersions(), testVersion2190)
-	assert.Equal(t, testVersion2190, DefaultVersion)
 
 	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag
 	// (2026-08-03): auth bumped to 1.7.0 and scheduler to 1.1.1 in the release cut.
@@ -547,12 +547,11 @@ func TestBundle2190(t *testing.T) {
 func TestBundle2200(t *testing.T) {
 	b, ok := BundleFor(testVersion2200)
 	require.True(t, ok, "2.20.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.20.0 stays a preview until its platform images are published")
+	assert.True(t, b.Released, "2.20.0 is released: its platform images are published")
 	assert.True(t, b.HasProvisioning)
 
-	assert.NotContains(t, SupportedVersions(), testVersion2200, "a preview is never advertised")
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200}, AllVersions())
-	assert.Equal(t, testVersion2190, DefaultVersion, "a preview is never the fresh-install default")
+	assert.Contains(t, SupportedVersions(), testVersion2200)
+	assert.Equal(t, testVersion2200, DefaultVersion, "the release-day change moved the fresh-install default to 2.20.0")
 
 	assert.Equal(t, map[string]Image{
 		"core":                 {Name: "core", Tag: testVersion2200},
@@ -624,6 +623,32 @@ func TestBundle2200(t *testing.T) {
 	assert.Equal(t, int32(180), b.CoreStartupFailureThreshold,
 		"2.20.0 migrations can outlast the default startup budget, so this bundle raises it (about 30 minutes, as the chart)")
 	assert.Zero(t, b19.CoreStartupFailureThreshold, "older bundles keep the default, so an operator upgrade does not roll their Core")
+}
+
+// TestBundle2210 pins the 2.21.0 preview: a copy of the 2.20.0 bundle with the core and
+// frontend-administrator 2.21.0 images. Each 2.21.0 contract change updates it.
+func TestBundle2210(t *testing.T) {
+	b, ok := BundleFor(testVersion2210)
+	require.True(t, ok, "2.21.0 must resolve via explicit spec.version")
+	assert.False(t, b.Released, "2.21.0 stays a preview until its platform images are published")
+	assert.True(t, b.HasProvisioning)
+
+	assert.NotContains(t, SupportedVersions(), testVersion2210, "a preview is never advertised")
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200, testVersion2210}, AllVersions())
+	assert.Equal(t, testVersion2210, NewestVersion(), "spec.version: develop follows the preview")
+
+	b20, _ := BundleFor(testVersion2200)
+	want := maps.Clone(b20.Components)
+	want["core"] = Image{Name: "core", Tag: testVersion2210}
+	want["fe-administrator"] = Image{Name: "frontend-administrator", Tag: testVersion2210}
+	assert.Equal(t, want, b.Components)
+
+	assert.Equal(t, b20.Wiring, b.Wiring)
+	assert.Equal(t, b20.Messaging, b.Messaging)
+	assert.Equal(t, b20.RabbitMQVersion, b.RabbitMQVersion)
+	assert.Equal(t, b20.CNPGVersion, b.CNPGVersion)
+	assert.Equal(t, b20.KeycloakVersion, b.KeycloakVersion)
+	assert.Equal(t, b20.CoreStartupFailureThreshold, b.CoreStartupFailureThreshold)
 }
 
 // TestCoreReadGrantCoversItsQueues checks Core's read regex by behaviour, not by spelling: the

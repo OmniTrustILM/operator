@@ -64,11 +64,13 @@ const (
 	goldenDir = "testdata"
 	// docSeparator joins serialized objects into a single multi-document YAML stream.
 	docSeparator = "---\n"
-	// version2190 pins a variant to the 2.19.0 bundle — the default bundle, pinned here
-	// explicitly so the variant is stable across future default moves.
+	// version2190 pins a variant to the 2.19.0 bundle.
 	version2190 = "2.19.0"
-	// version2200 pins a variant to the 2.20.0 preview bundle.
+	// version2200 pins a variant to the 2.20.0 bundle — the default bundle, pinned here
+	// explicitly so the variant is stable across future default moves.
 	version2200 = "2.20.0"
+	// version2210 pins a variant to the 2.21.0 preview bundle.
+	version2210 = "2.21.0"
 )
 
 // updateGolden, when true (UPDATE_GOLDEN=1 in the environment, or -update on the test
@@ -166,6 +168,7 @@ func variants() []variant {
 		managedDBNoPoolerVariant(),
 		version2190Variant(),
 		version2200Variant(),
+		version2210Variant(),
 		timeQualityVariant(),
 		coreInstanceIDVariant(),
 		coreStatefulSetVariant(),
@@ -297,14 +300,12 @@ func managedDBNoPoolerVariant() variant {
 	return variant{name: "managed-db-no-pooler", platform: platformFor(spec)}
 }
 
-// version2190Variant: a platform PINNED to the 2.19.0 bundle — the default bundle, pinned here
-// explicitly so the variant is stable across future default moves — with proxy support on so
+// version2190Variant: a platform PINNED to the 2.19.0 bundle, with proxy support on so
 // the provision-instance-queue init container renders too. It is the byte-for-byte record of
 // what "spec.version: 2.19.0" ships: the 2.19.0 image tags (core / frontend-administrator
 // 2.19.0, auth 1.7.0, scheduler 1.1.1), the 2.19.0 wiring (the LOGGING_LEVEL_COM_OTILM rename),
 // and the renamed proxy exchange (czertainly-proxy → ilm-proxy) in the queue-registration
-// request. Every other variant now renders the same 2.19.0 default, so this variant's value is
-// the explicit pin plus the proxy path, not a version delta.
+// request.
 func version2190Variant() variant {
 	spec := fullFeatureSpec()
 	spec.Version = version2190
@@ -324,6 +325,17 @@ func version2200Variant() variant {
 	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
 	spec.Common.Logging.Format = "ecs"
 	return variant{name: "version-2200", platform: platformFor(spec)}
+}
+
+// version2210Variant: version2200Variant's CR pinned to the 2.21.0 preview bundle. Its diff
+// against version-2200's golden is the core and frontend-administrator tags and the
+// platform-version annotation until a 2.21.0 contract change lands.
+func version2210Variant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2210
+	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true}
+	spec.Common.Logging.Format = "ecs"
+	return variant{name: "version-2210", platform: platformFor(spec)}
 }
 
 // timeQualityVariant: the 2.19.0 platform with BOTH time-quality controls on — Core's

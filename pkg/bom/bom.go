@@ -33,9 +33,9 @@ import (
 // NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
 // (Bundle.Released), made whenever the operator is ready to change what a version-less
 // fresh install lands on — a newer released bundle can exist, reachable via an explicit
-// spec.version, before DefaultVersion moves to it. Today it names 2.19.0, which is ALSO the
-// newest released bundle: the 2.19.0 release-day change marked the bundle Released and moved
-// DefaultVersion to it together, once the operator reached CR parity with the Helm chart.
+// spec.version, before DefaultVersion moves to it. Today it names 2.20.0, which is ALSO the
+// newest released bundle: the 2.20.0 release-day change marked the bundle Released and moved
+// DefaultVersion to it together, as the 2.19.0 one did.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
@@ -43,7 +43,7 @@ import (
 //
 // Every bundle is keyed by its OWN version const — never by DefaultVersion — so flipping
 // DefaultVersion can never relabel a bundle or retag its images (the "demotion trap").
-const DefaultVersion = "2.19.0"
+const DefaultVersion = "2.20.0"
 
 // DefaultImageRegistry and DefaultImageRepository are the registry host and
 // repository the ILM component images ship under (the public registry the
@@ -74,6 +74,7 @@ const (
 	version2180 = "2.18.0"
 	version2190 = "2.19.0"
 	version2200 = "2.20.0"
+	version2210 = "2.21.0"
 )
 
 // componentAuthOPAPolicies is the operator's component identity for the
@@ -259,8 +260,7 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 	},
-	// 2.19.0 — the operator's DEFAULT and newest RELEASED bundle. Image coordinates verified
-	// against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
+	// 2.19.0 — image coordinates verified against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
 	// operator now renders: the LOGGING_LEVEL_COM_OTILM rename, the time-quality integration
 	// env (spec.messaging.timeQuality), the platform instance id (spec.core.instanceId), the
 	// time-quality-monitor sidecar image (private repository, spec.core.timeQualityMonitor),
@@ -276,20 +276,36 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 	},
-	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
-	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
-	// queue (see messagingTopology2200), the images2200 image set and wiring2200.
+	// 2.20.0 — the operator's DEFAULT and newest RELEASED bundle. It is the 2.19.0 bundle plus
+	// the Discovery v2 work queue (see messagingTopology2200), the images2200 image set and
+	// wiring2200.
 	version2200: {
 		Components:      images2200,
 		Wiring:          wiring2200,
 		Messaging:       messagingTopology2200,
 		HasProvisioning: true,
-		Released:        false,
+		Released:        true,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 		// About 30 minutes: V202608291000 rewrites discovery_certificate under an exclusive
 		// lock and indexes it, which can outlast the default on a large installation.
+		CoreStartupFailureThreshold: 180,
+	},
+	// 2.21.0 — a PREVIEW until the platform images are published; the release-day PR sets
+	// Released (docs/release-process.md). It starts as a copy of the 2.20.0 bundle with the
+	// core and frontend-administrator 2.21.0 images, so spec.version: develop has a bundle
+	// ahead of the last release. Contract changes for 2.21.0 land here.
+	version2210: {
+		Components:      images2210,
+		Wiring:          wiring2200,
+		Messaging:       newMessagingTopology2200(),
+		HasProvisioning: true,
+		Released:        false,
+		RabbitMQVersion: "4.3.1",
+		CNPGVersion:     "18",
+		KeycloakVersion: keycloakVersion2663,
+		// A platform that skips 2.20.0 still runs its V202608291000 migration on the way here.
 		CoreStartupFailureThreshold: 180,
 	},
 	version2170: {
@@ -360,6 +376,15 @@ var images2200 = func() map[string]Image {
 	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1"}
 	// 1.0.0 runs as a named user, which runAsNonRoot without a runAsUser cannot verify.
 	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: "ilm-private"}
+	return m
+}()
+
+// images2210 is the 2.20.0 image set with core and frontend-administrator at 2.21.0. A clone,
+// so the two bundles never share a map.
+var images2210 = func() map[string]Image {
+	m := maps.Clone(images2200)
+	m["core"] = Image{Name: "core", Tag: version2210}
+	m[componentFeAdministrator] = Image{Name: imageNameFeAdministrator, Tag: version2210}
 	return m
 }()
 
@@ -1127,7 +1152,11 @@ func newMessagingTopology2190() MessagingTopology {
 // provider.discovery-work queue, its binding from the ilm exchange, and Core's read grant on it.
 // The vhost and the exchanges are unchanged, so 2.19.0 -> 2.20.0 is an additive apply, not a
 // messaging migration.
-var messagingTopology2200 = func() MessagingTopology {
+var messagingTopology2200 = newMessagingTopology2200()
+
+// newMessagingTopology2200 returns a fresh 2.20.0 topology on every call, for the same reason
+// as newMessagingTopology2190.
+func newMessagingTopology2200() MessagingTopology {
 	t := newMessagingTopology2190()
 	for i := range t.Users {
 		if t.Users[i].Role == MessagingUserCore {
@@ -1141,7 +1170,7 @@ var messagingTopology2200 = func() MessagingTopology {
 	t.Bindings = slices.Insert(t.Bindings, afterBinding,
 		MessagingBinding{Source: exchangeIlm, Destination: queueProviderDiscoveryWork, RoutingKey: queueProviderDiscoveryWork})
 	return t
-}()
+}
 
 // messagingTopology2170 is the platform's managed-RabbitMQ topology for platform version
 // 2.17.0: a SINGLE broker user (2.17.0 used one messaging credential, not the five-user 2.18.0

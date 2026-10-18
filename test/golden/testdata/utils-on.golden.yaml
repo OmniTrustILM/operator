@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: api-gateway
         app.kubernetes.io/instance: ilm
@@ -134,7 +134,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: auth
         app.kubernetes.io/instance: ilm
@@ -159,7 +159,7 @@ spec:
             secretKeyRef:
               key: connection-string
               name: auth-db
-        image: hub.omnitrustregistry.com/ilm/auth:1.7.0
+        image: hub.omnitrustregistry.com/ilm/auth:1.8.0
         imagePullPolicy: IfNotPresent
         name: auth
         ports:
@@ -235,7 +235,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: auth-opa-policies
         app.kubernetes.io/instance: ilm
@@ -316,7 +316,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: core
         app.kubernetes.io/instance: ilm
@@ -438,7 +438,7 @@ spec:
             configMapKeyRef:
               key: messaging.amqp.port
               name: messaging-configmap
-        image: hub.omnitrustregistry.com/ilm/core:2.19.0
+        image: hub.omnitrustregistry.com/ilm/core:2.20.0
         imagePullPolicy: IfNotPresent
         lifecycle:
           postStart:
@@ -467,7 +467,7 @@ spec:
           seccompProfile:
             type: RuntimeDefault
         startupProbe:
-          failureThreshold: 45
+          failureThreshold: 180
           httpGet:
             path: /api/v1/health/liveness
             port: 8080
@@ -548,7 +548,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: fe-administrator
         app.kubernetes.io/instance: ilm
@@ -557,7 +557,7 @@ spec:
         app.kubernetes.io/part-of: ilm
     spec:
       containers:
-      - image: hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0
+      - image: hub.omnitrustregistry.com/ilm/frontend-administrator:2.20.0
         imagePullPolicy: IfNotPresent
         name: fe-administrator
         ports:
@@ -637,7 +637,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: scheduler
         app.kubernetes.io/instance: ilm
@@ -685,7 +685,7 @@ spec:
             configMapKeyRef:
               key: messaging.amqp.port
               name: messaging-configmap
-        image: hub.omnitrustregistry.com/ilm/scheduler:1.1.1
+        image: hub.omnitrustregistry.com/ilm/scheduler:1.2.0
         imagePullPolicy: IfNotPresent
         name: scheduler
         ports:
@@ -780,7 +780,7 @@ spec:
   template:
     metadata:
       annotations:
-        otilm.com/platform-version: 2.19.0
+        otilm.com/platform-version: 2.20.0
       labels:
         app.kubernetes.io/component: utils
         app.kubernetes.io/instance: ilm

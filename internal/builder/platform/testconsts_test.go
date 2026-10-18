@@ -128,6 +128,7 @@ const (
 	testVersion218 = "2.18.0"
 	testVersion219 = "2.19.0"
 	testVersion220 = "2.20.0"
+	testVersion221 = "2.21.0"
 
 	// resolve_test.go — the per-bundle proxy exchange names (2.19.0 renamed them).
 	testExchangeCzertainlyProxy = "czertainly-proxy"

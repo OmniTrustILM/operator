@@ -74,6 +74,15 @@ func startMigration(ns string) {
 	recordMigration(ns, otilmv1alpha1.MigrationPhaseFencing)
 }
 
+// fencePlatform is lifecyclePlatform pinned to the migration's target, so the request
+// startMigration makes is never a refused downgrade from whatever DefaultVersion names.
+func fencePlatform(ns string, mutate func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform {
+	return lifecyclePlatform(ns, func(p *otilmv1alpha1.Platform) {
+		p.Spec.Version = platformVersion219
+		mutate(p)
+	})
+}
+
 // awaitWorkload waits for a rendered workload to exist and returns its (possibly nil)
 // .spec.replicas, so a spec can pin the count the fence is expected to record.
 func awaitWorkload(ns, name string, obj client.Object) {
@@ -177,7 +186,7 @@ var _ = Describe("Messaging migration fence", func() {
 	Context("A fenced workload stays at zero across the operator's own reconciles", func() {
 		It("records the prior counts, holds the producers at zero for five reconciles, then restores them", func() {
 			const ns = "ilm-fence-deployment"
-			p := lifecyclePlatform(ns, func(p *otilmv1alpha1.Platform) {
+			p := fencePlatform(ns, func(p *otilmv1alpha1.Platform) {
 				p.Spec.Scheduler.Replicas = ptr(int32(3))
 			})
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
@@ -241,7 +250,7 @@ var _ = Describe("Messaging migration fence", func() {
 
 		It("holds a StatefulSet-typed gateway at zero and records its kind", func() {
 			const ns = "ilm-fence-statefulset"
-			p := lifecyclePlatform(ns, func(p *otilmv1alpha1.Platform) {
+			p := fencePlatform(ns, func(p *otilmv1alpha1.Platform) {
 				p.Spec.Gateway.WorkloadType = otilmv1alpha1.WorkloadKindStatefulSet
 				p.Spec.Gateway.Replicas = ptr(int32(2))
 			})
@@ -273,7 +282,7 @@ var _ = Describe("Messaging migration fence", func() {
 			const ns = "ilm-fence-hpa"
 			cpu := int32(75)
 			minR := int32(2)
-			p := lifecyclePlatform(ns, func(p *otilmv1alpha1.Platform) {
+			p := fencePlatform(ns, func(p *otilmv1alpha1.Platform) {
 				p.Spec.Scheduler.Autoscaling = &otilmv1alpha1.AutoscalingSpec{
 					MinReplicas: &minR, MaxReplicas: 5, TargetCPUUtilization: &cpu,
 				}
