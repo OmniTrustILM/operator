@@ -176,7 +176,7 @@ bundle data:
 7. ✅ **Upgrade + e2e** (steps 4–5) — `config/samples/platform_2170.yaml` + the
    `docs/site/upgrading.md` worked examples (2.17.0→2.18.0 and the 2.18.0→2.19.0 managed-broker
    runbook), plus the Kind e2e version matrix: `matrix-upgrade` walks a managed platform
-   2.17.0 → 2.18.0 → 2.19.0, and `matrix-migration` exercises the messaging migration end to
+   2.17.0 → 2.18.0 → 2.19.0 → 2.20.0, and `matrix-migration` exercises the messaging migration end to
    end (fence, drain hold, drain timeout + abort, and a full run to completion with the source
    topology reclaimed).
 

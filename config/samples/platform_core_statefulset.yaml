@@ -1,7 +1,7 @@
 # platform_core_statefulset.yaml — a MULTI-REPLICA Core, pinned to ILM 2.19.0.
 #
 # This sample PINS spec.version on purpose, and must: the multi-replica shape below depends on
-# PLATFORM_INSTANCE_ID, which only the 2.19.0 wiring names. On an older bundle three Core
+# PLATFORM_INSTANCE_ID, which the wiring names from 2.19.0 onwards. On an older bundle three Core
 # replicas get NEITHER a per-pod instance id NOR the init-container guard that catches its
 # absence — three pods deriving ids from their pod IPs, free to issue certificates with
 # identical serial numbers. And spec.version pins on create (status.observedVersion), so an
@@ -40,7 +40,7 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
-  version: "2.19.0"                   # pin explicitly (GitOps); 2.19.0 is also the default
+  version: "2.19.0"                   # pin explicitly (GitOps)
   database:
     mode: external
     host: postgres.example.com

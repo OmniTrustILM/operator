@@ -37,7 +37,7 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
-  version: "2.20.0"                   # pin the bundle explicitly (recommended for GitOps; this is also the operator's default)
+  version: "2.20.0"                   # pin the bundle explicitly (recommended for GitOps)
   database:
     mode: external
     host: postgres.example.com

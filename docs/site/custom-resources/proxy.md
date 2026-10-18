@@ -84,7 +84,7 @@ The image comes from the operator's own bill of materials, so a proxy tracks the
 kubectl apply -f proxy.yaml
 kubectl get proxies -n <namespace>
 # NAME      PHASE     VERSION   AGE
-# dc-east   Running   1.0.0     …
+# dc-east   Running   1.0.1     …
 ```
 
 ## Tuning the deployment

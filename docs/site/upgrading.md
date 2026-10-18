@@ -9,7 +9,7 @@ The platform version is selected by **`spec.version`**, and the set of versions 
 1. **The operator binary.** Newer operator builds ship newer — and additional — platform version bundles. Moving to a platform version the running operator does not carry means upgrading the operator first.
 2. **`spec.version`.** Moving it to a version the running operator supports rolls the platform's stateless tier onto that release's images and wiring.
 
-This page covers both: which versions are supported, how one is resolved, the upgrade procedure, three worked examples — including the messaging migration the operator runs on your behalf — and the guard that protects a managed database, broker, or Keycloak from a one-way major-version jump.
+This page covers both: which versions are supported, how one is resolved, the upgrade procedure, worked examples — including the messaging migration the operator runs on your behalf — and the guard that protects a managed database, broker, or Keycloak from a one-way major-version jump.
 
 ## Supported versions
 
@@ -114,7 +114,7 @@ kubectl get platform -n ilm -w
 
 The stateless tier is genuinely stateless — all platform state lives in PostgreSQL and the broker — so a stateless-only version bump (new application images, the same major infrastructure versions) is an ordinary rolling update.
 
-One class of move is **not** an ordinary rolling update: a version change that renames the managed messaging topology runs a sequenced migration instead, during which the platform's external API and UI are deliberately taken offline. Check the [messaging-migration walkthrough](#worked-example-2180-to-2190-the-messaging-migration) before moving between two versions whose managed virtual host differs — today, 2.18.0 to 2.19.0.
+One class of move is **not** an ordinary rolling update: a version change that renames the managed messaging topology runs a sequenced migration instead, during which the platform's external API and UI are deliberately taken offline. Check the [messaging-migration walkthrough](#worked-example-2180-to-2190-the-messaging-migration) before moving between two versions whose managed virtual host differs — today, from 2.18.0 to 2.19.0 or later.
 
 :::warning[Upgrades are forward-only]
 Setting `spec.version` to a version older than the running `status.observedVersion` makes the platform `Degraded` with reason `DowngradeForbidden`, and **applies nothing** — the running version keeps serving. A stateful platform that has migrated its schema cannot be rolled back in place; recovering an older version means restoring from a backup. Verify a restorable backup exists before you move a platform version.
@@ -193,8 +193,12 @@ Scaling the API gateway back up by hand does not help: the fence re-asserts its 
 
 Beyond the messaging topology, this bundle also moves `core` and `frontend-administrator` to 2.19.0, `auth` from 1.6.3 to 1.7.0, and `scheduler` from 1.1.0 to 1.1.1; adds the time-quality-monitor image to the bundle; and renames the platform log-level variable from `LOGGING_LEVEL_COM_CZERTAINLY` to `LOGGING_LEVEL_COM_OTILM` while adding `MESSAGING_TIME_QUALITY_ENABLED` and `PLATFORM_INSTANCE_ID`. Every other component tag is identical between the two releases, so those are the pods you should expect to roll at the cutover.
 
-:::warning[A 2.17.0 platform cannot jump straight to 2.19.0]
-The engine migrates from the 2.18.0 messaging layout onwards. A move whose source is the single-user pre-2.18.0 topology is refused with reason **`SteppingStoneRequired`** and a message naming the remedy: upgrade to 2.18.0 first, let it settle, then move to 2.19.0.
+:::warning[A 2.17.0 platform cannot jump straight to 2.19.0 or later]
+The engine migrates from the 2.18.0 messaging layout onwards. A move whose source is the single-user pre-2.18.0 topology is refused with reason **`SteppingStoneRequired`** and a message naming the remedy: upgrade to 2.18.0 first, let it settle, then move to the target version.
+:::
+
+:::note[A 2.18.0 platform can move straight to 2.20.0]
+The migration lands on whichever bundle `spec.version` names, so 2.18.0 to 2.20.0 is one migration, not two, and the cutover creates the 2.20.0 topology, `provider.discovery-work` queue included. On an external broker, create the 2.20.0 topology yourself: the renamed exchanges plus the queue and permission in [Worked example: 2.19.0 to 2.20.0](#worked-example-2190-to-2200). Then acknowledge with `migrationAcknowledgedForVersion: "2.20.0"`.
 :::
 
 ### The four phases
@@ -292,12 +296,24 @@ kubectl get platform ilm -n ilm -w   # observedVersion 2.19.0 to 2.20.0, READY T
 | **Managed RabbitMQ topology** — the new `provider.discovery-work` queue, its binding from the `ilm` exchange, and the `core` user's read permission on it | The Messaging Topology Operator reconciles **additively**: the queue and binding are created and the permission is widened. Nothing is renamed or removed. |
 | **Core's startup budget** — the startup probe's `failureThreshold` goes from 45 to 180, about 30 minutes | A 2.20.0 schema migration rewrites and indexes a large table, which can outlast the old budget on a large installation. A pod killed mid-migration rolls the migration back and starts over. |
 | **Database schema** | Core 2.20.0 self-migrates on boot (Flyway). The operator orders the rollout and gates readiness; it never runs SQL itself. |
+| **Core's log format** — new `spec.common.logging.format` (`text`, `ecs` or `logstash`) | Rendered as `PLATFORM_LOG_FORMAT` only when set; unset, Core keeps its default text log. |
 
 ### What you must decide
 
-- **An external broker needs the new queue first.** Create the `provider.discovery-work` queue (durable), bind it to the `ilm` exchange with routing key `provider.discovery-work`, and extend the read permission of Core's broker user to cover it, **before** you move `spec.version`. The operator does not refuse this move on an external broker, because nothing is renamed, but the broker refuses Core's consumer without the permission and Core crash-loops.
+- **An external broker needs the new queue first.** Before you move `spec.version`, create on the platform's virtual host a durable `provider.discovery-work` queue, a binding to it from the `ilm` exchange with routing key `provider.discovery-work`, and read permission on it for Core's broker user. The operator does not refuse this move on an external broker, because nothing is renamed, but the broker refuses Core's consumer without the permission and Core crash-loops. For example, with [rabbitmqadmin v2](https://github.com/rabbitmq/rabbitmqadmin-ng):
+
+  ```bash
+  rabbitmqadmin --vhost / queues declare --name provider.discovery-work --type classic --durable true
+  rabbitmqadmin --vhost / exchanges bind --source ilm --destination-type queue \
+    --destination provider.discovery-work --routing-key provider.discovery-work
+  rabbitmqctl set_permissions -p / <core-username> '' '^ilm(-proxy)?$' \
+    '^core(\..+|-.+)?$|^provider\.(status-poll|discovery-work)$|^time-quality\.(config-request|results)$'
+  ```
+
+  `rabbitmqctl set_permissions` replaces all of the user's permissions on the virtual host. These are the patterns the operator grants Core on a managed broker; adjust them if your exchange names differ.
 - **A `Proxy` follows the operator, not `spec.version`.** Its image comes from the operator's default bundle, so the operator build whose default is 2.20.0 rolls every `Proxy` from proxy 1.0.0 to 1.0.1, whatever version its platform runs. To hold one back, pin `spec.image.tag` on that `Proxy` before you upgrade the operator.
 - **A larger database may need a larger startup budget.** If the migration can outlast about 30 minutes on your data, set `spec.core.probes.startup` explicitly; the CR's probe wins over the bundle's budget.
+- **A version-less `Platform` lands on 2.20.0 when it is created again.** The pin lives in `status`, so a `Platform` without `spec.version` that is deleted and re-applied, or restored without its status, starts on the new default and migrates a retained database to 2.20.0. Set `spec.version` before you upgrade the operator.
 - **Back up PostgreSQL first.** The Core schema migration is one-way. Verify a restorable backup before applying.
 
 ## Managed-infrastructure major-version upgrades
