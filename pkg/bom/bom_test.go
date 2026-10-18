@@ -541,7 +541,8 @@ func TestBundle2190(t *testing.T) {
 }
 
 // TestBundle2200 pins the ENTIRE 2.20.0 contract: the 2.19.0 bundle plus the Discovery v2 work
-// queue (helm-charts 72704da) and the core and frontend-administrator 2.20.0 images.
+// queue (helm-charts 72704da), the core and frontend-administrator 2.20.0 images, and the
+// scheduler, auth, proxy and time-quality-monitor releases Core 2.20.0 needs.
 // Full-matrix for the same reason as TestBundle2190.
 func TestBundle2200(t *testing.T) {
 	b, ok := BundleFor(testVersion2200)
@@ -555,9 +556,9 @@ func TestBundle2200(t *testing.T) {
 
 	assert.Equal(t, map[string]Image{
 		"core":                 {Name: "core", Tag: testVersion2200},
-		"auth":                 {Name: "auth", Tag: "1.7.0"},
+		"auth":                 {Name: "auth", Tag: "1.8.0"},
 		"auth-opa-policies":    {Name: "auth-opa-policies", Tag: "1.4.1"},
-		"proxy":                {Name: "proxy", Tag: "1.0.0"},
+		"proxy":                {Name: "proxy", Tag: "1.0.1"},
 		"opa":                  {Name: "opa", Tag: "1.10.0-static"},
 		"curl":                 {Name: "curl", Tag: "8.16.0"},
 		"scheduler":            {Name: "scheduler", Tag: "1.2.0"},
@@ -566,7 +567,7 @@ func TestBundle2200(t *testing.T) {
 		"api-gateway":          {Name: "kong", Tag: "3.9.1"},
 		"provisioning":         {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
 		"keycloak-theme":       {Name: "keycloak-theme", Tag: "0.1.4"},
-		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+		"time-quality-monitor": {Name: "time-quality-monitor", Tag: "1.0.1", Repository: "ilm-private"},
 	}, b.Components)
 
 	// Every variable Core 2.20.0 adds has an in-image default, so the wiring is 2.19.0's.
