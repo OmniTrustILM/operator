@@ -1,8 +1,7 @@
 # platform_2190.yaml — a Platform with spec.version pinned explicitly to ILM 2.19.0.
 #
-# 2.19.0 is a RELEASED bundle. The operator's default has moved on to 2.20.0, so a
-# version-less CR no longer lands here; pinning spec.version is how you install 2.19.0. Two
-# ways to land on 2.19.0:
+# 2.19.0 is a RELEASED bundle but not the operator's default, so a version-less CR does not
+# land on it; pinning spec.version is how you install 2.19.0. Two ways to land on 2.19.0:
 #   - FRESH INSTALL. Pin spec.version to "2.19.0" at creation, like this sample.
 #   - UPGRADE. Setting spec.version: "2.19.0" on a running platform upgrades it: a managed
 #     broker is moved by the operator's own messaging migration engine (fencing/drain/cutover),

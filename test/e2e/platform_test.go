@@ -2560,9 +2560,8 @@ done
 			// bundled provisioning-rabbitmq Deployment, wired to the managed RabbitMQ provisioner/proxy
 			// users (defaulted from the Topology Secrets) + its bootstrap Secret, with Core's
 			// PROVISIONING_API_URL pointing at its in-cluster Service. This block pins no
-			// spec.version, so it runs the operator's default bundle (2.20.0), which — like 2.18.0
-			// and 2.19.0 before it — pins the provisioning image to the released 1.0.0 tag, so the pod actually
-			// PULLS and RUNS: we therefore assert the workload reaches Available, not merely that it
+			// spec.version, so it runs the operator's default bundle (2.20.0), which pins the
+			// provisioning image to the released 1.0.0 tag, so the pod actually PULLS and RUNS: we therefore assert the workload reaches Available, not merely that it
 			// schedules. We also keep the operator-side contract checks: the Deployment is rendered
 			// and the bootstrap Secret is consumed by reference (never inlined).
 			By("verifying the provisioning-rabbitmq Deployment exists")

@@ -33,9 +33,8 @@ import (
 // NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
 // (Bundle.Released), made whenever the operator is ready to change what a version-less
 // fresh install lands on — a newer released bundle can exist, reachable via an explicit
-// spec.version, before DefaultVersion moves to it. Today it names 2.20.0, which is ALSO the
-// newest released bundle: the 2.20.0 release-day change marked the bundle Released and moved
-// DefaultVersion to it together, as the 2.19.0 one did.
+// spec.version, before DefaultVersion moves to it. Today it ALSO names the newest released
+// bundle: release day marks a bundle Released and moves DefaultVersion to it together.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so

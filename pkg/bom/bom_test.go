@@ -551,7 +551,7 @@ func TestBundle2200(t *testing.T) {
 	assert.True(t, b.HasProvisioning)
 
 	assert.Contains(t, SupportedVersions(), testVersion2200)
-	assert.Equal(t, testVersion2200, DefaultVersion, "the release-day change moved the fresh-install default to 2.20.0")
+	assert.Equal(t, testVersion2200, DefaultVersion, "2.20.0 is the fresh-install default")
 
 	assert.Equal(t, map[string]Image{
 		"core":                 {Name: "core", Tag: testVersion2200},
