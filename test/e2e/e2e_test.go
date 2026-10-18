@@ -718,9 +718,9 @@ spec:
 	//   - "matrix-upgrade": a managed Platform pinned to 2.17.0 reaches Available, UPGRADES in
 	//     place to 2.18.0, a downgrade is refused, then 2.19.0 lands as an ORDINARY additive
 	//     upgrade because that CR pins spec.messaging.virtualHost (a pinned vhost never renames,
-	//     so no migration triggers), and its deletionPolicy=Delete teardown reclaims every
-	//     managed CR;
-	//   - "matrix-preview": a FRESH platform pinned to 2.19.0 comes up on the 2.19.0 contract;
+	//     so no migration triggers), 2.20.0 follows as another additive upgrade, and its
+	//     deletionPolicy=Delete teardown reclaims every managed CR;
+	//   - "matrix-preview": a FRESH platform pinned to 2.20.0 comes up on the 2.20.0 contract;
 	//   - "matrix-migration": an UNPINNED managed 2.18.0 platform is bumped to 2.19.0 and the
 	//     messaging migration runs end-to-end — producers fenced, the source virtual host drained,
 	//     the staged cutover onto the "/" vhost, the source topology reclaimed, the workloads

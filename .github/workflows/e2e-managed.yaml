@@ -143,7 +143,7 @@ jobs:
       matrix:
         # One entry per managed Ginkgo Context label (see test/e2e/platform_test.go). The version
         # matrix is THREE labels: 'matrix-upgrade' (2.17.0 -> 2.18.0 -> downgrade refused -> 2.19.0
-        # on a pinned vhost -> Delete reclaim), 'matrix-preview' (the fresh 2.19.0 install) and
+        # on a pinned vhost -> 2.20.0 -> Delete reclaim), 'matrix-preview' (the fresh 2.20.0 install) and
         # 'matrix-migration' (the 2.18.0 -> 2.19.0 messaging migration: fence, drain, cutover,
         # source reclaim). They used to be one Context that did the bring-ups serially with a
         # node-freeing barrier between them, which made it the tier's longest pole; on separate
