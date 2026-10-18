@@ -128,8 +128,8 @@ Omitting `spec.version` — the platform version, distinct from those engine ver
 ```bash
 kubectl get platform -n ilm -w
 # NAME   PHASE         VERSION   READY   AGE
-# ilm    Progressing   2.19.0    False   …
-# ilm    Running       2.19.0    True    …
+# ilm    Progressing   2.20.0    False   …
+# ilm    Running       2.20.0    True    …
 ```
 
 `READY` is the `Available` condition — `Core` and `auth` both ready — and `Running` means that readiness was measured, not assumed. Reaching it takes a few minutes on a first install, because the managed database, broker, and Keycloak are provisioned and become ready in turn.
@@ -405,7 +405,7 @@ A complete, validated example is [`platform_managed_rabbitmq.yaml`](https://gith
 
 **Prerequisite.** The operator detects the `rabbitmq.com` CRDs; it does not install them. Until the Cluster Operator is present the platform reports `MessagingReady=False` with reason `RabbitMQNotInstalled`; until the Messaging Topology Operator is present, reason `TopologyOperatorNotInstalled`. Neither is a hard failure.
 
-**What the operator creates.** A `RabbitmqCluster` named `<platform>-messaging` plus the full messaging topology the platform requires. The topology is **version-bundled**: for the default 2.19.0 bundle it is 1 vhost (`/`), 5 users (`administrator`, `provisioner`, `proxy`, `core`, `monitor`), their 5 permission sets, 2 exchanges (`ilm` direct and `ilm-proxy` topic), 11 queues (the 7 `core`/`core.*` queues, `provider.status-poll`, and the 3 `time-quality.*` queues), and 10 bindings. Every vhost-bound object name is scoped by the vhost — `<cluster>-default-…` for `/` — while users are broker-global and unscoped, so their generated Secret names stay stable. The 2.18.0 bundle ships the `czertainly` vhost with unscoped names, 2 `czertainly*` exchanges, 10 queues, and 9 bindings; the legacy 2.17.0 bundle ships a single user.
+**What the operator creates.** A `RabbitmqCluster` named `<platform>-messaging` plus the full messaging topology the platform requires. The topology is **version-bundled**: for the default 2.20.0 bundle it is 1 vhost (`/`), 5 users (`administrator`, `provisioner`, `proxy`, `core`, `monitor`), their 5 permission sets, 2 exchanges (`ilm` direct and `ilm-proxy` topic), 12 queues (the 7 `core`/`core.*` queues, `provider.status-poll`, `provider.discovery-work`, and the 3 `time-quality.*` queues), and 11 bindings. Every vhost-bound object name is scoped by the vhost — `<cluster>-default-…` for `/` — while users are broker-global and unscoped, so their generated Secret names stay stable. The 2.19.0 bundle has no `provider.discovery-work` queue, so 11 queues and 10 bindings. The 2.18.0 bundle ships the `czertainly` vhost with unscoped names, 2 `czertainly*` exchanges, 10 queues, and 9 bindings; the legacy 2.17.0 bundle ships a single user.
 
 The Messaging Topology Operator generates one `<user>-user-credentials` Secret per user; the operator wires Core and scheduler to the `<platform>-messaging` Service and the **core-user** Secret through `secretKeyRef`, exactly as it wires an external broker. You create **no** broker Secret in managed mode.
 

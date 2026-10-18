@@ -1,7 +1,7 @@
 # Platform versioning, templates & upgrades — design
 
-> Status: **all five steps implemented (committed, green)**. Three released bundles ship —
-> 2.17.0, 2.18.0 and 2.19.0, the last of which is `DefaultVersion` — with per-version
+> Status: **all five steps implemented (committed, green)**. Four released bundles ship —
+> 2.17.0, 2.18.0, 2.19.0 and 2.20.0, the last of which is `DefaultVersion` — with per-version
 > wiring/feature-gating, the downgrade guard, the `docs/site/upgrading.md` procedures, and the Kind
 > e2e version matrix (`matrix-upgrade`, `matrix-migration`). The 2.18.0 → 2.19.0 move renames
 > the managed messaging virtual host, so it is carried out by the **messaging-migration engine**
@@ -42,7 +42,7 @@ images match the wiring, which is why the quickstart works on 2.18.0 images).
 
 1. The operator wires **each** supported platform version correctly from per-version **data**
    (env names, component set, topology) — never one version's contract hard-coded for all.
-2. The default version is the operator's **newest released** bundle (**2.19.0**). Newest and
+2. The default version is the operator's **newest released** bundle (**2.20.0**). Newest and
    default are separate decisions — a released bundle can exist, reachable via an explicit
    `spec.version`, before `DefaultVersion` moves to it (see `DefaultVersion`'s own doc in
    `pkg/bom/bom.go`).

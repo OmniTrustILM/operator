@@ -1,0 +1,55 @@
+# platform_2200.yaml — a Platform with spec.version pinned explicitly to ILM 2.20.0.
+#
+# 2.20.0 is a RELEASED bundle and the operator's DEFAULT: a version-less CR lands on it at
+# creation. This sample pins it anyway, which is the GitOps-recommended form — the manifest
+# states the platform version it was reviewed against, so a later operator build that moves the
+# default cannot change what this CR installs. Two ways to land on 2.20.0:
+#   - FRESH INSTALL. Pin spec.version to "2.20.0" at creation, like this sample (or omit it and
+#     take the operator's default, which pins the same version on create).
+#   - UPGRADE. Setting spec.version: "2.20.0" on a 2.19.0 platform is an ordinary additive
+#     apply: the virtual host and the exchanges do not change. An external broker needs the
+#     provider.discovery-work queue, its binding and Core's read permission on it BEFORE the
+#     move. See docs/site/upgrading.md (Worked example: 2.19.0 to 2.20.0).
+#
+# WHAT 2.20.0 CHANGES (the operator wires all of it — you configure no env-var names):
+#   - images: core and frontend-administrator 2.20.0, scheduler 1.2.0, auth 1.8.0,
+#     time-quality-monitor 1.0.1,
+#   - the managed messaging topology adds the provider.discovery-work queue, its binding from the
+#     ilm exchange and Core's read permission on it,
+#   - Core's startup probe allows about 30 minutes (failureThreshold 180), because a 2.20.0 schema
+#     migration can outlast the old budget on a large installation.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - An external PostgreSQL reachable at database.host:port with database.name.
+#   - An external AMQP broker reachable at messaging.host:port (+ virtualHost).
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
+#   # DB credentials — operator reads keys "username" and "password":
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>
+#   # Messaging credentials — operator reads keys "username" and "password":
+#   kubectl create secret generic ilm-messaging -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<broker-password>
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.20.0"                   # pin the bundle explicitly (recommended for GitOps; this is also the operator's default)
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging

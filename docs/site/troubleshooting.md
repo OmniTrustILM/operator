@@ -23,9 +23,9 @@ kubectl get platform -n ilm
 
 ```text
 NAME   PHASE        VERSION   READY   AGE
-ilm    Progressing  2.19.0    False   20s
+ilm    Progressing  2.20.0    False   20s
 # …shortly after the required workloads report ready…
-ilm    Running      2.19.0    True    2m
+ilm    Running      2.20.0    True    2m
 ```
 
 The list view shows **Phase**, **Version** (`.status.observedVersion`), **Ready** (the `Available` condition), and **Age**. Adding `-o wide` shows one more column, **Edge** (the `EdgeReady` condition):

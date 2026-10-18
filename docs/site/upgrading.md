@@ -9,7 +9,7 @@ The platform version is selected by **`spec.version`**, and the set of versions 
 1. **The operator binary.** Newer operator builds ship newer — and additional — platform version bundles. Moving to a platform version the running operator does not carry means upgrading the operator first.
 2. **`spec.version`.** Moving it to a version the running operator supports rolls the platform's stateless tier onto that release's images and wiring.
 
-This page covers both: which versions are supported, how one is resolved, the upgrade procedure, two worked examples — including the messaging migration the operator runs on your behalf — and the guard that protects a managed database, broker, or Keycloak from a one-way major-version jump.
+This page covers both: which versions are supported, how one is resolved, the upgrade procedure, three worked examples — including the messaging migration the operator runs on your behalf — and the guard that protects a managed database, broker, or Keycloak from a one-way major-version jump.
 
 ## Supported versions
 
@@ -17,7 +17,8 @@ This operator build ships the following tested bundles. Each bundle pins, for on
 
 | Platform version | PostgreSQL | RabbitMQ | Keycloak |
 | ---------------- | ---------- | -------- | -------- |
-| **2.19.0** (default) | 18 | 4.3.1 | 26.6.3 |
+| **2.20.0** (default) | 18 | 4.3.1 | 26.6.3 |
+| 2.19.0 | 18 | 4.3.1 | 26.6.3 |
 | 2.18.0 | 18 | 4.3.1 | 26.6.3 |
 | 2.17.0 | 16 | 4.2.0 | 26.4.0 |
 
@@ -25,7 +26,7 @@ This operator build ships the following tested bundles. Each bundle pins, for on
 They record the PostgreSQL, RabbitMQ, and Keycloak versions each platform release was tested end to end against, and they are the reference the [major-version guard](#managed-infrastructure-major-version-upgrades) reasons over. They are **not** injected when you omit a managed block's `version` — in that case the operator sends no image at all and the upstream operator applies its own default, which is not necessarily the version in this table. Pin `database.managed.version` and `messaging.managed.version` deliberately, as described in [The Platform CR](./custom-resources/platform.md).
 :::
 
-`2.19.0` is the operator's **default** — the bundle selected when `spec.version` is empty at creation. It is not necessarily the newest bundle a build carries: the default moves only through a separate, deliberate change, once a release is fully supported.
+`2.20.0` is the operator's **default** — the bundle selected when `spec.version` is empty at creation. It is not necessarily the newest bundle a build carries: the default moves only through a separate, deliberate change, once a release is fully supported.
 
 You select a bundle with `spec.version`:
 
@@ -34,7 +35,7 @@ apiVersion: otilm.com/v1alpha1
 kind: Platform
 metadata: { name: ilm, namespace: ilm }
 spec:
-  version: "2.19.0"     # a tested bundle; omitting it pins the operator's default at creation
+  version: "2.20.0"     # a tested bundle; omitting it pins the operator's default at creation
   database:  { mode: managed }
   messaging: { mode: managed }
 ```
@@ -59,7 +60,7 @@ The version the operator actually reconciled against is reported on **`status.ob
 ```bash
 kubectl get platform -n ilm
 # NAME   PHASE     VERSION   READY   AGE
-# ilm    Running   2.19.0    True    3m
+# ilm    Running   2.20.0    True    3m
 ```
 
 `status.observedVersion` always reflects the *resolved* version — the concrete version string even when `spec.version` is empty. While a [messaging migration](#worked-example-2180-to-2190-the-messaging-migration) holds a platform back, it reports the version the platform is still **running**, not the one it is moving to.
@@ -82,7 +83,7 @@ kubectl describe platform ilm -n ilm
 # Conditions:
 #   Type      Status  Reason              Message
 #   Degraded  True    UnsupportedVersion  platform version "9.9.9" is not supported by this
-#                                         operator; supported versions: 2.17.0, 2.18.0, 2.19.0
+#                                         operator; supported versions: 2.17.0, 2.18.0, 2.19.0, 2.20.0
 ```
 
 A `Warning` event with reason `UnsupportedVersion` is recorded alongside the condition.
@@ -268,6 +269,36 @@ One edit that both reverts `spec.version` **and** changes a component's `workloa
   For an external broker the trigger is an **exchange rename** — the target bundle no longer serving an exchange the running version publishes to — not a virtual-host change, since an external platform's virtual host is your own spec value under both bundles. A purely additive change needs no acknowledgement.
 
 - **A platform that already pins `spec.messaging.virtualHost` to a virtual host both bundles resolve to.** With no rename there is nothing to migrate, and the version bump applies as an ordinary additive update. The pin must **predate** the move; one introduced in the same update is refused, as described above.
+
+## Worked example: 2.19.0 to 2.20.0
+
+This move keeps the virtual host and the exchanges, so it is an ordinary additive apply, not a [messaging migration](#worked-example-2180-to-2190-the-messaging-migration):
+
+```yaml
+spec:
+  version: "2.20.0"     # was "2.19.0"
+```
+
+```bash
+kubectl apply -f platform.yaml
+kubectl get platform ilm -n ilm -w   # observedVersion 2.19.0 to 2.20.0, READY True
+```
+
+### What the operator does for you
+
+| Change | How it is handled |
+|---|---|
+| **Application images** — `core` and `frontend-administrator` 2.19.0 to 2.20.0, `scheduler` 1.1.1 to 1.2.0, `auth` 1.7.0 to 1.8.0, `time-quality-monitor` 1.0.0 to 1.0.1 | Rolled out by the Deployment update. Every other component tag is identical between the two releases. |
+| **Managed RabbitMQ topology** — the new `provider.discovery-work` queue, its binding from the `ilm` exchange, and the `core` user's read permission on it | The Messaging Topology Operator reconciles **additively**: the queue and binding are created and the permission is widened. Nothing is renamed or removed. |
+| **Core's startup budget** — the startup probe's `failureThreshold` goes from 45 to 180, about 30 minutes | A 2.20.0 schema migration rewrites and indexes a large table, which can outlast the old budget on a large installation. A pod killed mid-migration rolls the migration back and starts over. |
+| **Database schema** | Core 2.20.0 self-migrates on boot (Flyway). The operator orders the rollout and gates readiness; it never runs SQL itself. |
+
+### What you must decide
+
+- **An external broker needs the new queue first.** Create the `provider.discovery-work` queue (durable), bind it to the `ilm` exchange with routing key `provider.discovery-work`, and extend the read permission of Core's broker user to cover it, **before** you move `spec.version`. The operator does not refuse this move on an external broker, because nothing is renamed, but the broker refuses Core's consumer without the permission and Core crash-loops.
+- **A `Proxy` follows the operator, not `spec.version`.** Its image comes from the operator's default bundle, so the operator build whose default is 2.20.0 rolls every `Proxy` from proxy 1.0.0 to 1.0.1, whatever version its platform runs. To hold one back, pin `spec.image.tag` on that `Proxy` before you upgrade the operator.
+- **A larger database may need a larger startup budget.** If the migration can outlast about 30 minutes on your data, set `spec.core.probes.startup` explicitly; the CR's probe wins over the bundle's budget.
+- **Back up PostgreSQL first.** The Core schema migration is one-way. Verify a restorable backup before applying.
 
 ## Managed-infrastructure major-version upgrades
 
