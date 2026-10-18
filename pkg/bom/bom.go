@@ -112,6 +112,11 @@ const componentAPIGateway = "api-gateway"
 // same pattern as componentAuthOPAPolicies above).
 const componentKeycloakTheme = "keycloak-theme"
 
+// componentTimeQualityMonitor is the operator's component identity for the Core
+// time-quality-monitor sidecar image, reused as both the bundle map key and the published
+// image name.
+const componentTimeQualityMonitor = "time-quality-monitor"
+
 // Tags shared by every CURRENT bundle: opa and curl are third-party/base images
 // pinned identically across all supported platform versions today. This is a dedup of
 // today's data, not a promise of cross-version alignment — a bundle that needs a
@@ -328,19 +333,19 @@ var bundles = map[string]Bundle{
 
 // images2190 is the 2.19.0 image set (see the 2.19.0 bundle for where it was verified).
 var images2190 = map[string]Image{
-	"core":                   {Name: "core", Tag: version2190},
-	"auth":                   {Name: "auth", Tag: "1.7.0"},
-	componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-	ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
-	"opa":                    {Name: "opa", Tag: tagOpa1100Static},
-	"curl":                   {Name: "curl", Tag: tagCurl8160},
-	"scheduler":              {Name: "scheduler", Tag: "1.1.1"},
-	componentFeAdministrator: {Name: imageNameFeAdministrator, Tag: version2190},
-	componentUtils:           {Name: imageNameUtils, Tag: "1.0.2"},
-	componentAPIGateway:      {Name: "kong", Tag: "3.9.1"},
-	"provisioning":           {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
-	componentKeycloakTheme:   {Name: componentKeycloakTheme, Tag: "0.1.4"},
-	"time-quality-monitor":   {Name: "time-quality-monitor", Tag: "1.0.0", Repository: "ilm-private"},
+	"core":                      {Name: "core", Tag: version2190},
+	"auth":                      {Name: "auth", Tag: "1.7.0"},
+	componentAuthOPAPolicies:    {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
+	ComponentProxy:              {Name: "proxy", Tag: "1.0.0"},
+	"opa":                       {Name: "opa", Tag: tagOpa1100Static},
+	"curl":                      {Name: "curl", Tag: tagCurl8160},
+	"scheduler":                 {Name: "scheduler", Tag: "1.1.1"},
+	componentFeAdministrator:    {Name: imageNameFeAdministrator, Tag: version2190},
+	componentUtils:              {Name: imageNameUtils, Tag: "1.0.2"},
+	componentAPIGateway:         {Name: "kong", Tag: "3.9.1"},
+	"provisioning":              {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
+	componentKeycloakTheme:      {Name: componentKeycloakTheme, Tag: "0.1.4"},
+	componentTimeQualityMonitor: {Name: componentTimeQualityMonitor, Tag: "1.0.0", Repository: "ilm-private"},
 }
 
 // images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0,
@@ -356,7 +361,7 @@ var images2200 = func() map[string]Image {
 	// Core 2.20.0 relies on proxy 1.0.1 forwarding connector error answers and query strings.
 	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1"}
 	// 1.0.0 runs as a named user, which runAsNonRoot without a runAsUser cannot verify.
-	m["time-quality-monitor"] = Image{Name: "time-quality-monitor", Tag: "1.0.1", Repository: "ilm-private"}
+	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: "ilm-private"}
 	return m
 }()
 
