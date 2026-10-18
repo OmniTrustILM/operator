@@ -65,6 +65,10 @@ const (
 	DefaultImageRepository = "ilm"
 )
 
+// privateImageRepository holds the images that need registry credentials to pull. Only
+// opt-in components ship from it, so a default install pulls nothing a user must log in for.
+const privateImageRepository = "ilm-private"
+
 // Bundle version keys (also used as component tags for the version-aligned
 // components core + frontend-administrator). Every bundle is keyed by its OWN
 // version const — never by DefaultVersion — so flipping DefaultVersion can never
@@ -222,7 +226,7 @@ var bundles = map[string]Bundle{
 			"core":                   {Name: "core", Tag: version2180},
 			"auth":                   {Name: "auth", Tag: "1.6.3"},
 			componentAuthOPAPolicies: {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-			ComponentProxy:           {Name: "proxy", Tag: "1.0.0"},
+			ComponentProxy:           {Name: "proxy", Tag: "1.0.0", Repository: privateImageRepository},
 			"opa":                    {Name: "opa", Tag: tagOpa1100Static},
 			"curl":                   {Name: "curl", Tag: tagCurl8160},
 			"scheduler":              {Name: "scheduler", Tag: "1.1.0"},
@@ -278,8 +282,7 @@ var bundles = map[string]Bundle{
 	},
 	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
 	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
-	// queue (see messagingTopology2200), the core and frontend-administrator 2.20.0 images,
-	// scheduler 1.2.0, auth 1.8.0, proxy 1.0.1 and time-quality-monitor 1.0.1.
+	// queue (see messagingTopology2200) and the images2200 image set.
 	// The wiring is 2.19.0's, because every variable Core 2.20.0 adds has an in-image default.
 	version2200: {
 		Components:      images2200,
@@ -336,7 +339,7 @@ var images2190 = map[string]Image{
 	"core":                      {Name: "core", Tag: version2190},
 	"auth":                      {Name: "auth", Tag: "1.7.0"},
 	componentAuthOPAPolicies:    {Name: componentAuthOPAPolicies, Tag: "1.4.1"},
-	ComponentProxy:              {Name: "proxy", Tag: "1.0.0"},
+	ComponentProxy:              {Name: "proxy", Tag: "1.0.0", Repository: privateImageRepository},
 	"opa":                       {Name: "opa", Tag: tagOpa1100Static},
 	"curl":                      {Name: "curl", Tag: tagCurl8160},
 	"scheduler":                 {Name: "scheduler", Tag: "1.1.1"},
@@ -345,7 +348,7 @@ var images2190 = map[string]Image{
 	componentAPIGateway:         {Name: "kong", Tag: "3.9.1"},
 	"provisioning":              {Name: "provisioning-rabbitmq", Tag: "1.0.0"},
 	componentKeycloakTheme:      {Name: componentKeycloakTheme, Tag: "0.1.4"},
-	componentTimeQualityMonitor: {Name: componentTimeQualityMonitor, Tag: "1.0.0", Repository: "ilm-private"},
+	componentTimeQualityMonitor: {Name: componentTimeQualityMonitor, Tag: "1.0.0", Repository: privateImageRepository},
 }
 
 // images2200 is the 2.19.0 image set with core and frontend-administrator at 2.20.0,
@@ -359,9 +362,9 @@ var images2200 = func() map[string]Image {
 	// Client-certificate login behind a proxy needs auth 1.8.0 with Core 2.20.0.
 	m["auth"] = Image{Name: "auth", Tag: "1.8.0"}
 	// Core 2.20.0 relies on proxy 1.0.1 forwarding connector error answers and query strings.
-	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1"}
+	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1", Repository: privateImageRepository}
 	// 1.0.0 runs as a named user, which runAsNonRoot without a runAsUser cannot verify.
-	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: "ilm-private"}
+	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: privateImageRepository}
 	return m
 }()
 

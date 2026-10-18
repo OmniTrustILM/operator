@@ -70,8 +70,8 @@ func TestBuildDeploymentImageFromBOM(t *testing.T) {
 	require.True(t, ok)
 	img, ok := b.Lookup(bom.ComponentProxy)
 	require.True(t, ok)
-	assert.Contains(t, c.Image, "proxy:"+img.Tag)
-	assert.Contains(t, c.Image, bom.DefaultImageRegistry)
+	assert.Equal(t, bom.DefaultImageRegistry+"/ilm-private/proxy:"+img.Tag, c.Image,
+		"the proxy is published only to the private repository")
 }
 
 func TestBuildDeploymentImageOverride(t *testing.T) {

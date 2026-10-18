@@ -78,7 +78,21 @@ spec:
     name: dc-east-config
 ```
 
-The image comes from the operator's own bill of materials, so a proxy tracks the operator's validated version unless you override it. Apply it and watch the phase:
+The image comes from the operator's own bill of materials, so a proxy tracks the operator's validated version unless you override it. It is published to the private `ilm-private` repository on `hub.omnitrustregistry.com`, so pulling it needs a registry credential. Unless your nodes or the namespace's service account already carry one, create a `docker-registry` Secret in the proxy's namespace and name it in `spec.image.pullSecrets`:
+
+```bash
+kubectl create secret docker-registry ilm-registry -n <namespace> \
+  --docker-server=hub.omnitrustregistry.com \
+  --docker-username=<user> --docker-password=<password>
+```
+
+```yaml
+spec:
+  image:
+    pullSecrets: [ ilm-registry ]
+```
+
+Apply it and watch the phase:
 
 ```bash
 kubectl apply -f proxy.yaml
