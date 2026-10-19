@@ -195,12 +195,11 @@ The flip itself is an ordinary PR to `main`, not part of the release branch:
    two flags are independent, so a released bundle can be reachable by explicit `spec.version`
    before the default moves) but it is the **exception**: do it only deliberately, and say why in
    the PR description.
-3. Add the next version's bundle as a **preview** (`Released: false`) in the same PR, starting
-   as a copy of the bundle you just released, with its BOM test and golden render like any
-   bundle. Development platforms set `spec.version: develop`, which follows the newest bundle an
-   operator build carries, so `main` must always carry one ahead of the last release. Contract
-   changes for the next release (a new queue, a permission, a setting without a default) land in
-   that preview before, or together with, the component change that needs them.
+3. Do not add the next version's bundle here. It opens as a **preview** (`Released: false`)
+   with the first change the next release needs from the operator (a new queue, a permission, a
+   setting without a default), before or together with the component change that needs it. It
+   starts as a copy of the newest bundle, with its BOM test and golden render like any bundle.
+   Until it exists, `spec.version: develop` follows the newest released bundle.
 4. Update the supported-version table (the engine matrix) and the default marker in the
    **canonical** user guide — [docs/site/upgrading.md](site/upgrading.md), under its
    *Supported versions* heading — and drop the preview wording from any sample that pinned the
