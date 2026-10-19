@@ -7,8 +7,8 @@
 #   - FRESH INSTALL. Pin spec.version to "2.20.0" at creation, like this sample (or omit it and
 #     take the operator's default, which pins the same version on create).
 #   - UPGRADE. Setting spec.version: "2.20.0" on a 2.19.0 platform is an ordinary additive
-#     apply: the virtual host and the exchanges do not change. An external broker needs the
-#     provider.discovery-work queue, its binding and Core's read permission on it BEFORE the
+#     apply: the virtual host and the exchanges do not change. An external broker needs a
+#     provider.discovery-work queue, fed from the ilm exchange and readable by Core, BEFORE the
 #     move. See docs/site/upgrading.md (Worked example: 2.19.0 to 2.20.0).
 #
 # WHAT 2.20.0 CHANGES (the operator wires all of it — you configure no env-var names):

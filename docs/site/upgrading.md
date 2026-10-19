@@ -300,7 +300,7 @@ kubectl get platform ilm -n ilm -w   # observedVersion 2.19.0 to 2.20.0, READY T
 
 ### What you must decide
 
-- **An external broker needs the new queue first.** Before you move `spec.version`, create on the platform's virtual host a durable `provider.discovery-work` queue, a binding to it from the `ilm` exchange with routing key `provider.discovery-work`, and read permission on it for Core's broker user. The operator does not refuse this move on an external broker, because nothing is renamed, but the broker refuses Core's consumer without the permission and Core crash-loops. For example, with [rabbitmqadmin v2](https://github.com/rabbitmq/rabbitmqadmin-ng):
+- **An external broker needs the new queue first.** Before you move `spec.version`, set up a durable `provider.discovery-work` queue that receives what Core publishes to the `ilm` exchange with the routing key `provider.discovery-work`, and let Core's broker user read from it. The operator does not refuse this move on an external broker, because nothing is renamed, but Core cannot consume discovery work without it. With `brokerType: servicebus`, that is a durable subscription `provider.discovery-work` on the `ilm` topic, which Core filters by the `routingKey` property. With `brokerType: rabbitmq`, it is a queue on `spec.messaging.virtualHost` bound to the `ilm` exchange, for example on `/` with [rabbitmqadmin v2](https://github.com/rabbitmq/rabbitmqadmin-ng):
 
   ```bash
   rabbitmqadmin --vhost / queues declare --name provider.discovery-work --type classic --durable true
