@@ -487,6 +487,12 @@ type LoggingSpec struct {
 	// bill of materials names, so the underlying logger differs across platform versions.
 	// +kubebuilder:default=INFO
 	Level string `json:"level,omitempty"`
+	// Format is the format of Core's console log: "text", or one JSON object per line with
+	// "ecs" or "logstash". Empty leaves Core's own default (text). It renders only on a
+	// platform version whose bill of materials names a log format variable (2.20.0+).
+	// +kubebuilder:validation:Enum=text;ecs;logstash
+	// +optional
+	Format string `json:"format,omitempty"`
 }
 
 // OutboundProxySpec configures outbound HTTP(S) proxy support for platform components.

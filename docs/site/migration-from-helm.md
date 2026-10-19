@@ -74,6 +74,7 @@ Everything that applies to **every** component now lives under one consolidated 
 | `global.hostName` / `hostName` | `spec.common.hostName` (canonical public FQDN) | COVERED |
 | `additionalEnv.variables` | `spec.additionalEnv` | COVERED |
 | `logging.level` | `spec.common.logging.level` | COVERED |
+| `logging.format` | `spec.common.logging.format` | COVERED |
 | `logging.audit` | — | UNMAPPED (platform-config, not operator-modeled) |
 | `global.httpProxy` / `httpsProxy` / `noProxy` | `spec.common.proxy.{http,https,noProxy}` (+ `enabled`) | COVERED |
 | `javaOpts` (if set) | per-component `JAVA_OPTS` **env** on `core`, `scheduler`, `provisioning.deploy` — **and on `auth`, where it does nothing**: `auth` is a .NET (ASP.NET Core) service, so delete that entry and use the .NET runtime's own `DOTNET_*` variables if you need to tune it. The special-case `spec.javaOpts` was **removed** | COVERED (mapped to env; not on fe/opa/gateway) |

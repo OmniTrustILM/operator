@@ -1652,6 +1652,16 @@ spec:
                     description: Logging configures the platform log level for all
                       components.
                     properties:
+                      format:
+                        description: |-
+                          Format is the format of Core's console log: "text", or one JSON object per line with
+                          "ecs" or "logstash". Empty leaves Core's own default (text). It renders only on a
+                          platform version whose bill of materials names a log format variable (2.20.0+).
+                        enum:
+                        - text
+                        - ecs
+                        - logstash
+                        type: string
                       level:
                         default: INFO
                         description: |-

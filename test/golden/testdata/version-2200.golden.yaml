@@ -159,7 +159,7 @@ spec:
             secretKeyRef:
               key: connection-string
               name: auth-db
-        image: hub.omnitrustregistry.com/ilm/auth:1.7.0
+        image: hub.omnitrustregistry.com/ilm/auth:1.8.0
         imagePullPolicy: IfNotPresent
         name: auth
         ports:
@@ -391,6 +391,8 @@ spec:
           value: "true"
         - name: MESSAGING_TIME_QUALITY_ENABLED
           value: "false"
+        - name: PLATFORM_LOG_FORMAT
+          value: ecs
         - name: JDBC_USERNAME
           valueFrom:
             secretKeyRef:

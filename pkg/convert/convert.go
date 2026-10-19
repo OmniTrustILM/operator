@@ -317,8 +317,8 @@ func (r *Result) mapProxy(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true, HTTP: http, HTTPS: https, NoProxy: no}
 }
 
-// mapLogging maps the top-level logging.level onto spec.common.logging.level. The chart's
-// logging.audit toggle has no CR field and is flagged unmapped.
+// mapLogging maps the top-level logging.level and logging.format onto spec.common.logging.
+// The chart's logging.audit toggle has no CR field and is flagged unmapped.
 func (r *Result) mapLogging(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	lg := mapOf(values["logging"])
 	if len(lg) == 0 {
@@ -326,6 +326,10 @@ func (r *Result) mapLogging(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	}
 	if lvl := str(lg["level"]); lvl != "" {
 		spec.Common.Logging.Level = lvl
+	}
+	// The chart trims and lower-cases the format; the CRD enum accepts only the lower-case names.
+	if f := strings.ToLower(strings.TrimSpace(str(lg["format"]))); f != "" {
+		spec.Common.Logging.Format = f
 	}
 	if _, ok := lg["audit"]; ok {
 		r.unmapped = append(r.unmapped, "logging.audit (no Platform CR field; audit logging is a platform-config concern, not operator-modeled)")
