@@ -81,12 +81,12 @@ const (
 	keycloakVersion    = "26.4.0"
 	platformVersion217 = "2.17.0"
 	platformVersion218 = "2.18.0"
-	// platformVersion219 is the 2.19.0 fixture version: the operator's newest RELEASED bundle
-	// and its DefaultVersion — used to exercise the messaging migration engine and the
-	// running-vs-requested version split on deletion.
+	// platformVersion219 is the 2.19.0 fixture version, used to exercise the messaging migration
+	// engine and the running-vs-requested version split on deletion.
 	platformVersion219 = "2.19.0"
-	// platformVersion220 is the 2.20.0 fixture version: a preview bundle whose topology only ADDS
-	// to 2.19.0's, used to prove that move applies additively.
+	// platformVersion220 is the 2.20.0 fixture version: the operator's newest RELEASED bundle and
+	// its DefaultVersion, whose topology only ADDS to 2.19.0's, used to prove that move applies
+	// additively.
 	platformVersion220 = "2.20.0"
 
 	// Repeated Ginkgo step descriptions.

@@ -1,11 +1,8 @@
 # platform_2190.yaml — a Platform with spec.version pinned explicitly to ILM 2.19.0.
 #
-# 2.19.0 is a RELEASED bundle and the operator's DEFAULT: a version-less CR lands on it at
-# creation. This sample pins it anyway, which is the GitOps-recommended form — the manifest
-# states the platform version it was reviewed against, so a later operator build that moves the
-# default cannot change what this CR installs. Two ways to land on 2.19.0:
-#   - FRESH INSTALL. Pin spec.version to "2.19.0" at creation, like this sample (or omit it and
-#     take the operator's default, which pins the same version on create).
+# 2.19.0 is a RELEASED bundle but not the operator's default, so a version-less CR does not
+# land on it; pinning spec.version is how you install 2.19.0. Two ways to land on 2.19.0:
+#   - FRESH INSTALL. Pin spec.version to "2.19.0" at creation, like this sample.
 #   - UPGRADE. Setting spec.version: "2.19.0" on a running platform upgrades it: a managed
 #     broker is moved by the operator's own messaging migration engine (fencing/drain/cutover),
 #     an external broker requires you to migrate it yourself and acknowledge the move via
@@ -45,7 +42,7 @@ metadata:
   name: ilm
   namespace: ilm
 spec:
-  version: "2.19.0"                   # pin the bundle explicitly (recommended for GitOps; this is also the operator's default)
+  version: "2.19.0"                   # pin the bundle explicitly
   database:
     mode: external
     host: postgres.example.com

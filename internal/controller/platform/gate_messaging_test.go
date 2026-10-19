@@ -196,7 +196,7 @@ func TestGateMessagingPresentClusterNotReadyWaits(t *testing.T) {
 	assert.Empty(t, applied.GetOwnerReferences(), "the managed cluster must carry no owner reference")
 
 	// A topology CR (the Vhost) must also have been applied. The fixture pins no spec.version,
-	// so it runs the DEFAULT bundle — 2.19.0, whose "/" virtual host scopes vhost-bound names
+	// so it runs the DEFAULT bundle — 2.20.0, whose "/" virtual host scopes vhost-bound names
 	// with "-default". Kept a literal (not ManagedMessagingVhostName) so a naming regression is
 	// a diff rather than a tautology; the unscoped legacy names stay frozen by the builder's
 	// own TestLegacyTopologyNamesAreFrozen, which is pinned to 2.18.0.

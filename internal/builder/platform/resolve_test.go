@@ -198,7 +198,7 @@ func TestResolveCoreEnvOverridesAppendedLast(t *testing.T) {
 func TestResolveCoreImageResolvedFromBOM(t *testing.T) {
 	// Shared registry/repository + bundle-provided core name/tag.
 	c := ResolveCore(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.19.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/core:2.20.0", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy), "default pull policy when unset")
 }
 
@@ -1098,7 +1098,7 @@ func heredocParts(t *testing.T, script string) (body, outside string) {
 // exchange the provision-instance-queue script binds the pod's queue to.
 //
 // RESOLUTION: it is the SAME proxy exchange the provisioning builder declares — the selected
-// bundle's default (2.19.0, the default: ilm-proxy; 2.18.0: czertainly-proxy) or the
+// bundle's default (2.19.0+: ilm-proxy; 2.18.0: czertainly-proxy) or the
 // spec.provisioning.deploy.exchange override. A hard-coded exchange would make Core's
 // registration retry forever on a platform whose bundle renamed it.
 //
@@ -1115,7 +1115,7 @@ func TestResolveCoreProvisionQueueInitExchangeIsVersionResolved(t *testing.T) {
 		notWant string
 	}{
 		{
-			name: "default version (2.19.0) uses the ilm proxy exchange",
+			name: "default version uses the ilm proxy exchange",
 			mutate: func(_ *otilmv1alpha1.Platform) {
 				// no extra spec setup: default version resolves without explicit mutation
 			},
@@ -1701,7 +1701,7 @@ func TestResolveCoreProbes(t *testing.T) {
 	require.NotNil(t, c.Probes.Startup)
 	require.NotNil(t, c.Probes.Startup.HTTPGet)
 	assert.Equal(t, "/api/v1/health/liveness", c.Probes.Startup.HTTPGet.Path, "chart uses liveness path for startup")
-	assert.Equal(t, int32(45), c.Probes.Startup.FailureThreshold)
+	assert.Equal(t, int32(180), c.Probes.Startup.FailureThreshold)
 }
 
 // TestResolveCoreLogFormatFollowsTheBundle pins where spec.common.logging.format renders. An unset
@@ -1781,7 +1781,7 @@ func TestResolveSchedulerBasics(t *testing.T) {
 
 func TestResolveSchedulerImage(t *testing.T) {
 	c := ResolveScheduler(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.1.1", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/scheduler:1.2.0", c.Image)
 	assert.Equal(t, "IfNotPresent", string(c.PullPolicy))
 }
 
@@ -2031,7 +2031,7 @@ func TestResolveAuthBasics(t *testing.T) {
 
 func TestResolveAuthImage(t *testing.T) {
 	c := ResolveAuth(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.7.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/auth:1.8.0", c.Image)
 }
 
 func TestResolveAuthInlineEnv(t *testing.T) {
@@ -2264,7 +2264,7 @@ func TestResolveFeAdministratorBasics(t *testing.T) {
 
 func TestResolveFeAdministratorImage(t *testing.T) {
 	c := ResolveFeAdministrator(basePlatform())
-	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.19.0", c.Image)
+	assert.Equal(t, "hub.omnitrustregistry.com/ilm/frontend-administrator:2.20.0", c.Image)
 }
 
 func TestResolveFeAdministratorNoEnv(t *testing.T) {

@@ -64,10 +64,10 @@ const (
 	goldenDir = "testdata"
 	// docSeparator joins serialized objects into a single multi-document YAML stream.
 	docSeparator = "---\n"
-	// version2190 pins a variant to the 2.19.0 bundle — the default bundle, pinned here
-	// explicitly so the variant is stable across future default moves.
+	// version2190 pins a variant to the 2.19.0 bundle.
 	version2190 = "2.19.0"
-	// version2200 pins a variant to the 2.20.0 preview bundle.
+	// version2200 pins a variant to the 2.20.0 bundle — the default bundle, pinned here
+	// explicitly so the variant is stable across future default moves.
 	version2200 = "2.20.0"
 )
 
@@ -297,14 +297,12 @@ func managedDBNoPoolerVariant() variant {
 	return variant{name: "managed-db-no-pooler", platform: platformFor(spec)}
 }
 
-// version2190Variant: a platform PINNED to the 2.19.0 bundle — the default bundle, pinned here
-// explicitly so the variant is stable across future default moves — with proxy support on so
+// version2190Variant: a platform PINNED to the 2.19.0 bundle, with proxy support on so
 // the provision-instance-queue init container renders too. It is the byte-for-byte record of
 // what "spec.version: 2.19.0" ships: the 2.19.0 image tags (core / frontend-administrator
 // 2.19.0, auth 1.7.0, scheduler 1.1.1), the 2.19.0 wiring (the LOGGING_LEVEL_COM_OTILM rename),
 // and the renamed proxy exchange (czertainly-proxy → ilm-proxy) in the queue-registration
-// request. Every other variant now renders the same 2.19.0 default, so this variant's value is
-// the explicit pin plus the proxy path, not a version delta.
+// request.
 func version2190Variant() variant {
 	spec := fullFeatureSpec()
 	spec.Version = version2190

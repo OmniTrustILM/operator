@@ -196,8 +196,8 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PR
 # (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix-upgrade / matrix-preview
 # / matrix-migration) so each block runs in its OWN parallel job on its OWN fresh Kind cluster — no
 # shared-cluster install/uninstall collisions. The version matrix is THREE blocks: 'matrix-upgrade'
-# (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 on a pinned vhost -> Delete
-# reclaim), 'matrix-preview' (the fresh managed 2.19.0 install) and 'matrix-migration' (the
+# (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 on a pinned vhost -> 2.20.0
+# -> Delete reclaim), 'matrix-preview' (the fresh managed 2.20.0 install) and 'matrix-migration' (the
 # 2.18.0 -> 2.19.0 messaging migration end to end). All three also carry the umbrella label 'matrix'.
 E2E_MANAGED_LABEL ?= managed
 
@@ -225,9 +225,10 @@ test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ALL version-ma
 	# blocks. Sequentially, in this one cluster, that is:
 	#   'matrix-upgrade':   bring up ONE managed 2.17.0 stack, upgrade it in place to 2.18.0, prove
 	#                       the downgrade refusal, then take 2.19.0 as an ORDINARY additive upgrade
-	#                       (that CR pins its vhost, so no migration triggers), and finally prove
-	#                       deletionPolicy=Delete reclaims every managed CR (freeing this node);
-	#   'matrix-preview':   bring up a FRESH 2.19.0 platform and assert the 2.19.0 contract;
+	#                       (that CR pins its vhost, so no migration triggers), then 2.20.0 the
+	#                       same way, and finally prove deletionPolicy=Delete reclaims every
+	#                       managed CR (freeing this node);
+	#   'matrix-preview':   bring up a FRESH 2.20.0 platform and assert the 2.20.0 contract;
 	#   'matrix-migration': bring up an UNPINNED managed 2.18.0 platform and drive the real
 	#                       2.18.0 -> 2.19.0 messaging migration (fence, drain, deadline exit,
 	#                       staged cutover, source reclaim) end to end.

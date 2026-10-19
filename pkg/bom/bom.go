@@ -33,9 +33,8 @@ import (
 // NEWEST released one: moving it is a separate, deliberate decision from releasing a bundle
 // (Bundle.Released), made whenever the operator is ready to change what a version-less
 // fresh install lands on — a newer released bundle can exist, reachable via an explicit
-// spec.version, before DefaultVersion moves to it. Today it names 2.19.0, which is ALSO the
-// newest released bundle: the 2.19.0 release-day change marked the bundle Released and moved
-// DefaultVersion to it together, once the operator reached CR parity with the Helm chart.
+// spec.version, before DefaultVersion moves to it. Today it ALSO names the newest released
+// bundle: release day marks a bundle Released and moves DefaultVersion to it together.
 //
 // It is NOT what an EXISTING Platform floats to: a platform already reconciled once follows
 // its pinned status.observedVersion whenever spec.version is empty (pin-on-create), so
@@ -43,7 +42,7 @@ import (
 //
 // Every bundle is keyed by its OWN version const — never by DefaultVersion — so flipping
 // DefaultVersion can never relabel a bundle or retag its images (the "demotion trap").
-const DefaultVersion = "2.19.0"
+const DefaultVersion = "2.20.0"
 
 // DefaultImageRegistry and DefaultImageRepository are the registry host and
 // repository the ILM component images ship under (the public registry the
@@ -259,13 +258,12 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 	},
-	// 2.19.0 — the operator's DEFAULT and newest RELEASED bundle. Image coordinates verified
-	// against the released helm-charts 2.19.0 tag. It carries the full 2.19.0 contract the
-	// operator now renders: the LOGGING_LEVEL_COM_OTILM rename, the time-quality integration
-	// env (spec.messaging.timeQuality), the platform instance id (spec.core.instanceId), the
-	// time-quality-monitor sidecar image (private repository, spec.core.timeQualityMonitor),
-	// the "/" virtual host with the ilm / ilm-proxy exchanges, and the provider.status-poll
-	// queue.
+	// 2.19.0 — image coordinates verified against the released helm-charts 2.19.0 tag. It
+	// carries the full 2.19.0 contract the operator now renders: the LOGGING_LEVEL_COM_OTILM
+	// rename, the time-quality integration env (spec.messaging.timeQuality), the platform
+	// instance id (spec.core.instanceId), the time-quality-monitor sidecar image (private
+	// repository, spec.core.timeQualityMonitor), the "/" virtual host with the ilm / ilm-proxy
+	// exchanges, and the provider.status-poll queue.
 	version2190: {
 		Components:      images2190,
 		Wiring:          wiring2190,
@@ -276,15 +274,15 @@ var bundles = map[string]Bundle{
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,
 	},
-	// 2.20.0 — a PREVIEW until the platform images are published; the release-day PR sets
-	// Released (docs/release-process.md). It is the 2.19.0 bundle plus the Discovery v2 work
-	// queue (see messagingTopology2200), the images2200 image set and wiring2200.
+	// 2.20.0 — the operator's DEFAULT and newest RELEASED bundle. It is the 2.19.0 bundle plus
+	// the Discovery v2 work queue (see messagingTopology2200), the images2200 image set and
+	// wiring2200.
 	version2200: {
 		Components:      images2200,
 		Wiring:          wiring2200,
 		Messaging:       messagingTopology2200,
 		HasProvisioning: true,
-		Released:        false,
+		Released:        true,
 		RabbitMQVersion: "4.3.1",
 		CNPGVersion:     "18",
 		KeycloakVersion: keycloakVersion2663,

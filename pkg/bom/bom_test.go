@@ -16,7 +16,7 @@ import (
 )
 
 // Test-local version literals. These are DELIBERATELY independent of the production
-// version2170/version2180/version2190/version2200 consts in bom.go: this suite is a
+// versionNNNN consts in bom.go: this suite is a
 // full-matrix characterization of the bundle DATA, and reusing the production consts here
 // would let a bundle's key silently drift with its own const instead of being pinned by an
 // independent literal.
@@ -219,7 +219,7 @@ func TestSupportedVersionsIncludesDefault(t *testing.T) {
 // bundle changes this list only once its own release-day flip PR marks it Released and
 // updates this expectation.
 func TestSupportedVersionsExplicit(t *testing.T) {
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
+	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200}, SupportedVersions())
 }
 
 // TestSupportedVersionsExcludesPreviewBundle pins the Released filter with a SYNTHETIC preview
@@ -324,8 +324,8 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 	}
 	assert.Equal(t, testVersion2200, AllVersions()[len(AllVersions())-1],
 		"the newest bundle is last in the full key set")
-	assert.Equal(t, testVersion2190, SupportedVersions()[len(SupportedVersions())-1],
-		"the newest RELEASED bundle is last in the advertised set; the 2.20.0 preview is not advertised")
+	assert.Equal(t, testVersion2200, SupportedVersions()[len(SupportedVersions())-1],
+		"the newest RELEASED bundle is last in the advertised set")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -459,10 +459,8 @@ func TestBundle2190(t *testing.T) {
 	assert.True(t, b.Released, "2.19.0 is released: the operator reached CR parity with the Helm chart")
 	assert.True(t, b.HasProvisioning)
 
-	// Advertised set now carries 2.19.0, and it is the fresh-install default.
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190}, SupportedVersions())
+	assert.Contains(t, SupportedVersions(), testVersion2190)
 	assert.Contains(t, AllVersions(), testVersion2190)
-	assert.Equal(t, testVersion2190, DefaultVersion)
 
 	// Complete image matrix — VERIFIED against the released helm-charts 2.19.0 tag
 	// (2026-08-03): auth bumped to 1.7.0 and scheduler to 1.1.1 in the release cut.
@@ -547,12 +545,11 @@ func TestBundle2190(t *testing.T) {
 func TestBundle2200(t *testing.T) {
 	b, ok := BundleFor(testVersion2200)
 	require.True(t, ok, "2.20.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.20.0 stays a preview until its platform images are published")
+	assert.True(t, b.Released, "2.20.0 is released: its platform images are published")
 	assert.True(t, b.HasProvisioning)
 
-	assert.NotContains(t, SupportedVersions(), testVersion2200, "a preview is never advertised")
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200}, AllVersions())
-	assert.Equal(t, testVersion2190, DefaultVersion, "a preview is never the fresh-install default")
+	assert.Contains(t, SupportedVersions(), testVersion2200)
+	assert.Equal(t, testVersion2200, DefaultVersion, "2.20.0 is the fresh-install default")
 
 	assert.Equal(t, map[string]Image{
 		"core":                 {Name: "core", Tag: testVersion2200},

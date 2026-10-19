@@ -66,7 +66,8 @@ The switch is `database.pgBouncer.managed`. Full explanation:
 | Sample | Shows |
 |---|---|
 | [`platform_2170.yaml`](./platform_2170.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.17.0. |
-| [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0 — the operator's current default; pinning it explicitly is the GitOps-recommended form. |
+| [`platform_2190.yaml`](./platform_2190.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.19.0. |
+| [`platform_2200.yaml`](./platform_2200.yaml) | Pin the **platform** bundle (`spec.version`) to ILM 2.20.0 — the operator's current default; pinning it explicitly is the GitOps-recommended form. |
 | [`platform_managed_pinned_versions.yaml`](./platform_managed_pinned_versions.yaml) | Pin each **managed engine** version (PostgreSQL / RabbitMQ / Keycloak) + the major-upgrade guard. |
 
 See [Supported versions](../../docs/site/upgrading.md#supported-versions) for the supported
@@ -77,7 +78,7 @@ matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 |---|---|
 | [`platform_high_availability.yaml`](./platform_high_availability.yaml) | The HA profile (one flag) + a per-component HPA and PDB override. |
 | [`platform_production.yaml`](./platform_production.yaml) | HA + multi-instance managed infra + sized resources together. |
-| [`platform_core_statefulset.yaml`](./platform_core_statefulset.yaml) | **Multi-replica Core** as a StatefulSet (per-pod instance id from the pod ordinal). Pins **2.19.0** (the only bundle that wires the per-pod instance id). |
+| [`platform_core_statefulset.yaml`](./platform_core_statefulset.yaml) | **Multi-replica Core** as a StatefulSet (per-pod instance id from the pod ordinal). Pins **2.19.0** (the first bundle that wires the per-pod instance id). |
 
 ### Edge & TLS
 | Sample | Shows |

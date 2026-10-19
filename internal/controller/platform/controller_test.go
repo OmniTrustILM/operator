@@ -1258,19 +1258,19 @@ var _ = Describe("Platform Controller", func() {
 		})
 
 		It("allows a fresh platform to pin the newest bundle explicitly", func() {
-			// A fresh install may always name a version explicitly. 2.19.0 is now the DEFAULT, so this
+			// A fresh install may always name a version explicitly. 2.20.0 is the DEFAULT, so this
 			// spec proves the explicit-pin path still resolves and reports the same version the
 			// version-less path lands on — the GitOps form, and the one status.observedVersion echoes.
-			const ns = "ilm-version-2190-fresh"
-			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion219))).To(Succeed())
+			const ns = "ilm-version-2200-fresh"
+			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion220))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
 
-			By("verifying the fresh install proceeds to Running, pinned to 2.19.0")
+			By("verifying the fresh install proceeds to Running, pinned to 2.20.0")
 			Eventually(func(g Gomega) {
 				var got otilmv1alpha1.Platform
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "ilm", Namespace: ns}, &got)).To(Succeed())
 				g.Expect(got.Status.Phase).To(Equal(otilmv1alpha1.PlatformPhaseRunning))
-				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion219))
+				g.Expect(got.Status.ObservedVersion).To(Equal(platformVersion220))
 			}, platformTimeout, platformInterval).Should(Succeed())
 		})
 
@@ -1298,8 +1298,8 @@ var _ = Describe("Platform Controller", func() {
 
 		It("clears the stale Degraded condition once a refused spec.version is corrected", func() {
 			// PINNED to 2.18.0: this spec needs a version move that actually RENAMES the external
-			// messaging topology, and 2.18.0 → 2.19.0 is the only one this build carries. Started on
-			// the default it would be a no-op the moment 2.19.0 becomes the default.
+			// messaging topology, as 2.18.0 → 2.19.0 does. Started on the default, which shares 2.19.0's
+			// topology names, it would be a no-op.
 			const ns = "ilm-version-degraded-cleared"
 			Expect(k8sClient.Create(ctx, newVersionedPlatform(ns, platformVersion218))).To(Succeed())
 			markRequiredDeploymentsReady(ns)
