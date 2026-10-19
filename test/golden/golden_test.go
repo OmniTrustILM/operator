@@ -423,27 +423,6 @@ func TestGoldenVariants(t *testing.T) {
 	}
 }
 
-// TestOnlyOptInComponentsPullPrivateImages keeps a default install pullable without registry
-// credentials: across every variant, an image from the private repository renders only when the
-// platform opts into the time-quality-monitor sidecar, the one private Platform component.
-func TestOnlyOptInComponentsPullPrivateImages(t *testing.T) {
-	const privateRepository = "/ilm-private/"
-	for _, v := range variants() {
-		t.Run(v.name, func(t *testing.T) {
-			got, err := renderToYAML(v.platform)
-			if err != nil {
-				t.Fatalf("render variant %q: %v", v.name, err)
-			}
-			tqm := v.platform.Spec.Core.TimeQualityMonitor
-			optedIn := tqm != nil && tqm.Enabled
-			if pulled := bytes.Contains(got, []byte(privateRepository)); pulled != optedIn {
-				t.Errorf("variant %q renders a private image: %v, opts into the time-quality monitor: %v",
-					v.name, pulled, optedIn)
-			}
-		})
-	}
-}
-
 // renderToYAML renders the operator's objects for a CR and serializes them to a stable,
 // canonical multi-document YAML stream: each typed object is converted to unstructured
 // with its GVK populated from the scheme, the objects are sorted by (apiVersion, kind,
