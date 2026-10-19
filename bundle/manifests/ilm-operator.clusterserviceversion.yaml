@@ -564,7 +564,9 @@ metadata:
               }
             ],
             "image": {
-              "tag": "1.0.0"
+              "pullSecrets": [
+                "ilm-registry"
+              ]
             },
             "initContainers": [
               {
