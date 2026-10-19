@@ -1739,7 +1739,6 @@ func TestResolveCoreStartupBudgetFollowsTheBundle(t *testing.T) {
 		testVersion218: 45,
 		testVersion219: 45,
 		testVersion220: 180,
-		testVersion221: 180,
 	} {
 		p := basePlatform()
 		p.Spec.Version = version

@@ -7,7 +7,6 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
-	"maps"
 	"reflect"
 	"regexp"
 	"testing"
@@ -26,7 +25,6 @@ const (
 	testVersion2180 = "2.18.0"
 	testVersion2190 = "2.19.0"
 	testVersion2200 = "2.20.0"
-	testVersion2210 = "2.21.0"
 	testVersion2100 = "2.10.0"
 	testVersion290  = "2.9.0"
 )
@@ -324,10 +322,10 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 	for _, v := range SupportedVersions() {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
-	assert.Equal(t, testVersion2210, AllVersions()[len(AllVersions())-1],
+	assert.Equal(t, testVersion2200, AllVersions()[len(AllVersions())-1],
 		"the newest bundle is last in the full key set")
 	assert.Equal(t, testVersion2200, SupportedVersions()[len(SupportedVersions())-1],
-		"the newest RELEASED bundle is last in the advertised set; the 2.21.0 preview is not advertised")
+		"the newest RELEASED bundle is last in the advertised set")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -623,32 +621,6 @@ func TestBundle2200(t *testing.T) {
 	assert.Equal(t, int32(180), b.CoreStartupFailureThreshold,
 		"2.20.0 migrations can outlast the default startup budget, so this bundle raises it (about 30 minutes, as the chart)")
 	assert.Zero(t, b19.CoreStartupFailureThreshold, "older bundles keep the default, so an operator upgrade does not roll their Core")
-}
-
-// TestBundle2210 pins the 2.21.0 preview: a copy of the 2.20.0 bundle with the core and
-// frontend-administrator 2.21.0 images. Each 2.21.0 contract change updates it.
-func TestBundle2210(t *testing.T) {
-	b, ok := BundleFor(testVersion2210)
-	require.True(t, ok, "2.21.0 must resolve via explicit spec.version")
-	assert.False(t, b.Released, "2.21.0 stays a preview until its platform images are published")
-	assert.True(t, b.HasProvisioning)
-
-	assert.NotContains(t, SupportedVersions(), testVersion2210, "a preview is never advertised")
-	assert.Equal(t, []string{testVersion2170, testVersion2180, testVersion2190, testVersion2200, testVersion2210}, AllVersions())
-	assert.Equal(t, testVersion2210, NewestVersion(), "spec.version: develop follows the preview")
-
-	b20, _ := BundleFor(testVersion2200)
-	want := maps.Clone(b20.Components)
-	want["core"] = Image{Name: "core", Tag: testVersion2210}
-	want["fe-administrator"] = Image{Name: "frontend-administrator", Tag: testVersion2210}
-	assert.Equal(t, want, b.Components)
-
-	assert.Equal(t, b20.Wiring, b.Wiring)
-	assert.Equal(t, b20.Messaging, b.Messaging)
-	assert.Equal(t, b20.RabbitMQVersion, b.RabbitMQVersion)
-	assert.Equal(t, b20.CNPGVersion, b.CNPGVersion)
-	assert.Equal(t, b20.KeycloakVersion, b.KeycloakVersion)
-	assert.Equal(t, b20.CoreStartupFailureThreshold, b.CoreStartupFailureThreshold)
 }
 
 // TestCoreReadGrantCoversItsQueues checks Core's read regex by behaviour, not by spelling: the

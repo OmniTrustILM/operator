@@ -73,7 +73,6 @@ const (
 	version2180 = "2.18.0"
 	version2190 = "2.19.0"
 	version2200 = "2.20.0"
-	version2210 = "2.21.0"
 )
 
 // componentAuthOPAPolicies is the operator's component identity for the
@@ -291,22 +290,6 @@ var bundles = map[string]Bundle{
 		// lock and indexes it, which can outlast the default on a large installation.
 		CoreStartupFailureThreshold: 180,
 	},
-	// 2.21.0 — a PREVIEW until the platform images are published; the release-day PR sets
-	// Released (docs/release-process.md). It starts as a copy of the 2.20.0 bundle with the
-	// core and frontend-administrator 2.21.0 images, so spec.version: develop has a bundle
-	// ahead of the last release. Contract changes for 2.21.0 land here.
-	version2210: {
-		Components:      images2210,
-		Wiring:          wiring2200,
-		Messaging:       newMessagingTopology2200(),
-		HasProvisioning: true,
-		Released:        false,
-		RabbitMQVersion: "4.3.1",
-		CNPGVersion:     "18",
-		KeycloakVersion: keycloakVersion2663,
-		// A platform that skips 2.20.0 still runs its V202608291000 migration on the way here.
-		CoreStartupFailureThreshold: 180,
-	},
 	version2170: {
 		// 2.17.0 is the pre-rebrand CZERTAINLY release. Its images are republished under the
 		// SAME registry/repository as 2.18.0 (hub.omnitrustregistry.com/ilm) — only the tags
@@ -375,15 +358,6 @@ var images2200 = func() map[string]Image {
 	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1"}
 	// 1.0.0 runs as a named user, which runAsNonRoot without a runAsUser cannot verify.
 	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: "ilm-private"}
-	return m
-}()
-
-// images2210 is the 2.20.0 image set with core and frontend-administrator at 2.21.0. A clone,
-// so the two bundles never share a map.
-var images2210 = func() map[string]Image {
-	m := maps.Clone(images2200)
-	m["core"] = Image{Name: "core", Tag: version2210}
-	m[componentFeAdministrator] = Image{Name: imageNameFeAdministrator, Tag: version2210}
 	return m
 }()
 
@@ -1151,11 +1125,7 @@ func newMessagingTopology2190() MessagingTopology {
 // provider.discovery-work queue, its binding from the ilm exchange, and Core's read grant on it.
 // The vhost and the exchanges are unchanged, so 2.19.0 -> 2.20.0 is an additive apply, not a
 // messaging migration.
-var messagingTopology2200 = newMessagingTopology2200()
-
-// newMessagingTopology2200 returns a fresh 2.20.0 topology on every call, for the same reason
-// as newMessagingTopology2190.
-func newMessagingTopology2200() MessagingTopology {
+var messagingTopology2200 = func() MessagingTopology {
 	t := newMessagingTopology2190()
 	for i := range t.Users {
 		if t.Users[i].Role == MessagingUserCore {
@@ -1169,7 +1139,7 @@ func newMessagingTopology2200() MessagingTopology {
 	t.Bindings = slices.Insert(t.Bindings, afterBinding,
 		MessagingBinding{Source: exchangeIlm, Destination: queueProviderDiscoveryWork, RoutingKey: queueProviderDiscoveryWork})
 	return t
-}
+}()
 
 // messagingTopology2170 is the platform's managed-RabbitMQ topology for platform version
 // 2.17.0: a SINGLE broker user (2.17.0 used one messaging credential, not the five-user 2.18.0
