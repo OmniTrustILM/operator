@@ -2431,20 +2431,25 @@ spec:
 			By("POSTing both compositions from inside the Core pod")
 			script := `set -e
 for p in /api/v2/connector/register /v2/connector/register; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+  code=$(curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
     --data '{"name":"e2e-probe","url":"http://example.invalid","authType":"none"}' \
     "http://localhost:8080$p")
   echo "PATH:$p CODE:$code"
 done
 `
-			out, err := utils.Run(exec.Command("kubectl", "exec", "deploy/core", "-c", "core", "-n", ns,
-				"--", "sh", "-c", script))
-			Expect(err).NotTo(HaveOccurred(), "the registration-path probe should run from the Core pod")
-
-			Expect(out).NotTo(MatchRegexp(`PATH:/api/v2/connector/register CODE:404`),
-				"a platformUrl ending in /api composes a path Core MUST route (any non-404 status)")
-			Expect(out).To(MatchRegexp(`PATH:/v2/connector/register CODE:404`),
-				"a platformUrl MISSING its /api composes an unrouted path — this is why the sample fix mattered")
+			// Core can roll after the preceding readiness check. Re-select the
+			// deployment's pod on each attempt and require both real HTTP responses together.
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "exec", "deploy/core", "-c", "core", "-n", ns,
+					"--", "sh", "-c", script))
+				g.Expect(err).NotTo(HaveOccurred(), "the registration-path probe should run from the Core pod")
+				g.Expect(out).To(MatchRegexp(`PATH:/api/v2/connector/register CODE:[1-5][0-9]{2}`),
+					"the base-API registration path must return an HTTP response")
+				g.Expect(out).NotTo(MatchRegexp(`PATH:/api/v2/connector/register CODE:404`),
+					"a platformUrl ending in /api composes a path Core MUST route (any non-404 status)")
+				g.Expect(out).To(MatchRegexp(`PATH:/v2/connector/register CODE:404`),
+					"a platformUrl MISSING its /api composes an unrouted path — this is why the sample fix mattered")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
 		It("should create the first-admin Keycloak realm user with the superadmin attribute (registerAdmin.password)", func() {
