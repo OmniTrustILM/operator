@@ -120,6 +120,14 @@ One class of move is **not** an ordinary rolling update: a version change that r
 Setting `spec.version` to a version older than the running `status.observedVersion` makes the platform `Degraded` with reason `DowngradeForbidden`, and **applies nothing** — the running version keeps serving. A stateful platform that has migrated its schema cannot be rolled back in place; recovering an older version means restoring from a backup. Verify a restorable backup exists before you move a platform version.
 :::
 
+## Upgrading managed Keycloak
+
+The prerequisite installer deploys Keycloak Operator **26.8.1**. When `keycloak.managed.version` is omitted, the upstream operator selects its matching **26.8.1** server image. Upgrading that prerequisite therefore also upgrades Keycloak instances that use its default image. An explicit `keycloak.managed.version` remains unchanged; the historical engine versions in the bundle table above are unchanged too.
+
+Back up the Keycloak database and review the [Keycloak upgrade guide](https://www.keycloak.org/docs/latest/upgrading/index.html) before upgrading a running installation. Keep the Keycloak server and upstream operator versions aligned, following the [upstream operator upgrade procedure](https://www.keycloak.org/operator/installation#_upgrading_an_operator).
+
+Apply the updated [upstream operator prerequisites](./installation.md#upstream-operator-prerequisites). The installer keeps the operator in `keycloak`, installs all four upstream CRDs and replaces its older custom cluster-wide grants with upstream RBAC. Do not delete the Keycloak CRDs during an upgrade: deleting them also deletes the existing Keycloak custom resources.
+
 ## Worked example: 2.17.0 to 2.18.0
 
 A single operator build carries **both** bundles, so this move is a `spec.version` change only — no operator upgrade required. Starting from [`config/samples/platform_2170.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_2170.yaml):

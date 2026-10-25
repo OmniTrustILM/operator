@@ -71,14 +71,14 @@ const (
 	rabbitmqTopologyOperatorDeployment = "messaging-topology-operator"
 
 	// keycloakOperatorVersion pins the Keycloak Operator release the managed-Keycloak e2e
-	// installs. The keycloak-k8s-resources repo publishes, per release TAG, the two CRDs
-	// (keycloaks / keycloakrealmimports.k8s.keycloak.org-v1.yml) and the operator install
+	// installs. The keycloak-k8s-resources repo publishes, per release TAG, four CRDs
+	// (Keycloak, KeycloakRealmImport, KeycloakOIDCClient, KeycloakSAMLClient) and the operator install
 	// manifest (kubernetes.yml). Pinned (not "nightly"/"latest") so the e2e is reproducible and
 	// the VERIFY(keycloak) field-shape assertions are validated against a known CRD version.
 	// The operand image (quay.io/keycloak/keycloak:<version>) the operator's builder composes
 	// is PUBLIC, but Keycloak needs a working DATABASE to reach Ready — the managed-Keycloak
 	// spec provides one via CloudNativePG.
-	keycloakOperatorVersion  = "26.6.3"
+	keycloakOperatorVersion  = "26.8.1"
 	keycloakResourcesRawTmpl = "https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/" +
 		"%[1]s/kubernetes/%[2]s"
 	// keycloakOperatorNamespace is the namespace the Keycloak Operator MUST be installed into:
@@ -110,12 +110,21 @@ func keycloakResourcesURL(file string) string {
 }
 
 // keycloakManifestFiles are the keycloak-k8s-resources kubernetes/ files the Keycloak Operator
-// install applies, in order: the two CRDs first (so the apiserver serves them), then the
+// install applies, in order: all four CRDs first (so the apiserver serves them), then the
 // operator Deployment + RBAC.
 var keycloakManifestFiles = []string{
 	"keycloaks.k8s.keycloak.org-v1.yml",
 	"keycloakrealmimports.k8s.keycloak.org-v1.yml",
+	"keycloakoidcclients.k8s.keycloak.org-v1.yml",
+	"keycloaksamlclients.k8s.keycloak.org-v1.yml",
 	"kubernetes.yml",
+}
+
+var keycloakCRDNames = []string{
+	"keycloaks.k8s.keycloak.org",
+	"keycloakrealmimports.k8s.keycloak.org",
+	"keycloakoidcclients.k8s.keycloak.org",
+	"keycloaksamlclients.k8s.keycloak.org",
 }
 
 func warnError(err error) {
@@ -678,8 +687,8 @@ func UninstallKeycloakOperator() {
 }
 
 // InstallKeycloakOperator installs the pinned Keycloak Operator (it serves the k8s.keycloak.org
-// CRDs — Keycloak + KeycloakRealmImport — the operator's managed-Keycloak mode renders) and
-// waits for it to be usable: the two CRDs Established and the controller Deployment Available.
+// CRDs, including Keycloak + KeycloakRealmImport used by ILM) and waits for it to be usable:
+// all four CRDs Established and the controller Deployment rollout complete.
 // It mirrors InstallCloudNativePG / InstallRabbitMQ* and is idempotent + CI-friendly.
 //
 // NAMESPACE-SCOPED: unlike CNPG/RabbitMQ (which ship their own namespace and watch
@@ -706,16 +715,16 @@ func InstallKeycloakOperator() error {
 	// subject; the cluster-scoped CRDs ignore -n).
 	for _, file := range keycloakManifestFiles {
 		url := keycloakResourcesURL(file)
-		cmd := exec.Command("kubectl", "apply", "-n", keycloakOperatorNamespace, "-f", url) //nolint:gosec // test utility with trusted, pinned input
+		cmd := exec.Command("kubectl", "apply", "--server-side", "-n", keycloakOperatorNamespace, "-f", url) //nolint:gosec // test utility with trusted, pinned input
 		if _, err := Run(cmd); err != nil {
 			return err
 		}
 	}
 
-	// Wait for both CRDs to be Established before the Deployment: a Platform applied right
+	// Wait for all CRDs to be Established before the Deployment: a Platform applied right
 	// after this helper returns immediately renders a Keycloak CR (and, when a realm import is
 	// configured, a KeycloakRealmImport), which need the CRDs served.
-	for _, crd := range []string{"keycloaks.k8s.keycloak.org", "keycloakrealmimports.k8s.keycloak.org"} {
+	for _, crd := range keycloakCRDNames {
 		cmd := exec.Command("kubectl", "wait", "--for=condition=Established", //nolint:gosec // test utility; crd is a hardcoded constant from the loop above
 			"crd/"+crd, "--timeout=2m")
 		if _, err := Run(cmd); err != nil {
@@ -723,10 +732,8 @@ func InstallKeycloakOperator() error {
 		}
 	}
 
-	// Wait for the Keycloak Operator controller Deployment to be Available so it is ready to
-	// reconcile the Keycloak CR the operator applies.
-	cmd := exec.Command("kubectl", "wait", "deployment.apps/"+keycloakOperatorDeployment,
-		"--for", "condition=Available",
+	// A prior replica may still be Available during an upgrade; wait for the new rollout.
+	cmd := exec.Command("kubectl", "rollout", "status", "deployment.apps/"+keycloakOperatorDeployment,
 		"--namespace", keycloakOperatorNamespace,
 		"--timeout", "5m",
 	)
@@ -736,12 +743,29 @@ func InstallKeycloakOperator() error {
 
 // IsKeycloakOperatorCRDsInstalled reports whether the Keycloak Operator CRDs are already
 // present on the cluster, so the suite can skip (re)installing it (mirrors
-// IsCloudNativePGCRDsInstalled). It keys off both CRDs the managed-Keycloak mode depends on.
+// IsCloudNativePGCRDsInstalled). All four CRDs are required by the upstream controllers.
 func IsKeycloakOperatorCRDsInstalled() bool {
-	return crdsPresent([]string{
-		"keycloaks.k8s.keycloak.org",
-		"keycloakrealmimports.k8s.keycloak.org",
-	})
+	return crdsPresent(keycloakCRDNames)
+}
+
+// HasKeycloakOperatorCRDs protects pre-existing installations from suite-owned teardown.
+// A partial installation is still externally owned. On lookup failure, retain that ownership
+// conservatively; the completeness check will fail without installing or deleting resources.
+func HasKeycloakOperatorCRDs() bool {
+	cmd := exec.Command("kubectl", "get", "crds", "-o", "custom-columns=NAME:.metadata.name")
+	output, err := Run(cmd)
+	if err != nil {
+		warnError(err)
+		return true
+	}
+	for _, line := range GetNonEmptyLines(output) {
+		for _, crd := range keycloakCRDNames {
+			if strings.TrimSpace(line) == crd {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // crdsPresent reports whether ALL of the named CRDs are present on the cluster. It is the
