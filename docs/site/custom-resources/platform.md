@@ -119,7 +119,7 @@ kubectl apply -f platform.yaml
 
 That is the whole deployment — no Secrets, no connection strings, no chart values. The same everything-managed shape ships as a ready-to-edit, annotated sample, [`platform_quickstart.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_quickstart.yaml), alongside [variants](https://github.com/OmniTrustILM/operator/tree/main/config/samples) for external infrastructure, the other edge and TLS modes, high availability, and production sizing.
 
-The managed `version` values are deliberate. Leaving one out does **not** select a matched image — it hands the choice to the upstream operator's own default, which for the broker is older than the version this platform release is validated against, so `database` and `messaging` pin PostgreSQL 18 and RabbitMQ 4.3.1 (the RabbitMQ Cluster Operator would otherwise ship 4.2.6). Keycloak is the exception, and its omission is equally deliberate: the pinned Keycloak Operator's own default is already the validated 26.6.3, and letting it choose keeps its optimized startup — pinning a version composes the stock community image instead, which has to build at boot. Pin `keycloak.managed.version` only to diverge from the operator's default.
+The managed `version` values are deliberate. Leaving one out does **not** select a matched image — it hands the choice to the upstream operator's own default, which for the broker is older than the version this platform release is validated against, so `database` and `messaging` pin PostgreSQL 18 and RabbitMQ 4.3.1 (the RabbitMQ Cluster Operator would otherwise ship 4.2.6). Keycloak is the exception, and its omission is equally deliberate: Keycloak Operator 26.8.1 supplies its matching 26.8.1 server image by default, and letting it choose keeps its optimized startup — pinning a version composes the stock community image instead, which has to build at boot. Pin `keycloak.managed.version` only to diverge from the operator's default.
 
 Omitting `spec.version` — the platform version, distinct from those engine versions — pins the platform to the operator's default at creation, and it stays there until you change it; a newer operator never silently upgrades a running platform. Selecting a platform version explicitly is covered in [Upgrading](../upgrading.md).
 
@@ -434,7 +434,7 @@ spec:
     realm: ilm                  # the platform realm name (default "ilm")
     managed:
       instances: 1              # more than 1 gives a clustered, HA deployment
-      # version: "26.6.3"       # see the note in "Managed engine versions" before pinning
+      # version: "26.8.1"       # see the note in "Managed engine versions" before pinning
       # realmImport:            # optional, create-only import from a ConfigMap you provide
       #   configMapRef: ilm-realm
       #   key: ilm_realm.json
@@ -466,7 +466,7 @@ kubectl exec -n <ns> <platform>-keycloak-0 -c keycloak -- sh -c \
 ```
 :::
 
-**Prerequisite.** The operator detects the `k8s.keycloak.org` CRDs; it does not install them. Until the Keycloak Operator is present the platform reports `KeycloakReady=False` with reason `KeycloakOperatorNotInstalled`. The Keycloak Operator ships namespace-scoped and must be widened to watch all namespaces — see [Upstream operator prerequisites](../installation.md#upstream-operator-prerequisites).
+**Prerequisite.** The operator detects the `k8s.keycloak.org` CRDs; it does not install them. Until the Keycloak Operator is present the platform reports `KeycloakReady=False` with reason `KeycloakOperatorNotInstalled`. The installer deploys Keycloak Operator 26.8.1 with its upstream cluster-wide manifests to watch all namespaces — see [Upstream operator prerequisites](../installation.md#upstream-operator-prerequisites).
 
 **`KeycloakReady` condition.** Adjunct. `False/KeycloakOperatorNotInstalled` when the CRD is absent, `False/WaitingForKeycloak` while the custom resource is provisioning, `False/RealmImportConfigMapMissing` when the import ConfigMap is not yet present, `True` once Keycloak reports Ready.
 
@@ -541,7 +541,7 @@ Each managed dependency has its own `version`, selecting the **upstream operator
 |---|---|---|---|
 | `database.managed.version` | the PostgreSQL major | `ghcr.io/cloudnative-pg/postgresql:<major>` | `"18"` |
 | `messaging.managed.version` | the RabbitMQ server version | `rabbitmq:<version>-management` | `"4.3.1"` |
-| `keycloak.managed.version` | the Keycloak server version | `quay.io/keycloak/keycloak:<version>` | `"26.6.3"` |
+| `keycloak.managed.version` | the Keycloak server version | `quay.io/keycloak/keycloak:<version>` | `"26.8.1"` |
 
 **Omitting a `version` does not select a matched image.** The operator sends no image at all, and the upstream operator applies **its own default** — which is not necessarily the version this platform release was validated against. The RabbitMQ Cluster Operator, for example, ships an older server than the validated 4.3.1. Pin `database.managed.version` and `messaging.managed.version` deliberately: [`platform_quickstart.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_quickstart.yaml) and [`platform_managed_pinned_versions.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_managed_pinned_versions.yaml) both do. The engine versions each platform version was validated against are listed in [Upgrading](../upgrading.md).
 

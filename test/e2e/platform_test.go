@@ -1236,12 +1236,14 @@ func platformManagedKeycloakSpecs() {
 			}
 
 			By("installing the Keycloak Operator (skipped if already present)")
-			keycloakOpWasInstalled = utils.IsKeycloakOperatorCRDsInstalled()
+			keycloakOpWasInstalled = utils.HasKeycloakOperatorCRDs()
 			if keycloakOpWasInstalled {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Keycloak Operator already installed; skipping install\n")
 			} else {
 				Expect(utils.InstallKeycloakOperator()).To(Succeed(), "Failed to install Keycloak Operator")
 			}
+			Expect(utils.IsKeycloakOperatorCRDsInstalled()).To(BeTrue(),
+				"Keycloak Operator requires all four 26.8.1 CRDs; update pre-existing installations before running this suite")
 
 			By("ensuring the Keycloak Operator namespace exists (the Platform runs here)")
 			// InstallKeycloakOperator creates it, but when the operator was pre-installed (skip
@@ -1355,8 +1357,8 @@ func platformManagedKeycloakSpecs() {
 			// the managed-DB-sharing seam (ResolveDatabaseConnection feeds spec.db). keycloak.mode=
 			// managed with a realm import. Messaging external (dummy host) satisfies the CEL rule and
 			// keeps this scoped to Keycloak; the edge is omitted (so Keycloak's spec.hostname is
-			// omitted and the Operator's hostname handling applies). The Keycloak version selects the
-			// public quay.io/keycloak/keycloak operand image, so the Keycloak pod runs against the DB.
+			// omitted and the Operator's hostname handling applies). Omitting the Keycloak version
+			// exercises the upstream operator's matching optimized default image against the DB.
 			platformYAML := fmt.Sprintf(`
 apiVersion: otilm.com/v1alpha1
 kind: Platform
@@ -1384,11 +1386,10 @@ spec:
     realm: %s
     managed:
       instances: 1
-      version: "%s"
       realmImport:
         configMapRef: %s
         key: %s
-`, platformName, keycloakNS, messagingSecretName, realmName, utils.KeycloakOperatorVersion, realmConfigMapName, realmConfigMapKey)
+`, platformName, keycloakNS, messagingSecretName, realmName, realmConfigMapName, realmConfigMapKey)
 
 			tmpFile := writeTempYAML(platformYAML)
 			defer func() { _ = os.Remove(tmpFile) }()
@@ -1445,10 +1446,9 @@ spec:
 				httpEnabled := getKeycloakField(g, "keycloak", keycloakCRName, keycloakNS, "{.spec.http.httpEnabled}")
 				g.Expect(httpEnabled).To(Equal("true"), "spec.http.httpEnabled should round-trip")
 
-				// spec.image selects the requested operand version.
+				// Leaving spec.image unset preserves the upstream operator's optimized default.
 				img := getKeycloakField(g, "keycloak", keycloakCRName, keycloakNS, "{.spec.image}")
-				g.Expect(img).To(ContainSubstring(utils.KeycloakOperatorVersion),
-					"spec.image should select the requested Keycloak operand version")
+				g.Expect(img).To(BeEmpty(), "spec.image should defer to the upstream Keycloak Operator")
 
 				// The SCC-clean pod template (spec.unsupported.podTemplate): the pod-level
 				// runAsNonRoot must round-trip through the Operator's documented pod-override path.
@@ -1469,6 +1469,12 @@ spec:
 			Eventually(func(g Gomega) {
 				g.Expect(keycloakCRReady(g, keycloakCRName, keycloakNS)).To(BeTrue(),
 					"Keycloak CR should reach the Ready signal the operator probes (status Ready=True)")
+				cmd := exec.Command("kubectl", "get", "statefulset.apps", keycloakCRName,
+					"-n", keycloakNS, "-o", "jsonpath={.spec.template.spec.containers[0].image}")
+				image, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "the upstream Keycloak StatefulSet should exist")
+				g.Expect(image).To(Equal("quay.io/keycloak/keycloak:"+utils.KeycloakOperatorVersion),
+					"the upstream operator should select its matching default Keycloak image")
 			}, 8*time.Minute, 10*time.Second).Should(Succeed())
 		})
 
@@ -2048,10 +2054,12 @@ func platformFullManagedSpecs() {
 			}
 
 			By("installing the Keycloak Operator (skipped if already present)")
-			keycloakOpWasInstalled = utils.IsKeycloakOperatorCRDsInstalled()
+			keycloakOpWasInstalled = utils.HasKeycloakOperatorCRDs()
 			if !keycloakOpWasInstalled {
 				Expect(utils.InstallKeycloakOperator()).To(Succeed(), "Failed to install Keycloak Operator")
 			}
+			Expect(utils.IsKeycloakOperatorCRDsInstalled()).To(BeTrue(),
+				"Keycloak Operator requires all four 26.8.1 CRDs; update pre-existing installations before running this suite")
 
 			By("ensuring the Keycloak Operator namespace exists (the Platform runs here)")
 			Expect(utils.CreateNamespaceIdempotent(ns)).
@@ -2805,10 +2813,12 @@ func setupMatrixBlock(ns string) matrixUpstreamOperators {
 	if ops.mqTopology {
 		Expect(utils.InstallRabbitMQTopologyOperator()).To(Succeed(), "Failed to install Messaging Topology Operator")
 	}
-	ops.keycloak = !utils.IsKeycloakOperatorCRDsInstalled()
+	ops.keycloak = !utils.HasKeycloakOperatorCRDs()
 	if ops.keycloak {
 		Expect(utils.InstallKeycloakOperator()).To(Succeed(), "Failed to install Keycloak Operator")
 	}
+	Expect(utils.IsKeycloakOperatorCRDsInstalled()).To(BeTrue(),
+		"Keycloak Operator requires all four 26.8.1 CRDs; update pre-existing installations before running this suite")
 
 	By("ensuring the Keycloak Operator namespace + draining any leftover Platform/workloads")
 	Expect(utils.CreateNamespaceIdempotent(ns)).To(Succeed(), "Failed to ensure Keycloak Operator namespace")

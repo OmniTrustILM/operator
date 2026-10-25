@@ -9,15 +9,16 @@
 #   image for that engine:
 #       database.managed.version   → the CloudNativePG PostgreSQL major (e.g. "18")
 #       messaging.managed.version  → the RabbitMQ server version (e.g. "4.3.1")
-#       keycloak.managed.version   → the Keycloak server version (e.g. "26.6.3")
+#       keycloak.managed.version   → the Keycloak server version (e.g. "26.8.1")
 #   The operator sends an image ONLY when `version` is set. OMIT it and the choice passes to
 #   the upstream operator's OWN default — for PostgreSQL and RabbitMQ that default is older
 #   than this platform release validated, so PIN a `version`, as this sample does, to get the
-#   exact BOM-validated engine. Keycloak is the exception: the Keycloak Operator's own default
-#   already IS the validated version and starts faster (a pinned version composes the stock
-#   community image, which builds at boot) — pin it only to deliberately diverge. The values
-#   below are the validated set; see docs/site/upgrading.md for the supported matrix and
-#   docs/site/custom-resources/platform.md (Managed engine versions) for the full explanation.
+#   exact BOM-validated engine. Keycloak Operator 26.8.1 supplies its matching 26.8.1
+#   image by default and starts faster. An explicit Keycloak version selects the stock
+#   community image, which builds at boot; omit that pin to keep optimized startup.
+#   This sample pins every engine for reproducibility. See docs/site/upgrading.md for
+#   the historical validation matrix and docs/site/custom-resources/platform.md
+#   (Managed engine versions) for the full explanation.
 #
 # MAJOR-VERSION UPGRADES ARE GUARDED
 #   Bumping a `version` is fine for a fresh deploy and for patch/minor changes. A MAJOR bump
@@ -71,5 +72,5 @@ spec:
     realm: ilm
     managed:
       instances: 1
-      version: "26.6.3"              # pin the Keycloak server version (omit → operator's own default, already 26.6.3, with faster startup)
+      version: "26.8.1"              # pin the Keycloak server version (omit → operator's own 26.8.1 default, with faster startup)
       # upgradeAcknowledged: true    # set ONLY for a MAJOR (25→26) upgrade of a running instance

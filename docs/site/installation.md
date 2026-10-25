@@ -38,10 +38,11 @@ An everything-managed platform delegates its stateful infrastructure to four ups
 
 None of these is a hard failure. Each is a non-fatal waiting state that self-heals once the upstream operator appears.
 
-**Recommended — one script, pinned to the validated versions, idempotent.** It installs all four (cert-manager first, because the Messaging Topology Operator's webhook and the internal-CA edge both depend on it), waits for each to become Available, and prints a readiness summary:
+**Recommended — one script, pinned to the validated versions, idempotent.** Have Bash, curl, Git and `kubectl` installed; Git is required to load the remote Keycloak Kustomize manifests. The script installs all four (cert-manager first, because the Messaging Topology Operator's webhook and the internal-CA edge both depend on it), waits for each to become Available, and prints a readiness summary:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/OmniTrustILM/operator/v1.0.0/hack/install-upstream-operators.sh
+OPERATOR_VERSION="vX.Y.Z"  # replace with the ILM Operator release you are installing
+curl -fsSLO "https://raw.githubusercontent.com/OmniTrustILM/operator/${OPERATOR_VERSION}/hack/install-upstream-operators.sh"
 
 bash install-upstream-operators.sh          # install everything, then verify (safe to re-run)
 bash install-upstream-operators.sh verify   # report what is present and ready, change nothing
@@ -68,21 +69,24 @@ kubectl apply -f \
 kubectl apply -f \
   https://github.com/rabbitmq/messaging-topology-operator/releases/download/v1.19.2/messaging-topology-operator-with-certmanager.yaml
 
-# Keycloak Operator — installed as published in 'keycloak'.
-KC=https://raw.githubusercontent.com/keycloak/keycloak-k8s-resources/26.6.3/kubernetes
+# Keycloak Operator 26.8.1 — watch all namespaces from the existing 'keycloak' namespace.
 kubectl create namespace keycloak --dry-run=client -o yaml | kubectl apply -f -
-for f in keycloaks.k8s.keycloak.org-v1.yml keycloakrealmimports.k8s.keycloak.org-v1.yml kubernetes.yml; do
-  kubectl apply -n keycloak -f "$KC/$f"
-done
-# Then widen it to watch ALL namespaces so a Platform in 'ilm' is reconciled. This needs the
-# operator's full RBAC (controller + operational) bound cluster-wide plus JOSDK_ALL_NAMESPACES —
-# several objects, so just use the installer script above, which does exactly this.
+mkdir -p keycloak-operator
+cat >keycloak-operator/kustomization.yaml <<'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: keycloak
+resources:
+  - https://github.com/keycloak/keycloak-k8s-resources/kubernetes/cluster-wide?ref=26.8.1
+EOF
+kubectl apply --server-side -k keycloak-operator
+kubectl rollout status deployment/keycloak-operator -n keycloak --timeout=5m
 ```
 
 </details>
 
 :::warning[Managed Keycloak needs a watching Keycloak Operator]
-The Keycloak Operator ships namespace-scoped, unlike the cluster-scoped CloudNativePG and RabbitMQ operators. It is therefore installed as published in the `keycloak` namespace and then configured to **watch all namespaces**, so a single operator serves a platform in any namespace — the same cluster-scoped model as the others. Widening it requires the operator's controller **and** operational RBAC bound cluster-wide (the published manifest grants the latter only through a namespaced Role), which is why the installer script is the recommended path. See the [Keycloak Operator installation guide](https://www.keycloak.org/operator/installation).
+The installer uses Keycloak Operator **26.8.1** and its upstream cluster-wide manifests, keeping the operator in the `keycloak` namespace so it can serve a platform in any namespace. All four upstream CRDs are installed: `Keycloak`, `KeycloakRealmImport`, `KeycloakOIDCClient`, and `KeycloakSAMLClient`. ILM uses the first two; the client CRDs are required by the upstream operator's additional controllers. Keycloak describes cluster-wide operation as preview and supports a matching Keycloak server version per operator. See the [Keycloak Operator installation guide](https://www.keycloak.org/operator/installation).
 :::
 
 :::tip[A first run without cert-manager]

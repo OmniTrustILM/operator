@@ -138,7 +138,8 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	# Operator-native golden render snapshots (cross-variant full-render regression net).
 	# Pure builder render — no envtest, no coverprofile (it carries no production code, so it
 	# would not move the coverage total). Regenerate with: UPDATE_GOLDEN=1 go test ./test/golden/...
-	go test ./test/golden/...
+	# Test-helper ownership checks run here too, without a Kind cluster.
+	go test ./test/golden/... ./test/utils/...
 
 # To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
