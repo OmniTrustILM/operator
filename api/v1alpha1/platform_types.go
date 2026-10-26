@@ -1646,10 +1646,3 @@ type PlatformList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Platform `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(GroupVersion, &Platform{}, &PlatformList{})
-		return nil
-	})
-}

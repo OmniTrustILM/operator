@@ -20,11 +20,18 @@ var (
 	GroupVersion = schema.GroupVersion{Group: "otilm.com", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
-	SchemeBuilder = runtime.NewSchemeBuilder(func(scheme *runtime.Scheme) error {
-		metav1.AddToGroupVersion(scheme, GroupVersion)
-		return nil
-	})
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+func addKnownTypes(scheme *runtime.Scheme) error {
+	scheme.AddKnownTypes(GroupVersion,
+		&Connector{}, &ConnectorList{},
+		&Platform{}, &PlatformList{},
+		&Proxy{}, &ProxyList{},
+	)
+	metav1.AddToGroupVersion(scheme, GroupVersion)
+	return nil
+}
