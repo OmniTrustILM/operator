@@ -179,6 +179,18 @@ Upgrade the operator through the channel you installed it with — `helm upgrade
 
 An operator upgrade can also render new objects for the custom resources you already run. Each `Connector` and `Proxy` gets a NetworkPolicy on the first reconcile after the upgrade, unless a NetworkPolicy of yours already carries its name, and that policy drops traffic from other namespaces except the operator's own. If something in another namespace calls a connector or a proxy, Prometheus for example, read [Network isolation](./custom-resources/connector.md#network-isolation) before you upgrade.
 
+A platform first reconciled by an earlier operator release stores `pullPolicy: IfNotPresent` in every component's `image`. The earlier CRDs defaulted the field in each `image` a write carried, including the empty one the operator itself wrote for every component you left unconfigured, and a component's stored value wins over `spec.common.image.pullPolicy`. The current CRDs no longer default it, but an upgrade does not remove a value that is already stored. If you set `spec.common.image.pullPolicy`, now or later, remove the stored component values once the upgraded CRDs are installed, then apply your `Platform` manifest again to restore any pull policy you set on a component yourself; a GitOps controller restores those on its next sync:
+
+```bash
+for c in core auth scheduler authOpaPolicies feAdministrator utils gateway \
+    core/timeQualityMonitor provisioning/deploy; do
+  kubectl patch platform ilm -n ilm --type=json \
+    -p "[{\"op\": \"remove\", \"path\": \"/spec/$c/image/pullPolicy\"}]"
+done
+```
+
+A component that stores no value rejects its patch with an error, which is harmless.
+
 ## Remove the operator
 
 To remove the operator, undo the path you installed it with — and if you mean to remove the platforms too, delete those first ([Remove the platform](./custom-resources/platform.md#remove-the-platform)):

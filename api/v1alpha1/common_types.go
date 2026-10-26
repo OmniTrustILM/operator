@@ -50,8 +50,8 @@ type ImageSpec struct {
 	// +optional
 	Digest string `json:"digest,omitempty"`
 
-	// PullPolicy defines the image pull policy.
-	// +kubebuilder:default="IfNotPresent"
+	// PullPolicy defines the image pull policy. A Platform component that leaves it unset
+	// uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
 	// +optional
 	PullPolicy string `json:"pullPolicy,omitempty"`
 

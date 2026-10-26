@@ -196,8 +196,9 @@ spec:
                       version bundle when applicable).
                     type: string
                   pullPolicy:
-                    default: IfNotPresent
-                    description: PullPolicy defines the image pull policy.
+                    description: |-
+                      PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                      uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                     type: string
                   pullSecrets:
                     description: PullSecrets is a list of secret names for pulling
@@ -1210,8 +1211,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -1889,8 +1891,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -2530,8 +2533,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -2940,8 +2944,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -3433,8 +3438,9 @@ spec:
                               from the version bundle when applicable).
                             type: string
                           pullPolicy:
-                            default: IfNotPresent
-                            description: PullPolicy defines the image pull policy.
+                            description: |-
+                              PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                              uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                             type: string
                           pullSecrets:
                             description: PullSecrets is a list of secret names for
@@ -4224,8 +4230,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -4942,8 +4949,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -6108,8 +6116,9 @@ spec:
                               from the version bundle when applicable).
                             type: string
                           pullPolicy:
-                            default: IfNotPresent
-                            description: PullPolicy defines the image pull policy.
+                            description: |-
+                              PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                              uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                             type: string
                           pullSecrets:
                             description: PullSecrets is a list of secret names for
@@ -7086,8 +7095,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -7759,8 +7769,9 @@ spec:
                           the version bundle when applicable).
                         type: string
                       pullPolicy:
-                        default: IfNotPresent
-                        description: PullPolicy defines the image pull policy.
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                         type: string
                       pullSecrets:
                         description: PullSecrets is a list of secret names for pulling
@@ -8724,8 +8735,9 @@ spec:
                       version bundle when applicable).
                     type: string
                   pullPolicy:
-                    default: IfNotPresent
-                    description: PullPolicy defines the image pull policy.
+                    description: |-
+                      PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                      uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
                     type: string
                   pullSecrets:
                     description: PullSecrets is a list of secret names for pulling
