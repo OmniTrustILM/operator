@@ -265,7 +265,3 @@ type ProxyList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Proxy `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&Proxy{}, &ProxyList{})
-}

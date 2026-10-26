@@ -127,7 +127,7 @@ func replicasFieldOwners(ns, kind, name string) []string {
 			continue
 		}
 		var fields map[string]json.RawMessage
-		ExpectWithOffset(1, json.Unmarshal(e.FieldsV1.Raw, &fields)).To(Succeed())
+		ExpectWithOffset(1, json.Unmarshal(e.FieldsV1.GetRawBytes(), &fields)).To(Succeed())
 		raw, ok := fields["f:spec"]
 		if !ok {
 			continue

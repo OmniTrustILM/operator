@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,6 +43,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/connectorhealth"
 	"github.com/OmniTrustILM/operator/internal/monitoring"
 	"github.com/OmniTrustILM/operator/internal/registration"
+	"github.com/OmniTrustILM/operator/pkg/capabilities"
 )
 
 // msgRefNotFound formats the missing-reference condition/event message
@@ -62,6 +64,9 @@ const (
 
 // maxConcurrentReconciles lets other Connectors reconcile while a health check waits out its timeout.
 const maxConcurrentReconciles = 4
+
+// serviceMonitorGK is the Prometheus operator's ServiceMonitor, served only where its CRD is installed.
+var serviceMonitorGK = schema.GroupKind{Group: "monitoring.coreos.com", Kind: "ServiceMonitor"}
 
 // Reconciler reconciles a Connector object.
 type Reconciler struct {
@@ -462,10 +467,23 @@ func (r *Reconciler) reconcilePDB(ctx context.Context, conn *otilmv1alpha1.Conne
 	return nil
 }
 
-// reconcileServiceMonitor creates, updates, or deletes the ServiceMonitor for the Connector.
+// reconcileServiceMonitor creates, updates, or deletes the ServiceMonitor for the Connector. It
+// does nothing while the ServiceMonitor CRD is not served: no ServiceMonitor can exist then, and a
+// lookup would make the RESTMapper rediscover the API group outside the reconcile's context,
+// which can hold the manager's shutdown until the discovery request times out.
 func (r *Reconciler) reconcileServiceMonitor(ctx context.Context, conn *otilmv1alpha1.Connector) error {
 	logger := log.FromContext(ctx)
 	desiredSM := connbuilder.BuildServiceMonitor(conn)
+	served, err := r.serviceMonitorServed(ctx, desiredSM != nil)
+	if err != nil {
+		return err
+	}
+	if !served {
+		if desiredSM != nil {
+			logger.Info("ServiceMonitor CRD not installed, skipping ServiceMonitor creation")
+		}
+		return nil
+	}
 	if desiredSM != nil {
 		sm := &monitoringv1.ServiceMonitor{ObjectMeta: metav1.ObjectMeta{Name: desiredSM.Name, Namespace: desiredSM.Namespace}}
 		if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sm, func() error {
@@ -494,6 +512,21 @@ func (r *Reconciler) reconcileServiceMonitor(ctx context.Context, conn *otilmv1a
 		}
 	}
 	return nil
+}
+
+// serviceMonitorServed reports whether the ServiceMonitor CRD is served. A failed check is an
+// error only when a ServiceMonitor is wanted or the reconcile's context has ended: removing a
+// stale ServiceMonitor is best-effort for an optional resource, so it just waits for a later pass.
+func (r *Reconciler) serviceMonitorServed(ctx context.Context, wanted bool) (bool, error) {
+	served, err := capabilities.New(r.RESTMapper()).AvailableContext(ctx, serviceMonitorGK, "v1")
+	if err == nil {
+		return served, nil
+	}
+	if !wanted && ctx.Err() == nil {
+		log.FromContext(ctx).Error(err, "failed to detect the ServiceMonitor CRD, skipping ServiceMonitor cleanup")
+		return false, nil
+	}
+	return false, fmt.Errorf("detecting the ServiceMonitor CRD: %w", err)
 }
 
 // updateDeploymentStatus checks the Deployment status and sets the appropriate
