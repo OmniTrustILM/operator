@@ -477,9 +477,10 @@ func keycloakDBBlock(p *otilmv1alpha1.Platform) map[string]interface{} {
 // recommended operator-native runtime path is to layer the theme through this (explicitly
 // "unsupported") podTemplate, which the Operator MERGES onto its generated pod:
 //   - spec.volumes: a dedicated "ilm-theme" emptyDir (not shared with Keycloak's own data volumes);
-//   - spec.initContainers: "init-theme" runs the BOM theme image and copies its baked /themes into
-//     that volume. It is SHORT-LIVED (copy then exit 0), so — unlike a long-running init container
-//     (the documented PodInitializing wedge, #30231) — it cannot block the Keycloak container;
+//   - spec.initContainers: "init-theme" runs the theme image (resolveKeycloakThemeImage) and copies
+//     its baked /themes into that volume. It is SHORT-LIVED (copy then exit 0), so — unlike a
+//     long-running init container (the documented PodInitializing wedge, #30231) — it cannot block
+//     the Keycloak container;
 //   - the keycloak container (position 0) mounts "ilm-theme" at /opt/keycloak/themes. Mounting
 //     there only ADDS the ilm theme (the built-ins ship in a classpath JAR), and the realm's
 //     loginTheme=ilm (DefaultKeycloakRealm) selects it. The theme files + the realm that selects
@@ -530,7 +531,7 @@ func keycloakPodTemplate(themeImage, themePullPolicy string) map[string]interfac
 }
 
 // keycloakInitThemeContainer renders the SCC-clean init-theme initContainer that stages the ilm
-// Keycloak theme: it runs the BOM theme image (which bakes the theme under /themes) and copies it
+// Keycloak theme: it runs the resolved theme image (which bakes the theme under /themes) and copies it
 // into the shared "ilm-theme" emptyDir mounted at /data, which the Keycloak container then sees at
 // /opt/keycloak/themes. It is SCC-clean AND readOnlyRootFilesystem — its only write target is the
 // mounted volume — so it satisfies OpenShift restricted-v2 with no exceptions. Mirrors the chart's
@@ -570,16 +571,20 @@ func keycloakThemeEnabled(p *otilmv1alpha1.Platform) bool {
 }
 
 // resolveKeycloakThemeImage returns the fully-qualified ilm Keycloak theme image + pull policy for
-// this Platform's selected version bundle, or ("","") when the bundle ships no theme. The image
-// resolves through the shared ResolveImage path, so a spec.common.image registry/repository
-// override (an air-gapped mirror) redirects the theme image too; there is no per-theme CR image
-// field — the coordinate is operator-owned, versioned in the BOM.
+// this Platform's selected version bundle, or ("","") when the bundle ships no theme. Each image field
+// resolves through the shared ResolveImage path: keycloak.managed.themeImage, then spec.common.image
+// (an air-gapped mirror's registry/repository), then the BOM. The override never enables the theme on
+// a bundle without one, so the theme files and the realm loginTheme stay on one gate.
 func resolveKeycloakThemeImage(p *otilmv1alpha1.Platform) (image, pullPolicy string) {
 	if !keycloakThemeEnabled(p) {
 		return "", ""
 	}
+	override := otilmv1alpha1.ImageSpec{}
+	if p.Spec.Keycloak.Managed.ThemeImage != nil {
+		override = *p.Spec.Keycloak.Managed.ThemeImage
+	}
 	ref, policy := common.ResolveImage(resolveBundle(p).Lookup, keycloakThemeComponent,
-		p.Spec.Common.Image, otilmv1alpha1.ImageSpec{})
+		p.Spec.Common.Image, override)
 	return ref, string(policy)
 }
 

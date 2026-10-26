@@ -219,6 +219,8 @@ spec:
     #   instances: 2
     #   version: "26.6.3"              # selects the Keycloak CR image (the 2.19.0-validated version; omitted → the Keycloak Operator's own default, already 26.6.3)
     #   logLevel: info                 # managed Keycloak root log level (KC_LOG_LEVEL); empty = Keycloak default (info)
+    #   themeImage:                    # login theme image, per field over common.image and the bundle (no effect without a bundled theme)
+    #     digest: sha256:<digest>      # pins the image and ignores the tag; or set tag: <tag> alone
     #   upgradeAcknowledged: false     # set true to OPT IN to a MAJOR Keycloak upgrade of a running instance
     #   realmImport:                   # optional, create-only import from a user ConfigMap
     #     configMapRef: ilm-realm

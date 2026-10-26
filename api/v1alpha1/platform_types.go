@@ -416,6 +416,13 @@ type ManagedKeycloakSpec struct {
 	// default (info). Applies only to a managed Keycloak.
 	// +optional
 	LogLevel string `json:"logLevel,omitempty"`
+	// ThemeImage overrides the platform login theme image, per field. The managed Keycloak pods
+	// copy the theme from it in an init container. Registry, repository, name, tag, digest and
+	// pullPolicy fall back to the shared spec.common.image, and the image then to the version
+	// bundle, so a tag or a digest alone keeps the bundle's image name. PullSecrets, command and
+	// args are not used. It has no effect on a version whose bundle ships no theme.
+	// +optional
+	ThemeImage *ImageSpec `json:"themeImage,omitempty"`
 	// RealmImport optionally provisions the platform realm from a user-provided ConfigMap
 	// (create-only: the realm is imported once and not re-imported on every reconcile).
 	// +optional

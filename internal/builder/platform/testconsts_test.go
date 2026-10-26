@@ -52,6 +52,7 @@ const (
 	testKeycloakName = "ilm-keycloak"
 	testRealmName    = "ilm-realm"
 	testLogLevel     = "log-level"
+	testThemeTag     = "develop-latest"
 
 	// managed_messaging_test.go.
 	testMessagingName    = "ilm-messaging"

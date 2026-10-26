@@ -82,6 +82,6 @@ The typed surface of each `managed` dependency. [Infrastructure: external or man
 | `database.managed` | `instances`, `version`, `upgradeAcknowledged`, `storage`, `resources`, `overrides`, and `backup` (`schedule` and `retention` — the field is shipped for forward compatibility; the object-store wiring is not implemented yet, so configure backups on the CloudNativePG cluster itself for now). |
 | `database.pgBouncer` | `managed` (the pooler switch), `instances`, `parameters`. |
 | `messaging.managed` | `replicas`, `version`, `upgradeAcknowledged`, `storage`, `resources`, `overrides`, plus the migration controls `drainTimeout` (default `15m`) and `forceCutoverForVersion` — see [Upgrading](../upgrading.md). |
-| `keycloak.managed` | `instances`, `version`, `upgradeAcknowledged`, `logLevel`, `realmImport`, `overrides`. |
+| `keycloak.managed` | `instances`, `version`, `upgradeAcknowledged`, `logLevel`, `themeImage` (the login theme image, per field like a component's `image`), `realmImport`, `overrides`. |
 
 Anything an `overrides` patch may not touch is listed with its managed dependency in [The Platform CR](./platform.md#infrastructure-external-or-managed). For the fields not covered here, the annotated [`platform-cr-reference.yaml`](https://github.com/OmniTrustILM/operator/blob/main/docs/design/examples/platform-cr-reference.yaml) carries every one with a comment.

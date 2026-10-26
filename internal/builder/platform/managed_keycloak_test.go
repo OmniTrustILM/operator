@@ -14,6 +14,7 @@ import (
 	"github.com/OmniTrustILM/operator/internal/builder/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -662,6 +663,91 @@ func TestResolveManagedKeycloakNoThemeForOlderBundle(t *testing.T) {
 
 	_, hasLoginTheme := DefaultKeycloakRealm(p)["loginTheme"]
 	assert.False(t, hasLoginTheme, "no realm loginTheme when the bundle ships no theme")
+}
+
+// TestResolveManagedKeycloakThemeImageOverride locks keycloak.managed.themeImage on the init-theme
+// container. The Keycloak Operator builds the realm-import Job from the same pod template, so the
+// override reaches both pods.
+func TestResolveManagedKeycloakThemeImageOverride(t *testing.T) {
+	const (
+		themeRef = "hub.omnitrustregistry.com/ilm/keycloak-theme"
+		digest   = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	)
+	tests := []struct {
+		name         string
+		commonPolicy corev1.PullPolicy
+		themeImage   *otilmv1alpha1.ImageSpec
+		want         string
+		wantPolicy   corev1.PullPolicy
+	}{
+		{
+			name:         "unset keeps the bundle image and the shared pull policy",
+			commonPolicy: corev1.PullAlways,
+			want:         themeRef + ":0.1.4",
+			wantPolicy:   corev1.PullAlways,
+		},
+		{
+			name:       "a tag replaces the bundle tag",
+			themeImage: &otilmv1alpha1.ImageSpec{Tag: testThemeTag},
+			want:       themeRef + ":" + testThemeTag,
+			wantPolicy: corev1.PullIfNotPresent,
+		},
+		{
+			name:       "a digest pins the image and drops the tag",
+			themeImage: &otilmv1alpha1.ImageSpec{Tag: testThemeTag, Digest: digest},
+			want:       themeRef + "@" + digest,
+			wantPolicy: corev1.PullIfNotPresent,
+		},
+		{
+			name:         "an override without a pull policy keeps the shared one",
+			commonPolicy: corev1.PullAlways,
+			themeImage:   &otilmv1alpha1.ImageSpec{Digest: digest},
+			want:         themeRef + "@" + digest,
+			wantPolicy:   corev1.PullAlways,
+		},
+		{
+			name:         "an override's pull policy beats the shared one",
+			commonPolicy: corev1.PullAlways,
+			themeImage:   &otilmv1alpha1.ImageSpec{PullPolicy: string(corev1.PullNever)},
+			want:         themeRef + ":0.1.4",
+			wantPolicy:   corev1.PullNever,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := managedKCPlatform(func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.Image.PullPolicy = string(tt.commonPolicy)
+				p.Spec.Keycloak.Managed.ThemeImage = tt.themeImage
+			})
+			DefaultImageRegistry(p)
+			kc := findManagedObj(ResolveManagedKeycloak(p), keycloakKind)
+			require.NotNil(t, kc)
+
+			initContainers, _, err := unstructured.NestedSlice(kc.Object, "spec", "unsupported", "podTemplate", "spec", "initContainers")
+			require.NoError(t, err)
+			require.Len(t, initContainers, 1)
+			ic := initContainers[0].(map[string]interface{})
+			assert.Equal(t, tt.want, ic["image"])
+			assert.Equal(t, string(tt.wantPolicy), ic["imagePullPolicy"])
+		})
+	}
+}
+
+// TestResolveManagedKeycloakThemeImageNeedsThemeBundle asserts the override never enables the theme
+// on a bundle without one (2.17.0), so the theme files and the realm that selects them stay on one gate.
+func TestResolveManagedKeycloakThemeImageNeedsThemeBundle(t *testing.T) {
+	p := managedKCPlatform(func(p *otilmv1alpha1.Platform) {
+		p.Spec.Version = testVersion217
+		p.Spec.Keycloak.Managed.ThemeImage = &otilmv1alpha1.ImageSpec{Tag: testThemeTag}
+	})
+	DefaultImageRegistry(p)
+	kc := findManagedObj(ResolveManagedKeycloak(p), keycloakKind)
+	require.NotNil(t, kc)
+
+	_, hasInit, _ := unstructured.NestedSlice(kc.Object, "spec", "unsupported", "podTemplate", "spec", "initContainers")
+	assert.False(t, hasInit, "no init-theme container when the bundle ships no theme, even with a themeImage")
+	_, hasLoginTheme := DefaultKeycloakRealm(p)["loginTheme"]
+	assert.False(t, hasLoginTheme, "no realm loginTheme when the bundle ships no theme, even with a themeImage")
 }
 
 func TestResolveManagedKeycloakHostnameFromEdge(t *testing.T) {
