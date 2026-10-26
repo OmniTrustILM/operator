@@ -47,6 +47,12 @@ import (
 // present the reference is pinned as registry/repository/name@digest and the tag is
 // ignored, so a deployment can run an immutable image. The digest is NOT defaulted from
 // the version bundle (the bundle carries tags only); it is purely a user override.
+//
+// The pull policy follows the same per-component > shared order and defaults to
+// IfNotPresent here, never through a CRD default: the apiserver would store a CRD default
+// in every image object a write carries, including the empty one a Go-typed write sends
+// for each value-typed image field, and the stored per-component value would then
+// override the shared one.
 func ResolveImage(bundleLookup func(string) (bom.Image, bool), component string, shared, comp otilmv1alpha1.ImageSpec) (string, corev1.PullPolicy) {
 	registry := pickImageField(comp.Registry, shared.Registry)
 	name := pickImageField(comp.Name, shared.Name)

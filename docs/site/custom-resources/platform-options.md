@@ -8,7 +8,7 @@ This page is the complete field reference for the `otilm.com/v1alpha1` `Platform
 
 ## Top level (`spec.*`)
 
-The fields on `spec` itself; [How configuration is organized](./platform.md#how-configuration-is-organized) explains the four kinds of configuration they fall into. Most defaults below are **apiserver** defaults, applied on write, so `kubectl get platform -o yaml` shows them back. A few carry no CRD default at all and are filled by the operator at render time — `networkPolicy.ingressNamespace` and `core.clientCertHeader` are the two to know, since neither appears in the stored object until you set it.
+The fields on `spec` itself; [How configuration is organized](./platform.md#how-configuration-is-organized) explains the four kinds of configuration they fall into. Most defaults below are **apiserver** defaults, applied on write, so `kubectl get platform -o yaml` shows them back. A few carry no CRD default at all and are filled by the operator at render time — `networkPolicy.ingressNamespace`, `core.clientCertHeader` and every `image.pullPolicy` are the ones to know, since none of them appears in the stored object until you set it.
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -55,7 +55,7 @@ Shared by every component.
 
 | Field | Purpose |
 |---|---|
-| `image` | Per-field image override, falling back to `common.image` and then the bundle. |
+| `image` | Per-field image override, falling back to `common.image` and then the bundle. An unset `pullPolicy` follows `common.image.pullPolicy`; a platform first reconciled by an earlier operator release still stores one per component until you [remove it](../installation.md#upgrading-the-operator). |
 | `replicas` | A fixed replica count, ignored when `autoscaling` is set. |
 | `workloadType` | `Deployment` (default) or `StatefulSet`. |
 | `podDisruptionBudget` | `enabled` plus `minAvailable` or `maxUnavailable` (mutually exclusive; `minAvailable` wins). |
