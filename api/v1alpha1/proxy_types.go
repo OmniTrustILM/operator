@@ -9,6 +9,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // ProxyPhase represents the current phase of the Proxy.
@@ -267,5 +268,8 @@ type ProxyList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Proxy{}, &ProxyList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &Proxy{}, &ProxyList{})
+		return nil
+	})
 }

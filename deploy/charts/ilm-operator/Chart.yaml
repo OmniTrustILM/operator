@@ -3,7 +3,7 @@ name: ilm-operator
 description: ILM Operator - manages the ILM platform and its connectors via CRDs (Platform, Connector, and Proxy)
 type: application
 # version must stay *-develop on main; release versions are set when tagging
-version: 1.1.0
+version: 1.1.0-1-develop
 appVersion: "1.1.0"
 keywords:
   - ilm

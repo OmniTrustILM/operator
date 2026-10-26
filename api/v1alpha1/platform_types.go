@@ -1648,5 +1648,8 @@ type PlatformList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Platform{}, &PlatformList{})
+	SchemeBuilder.Register(func(s *runtime.Scheme) error {
+		s.AddKnownTypes(GroupVersion, &Platform{}, &PlatformList{})
+		return nil
+	})
 }
