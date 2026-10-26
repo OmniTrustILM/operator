@@ -7,8 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 package capabilities
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,9 +52,23 @@ func (m *stubMapper) RESTMappings(schema.GroupKind, ...string) ([]*meta.RESTMapp
 }
 func (m *stubMapper) ResourceSingularizer(string) (string, error) { panic("unused") }
 
-func TestDetectorAvailable(t *testing.T) {
-	certManager := schema.GroupKind{Group: "cert-manager.io", Kind: "Certificate"}
+// blockingMapper is a stubMapper whose RESTMapping waits until released, as a discovery
+// request does against a stalled API server.
+type blockingMapper struct {
+	stubMapper
+	entered  chan struct{}
+	released chan struct{}
+}
 
+func (m *blockingMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	m.entered <- struct{}{}
+	<-m.released
+	return m.stubMapper.RESTMapping(gk, versions...)
+}
+
+var certManager = schema.GroupKind{Group: "cert-manager.io", Kind: "Certificate"}
+
+func TestDetectorAvailable(t *testing.T) {
 	t.Run("present when the mapper returns a mapping", func(t *testing.T) {
 		m := &stubMapper{mapping: &meta.RESTMapping{}}
 		ok, err := New(m).Available(certManager, "v1")
@@ -71,7 +87,7 @@ func TestDetectorAvailable(t *testing.T) {
 
 	t.Run("absent on NoResourceMatchError -> (false, nil)", func(t *testing.T) {
 		m := &stubMapper{err: &meta.NoResourceMatchError{PartialResource: schema.GroupVersionResource{
-			Group: "cert-manager.io", Version: "v1", Resource: "certificates",
+			Group: certManager.Group, Version: "v1", Resource: "certificates",
 		}}}
 		ok, err := New(m).Available(certManager, "v1")
 		require.NoError(t, err)
@@ -93,5 +109,44 @@ func TestDetectorAvailable(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, ok)
 		assert.Empty(t, m.gotVersions, "with no versions the preferred mapping is requested")
+	})
+}
+
+func TestDetectorAvailableContext(t *testing.T) {
+	t.Run("reports what Available reports", func(t *testing.T) {
+		m := &stubMapper{err: &meta.NoKindMatchError{GroupKind: certManager, SearchedVersions: []string{"v1"}}}
+		ok, err := New(m).AvailableContext(context.Background(), certManager, "v1")
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Equal(t, []string{"v1"}, m.gotVersions, "the version is forwarded to the mapper")
+	})
+
+	t.Run("returns the context's error when it ends during a lookup", func(t *testing.T) {
+		m := &blockingMapper{entered: make(chan struct{}, 1), released: make(chan struct{})}
+		defer close(m.released)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := New(m).AvailableContext(ctx, certManager, "v1")
+			done <- err
+		}()
+		<-m.entered
+		cancel()
+		select {
+		case err := <-done:
+			assert.ErrorIs(t, err, context.Canceled)
+		case <-time.After(time.Second):
+			t.Fatal("AvailableContext waited for the mapper after its context ended")
+		}
+	})
+
+	t.Run("does not ask the mapper once the context has ended", func(t *testing.T) {
+		m := &stubMapper{mapping: &meta.RESTMapping{}}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		ok, err := New(m).AvailableContext(ctx, certManager, "v1")
+		require.ErrorIs(t, err, context.Canceled)
+		assert.False(t, ok)
+		assert.Empty(t, m.gotGK.Kind, "no discovery is started for an ended context")
 	})
 }

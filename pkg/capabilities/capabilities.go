@@ -22,6 +22,8 @@ SPDX-License-Identifier: Apache-2.0
 package capabilities
 
 import (
+	"context"
+
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -57,4 +59,29 @@ func (d *Detector) Available(gk schema.GroupKind, versions ...string) (bool, err
 		return false, err
 	}
 	return true, nil
+}
+
+// AvailableContext is Available bounded by ctx: it returns ctx's error as soon as ctx ends. A
+// RESTMapper takes no context, and the dynamic mapper answers a miss with a discovery request that
+// can block for the discovery client's whole timeout, so the lookup runs on its own goroutine and
+// finishes in the background once ctx has ended.
+func (d *Detector) AvailableContext(ctx context.Context, gk schema.GroupKind, versions ...string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	type result struct {
+		available bool
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		available, err := d.Available(gk, versions...)
+		done <- result{available, err}
+	}()
+	select {
+	case r := <-done:
+		return r.available, r.err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
