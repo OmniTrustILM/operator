@@ -188,20 +188,33 @@ status() {
   done
 }
 
+# remove_if_present <container|volume> <name>: a missing object is fine, but one that exists and
+# cannot be removed (a volume still in use, say) fails with Docker's own message on stderr.
+remove_if_present() {
+  docker "$1" inspect "$2" >/dev/null 2>&1 || return 0
+  if [ "$1" = volume ]; then
+    docker volume rm "$2" >/dev/null
+  else
+    docker container rm -f "$2" >/dev/null
+  fi
+}
+
 down() {
-  local entry
+  local entry failed=0
   for entry in "${REGISTRIES[@]}"; do
-    docker rm -f "$(mirror_name "${entry%%|*}")" >/dev/null 2>&1 || true
+    remove_if_present container "$(mirror_name "${entry%%|*}")" || failed=1
   done
+  [ "${failed}" -eq 0 ] || die "could not remove every mirror container"
   echo "e2e registry cache: mirror containers removed; cached layers kept (purge deletes them)"
 }
 
 purge() {
-  local entry
+  local entry failed=0
   down
   for entry in "${REGISTRIES[@]}"; do
-    docker volume rm "$(mirror_name "${entry%%|*}")" >/dev/null 2>&1 || true
+    remove_if_present volume "$(mirror_name "${entry%%|*}")" || failed=1
   done
+  [ "${failed}" -eq 0 ] || die "could not delete every cache volume, so the cache may still hold layers"
   echo "e2e registry cache: cached layers deleted"
 }
 
