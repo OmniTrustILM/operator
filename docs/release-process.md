@@ -62,7 +62,11 @@ make test-e2e-managed E2E_MANAGED_LABEL=matrix-migration
 The blocks are `managed-postgres`, `managed-rabbitmq`, `managed-keycloak`, `managed-mcp`,
 `full`, `matrix-upgrade`, `matrix-preview` and `matrix-migration`. The faster option for a
 release gate is to dispatch the **E2E Managed** workflow on GitHub Actions, which runs all of them
-in parallel, each on its own Kind cluster.
+in parallel, each on its own Kind cluster. A local gate run must use fresh clusters, so leave
+`E2E_REUSE_CLUSTER` unset. `E2E_REGISTRY_CACHE=1` carries no node state either, but it keeps
+serving an image that was removed from its registry after it was cached, so run
+`make e2e-registry-cache-purge` first (see
+[Running the Kind e2e locally](../CONTRIBUTING.md#running-the-kind-e2e-locally)).
 
 **Verify the BOM against the component releases.** The bundle for `$platform_version` in
 `pkg/bom/bom.go` — image coordinates, wiring env-var names, Secret keys, managed messaging

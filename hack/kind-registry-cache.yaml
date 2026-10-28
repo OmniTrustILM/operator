@@ -1,0 +1,11 @@
+# Kind cluster config for E2E_REGISTRY_CACHE=1 (see hack/e2e-registry-cache.sh).
+#
+# It only switches on containerd's per-registry host configuration directory. The script then
+# writes one hosts.toml per registry into the node, pointing it at a host-side pull-through
+# mirror. Apart from that the cluster is what `kind create cluster` builds by default.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"

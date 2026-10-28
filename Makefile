@@ -157,6 +157,27 @@ KIND_CLUSTER ?= ilm-operator-test-e2e
 # `go test` would be thrown away with the old node.
 E2E_IMAGE_ARCHIVE ?=
 
+# E2E_REGISTRY_CACHE=1 keeps the Kind node's DOWNLOADED IMAGES across runs — for local runs only.
+# The cluster is still deleted and recreated every run (setup-test-e2e), but its containerd pulls
+# through host-side pull-through mirrors whose layers outlive it, so only the first run downloads
+# every component image. Off by default and never set by CI: with it unset every run pulls its
+# images straight from their registries. See hack/e2e-registry-cache.sh and CONTRIBUTING.md
+# (Running the Kind e2e locally).
+E2E_REGISTRY_CACHE ?=
+ifeq ($(E2E_REGISTRY_CACHE),1)
+# The cluster config that switches on containerd's registry host directory, where the script then
+# writes the mirror entries.
+E2E_KIND_CREATE_ARGS := --config hack/kind-registry-cache.yaml
+endif
+
+# E2E_REUSE_CLUSTER=1 keeps the Kind CLUSTER between runs — for iterating locally only. A running
+# cluster is reused (a missing or stopped one is created again) and cleanup-test-e2e leaves it in
+# place, so a later run also skips the create/delete and finds its images already in the node.
+# That is the stale-node risk setup-test-e2e's comment describes, so a result from a reused cluster
+# is not one to trust before a PR or a release — rerun without it. Off by default and never set by
+# CI.
+E2E_REUSE_CLUSTER ?=
+
 .PHONY: setup-test-e2e
 # Depends on `kind` so the binary is DOWNLOADED here rather than inherited from whichever goal
 # ran first: every e2e entry point goes through this target, so it must stand alone — on a fresh
@@ -173,9 +194,25 @@ setup-test-e2e: kind ## Set up a FRESH Kind cluster for e2e tests (delete-if-exi
 	# any existing cluster before creating guarantees every run — especially a re-run after a
 	# failure — gets a clean containerd, so a green/red result reflects the operator, not stale
 	# node state. The delete is a no-op (|| true) when no such cluster exists.
+# E2E_REUSE_CLUSTER=1 skips all of that: a cluster whose node is running is kept, and one that is
+# missing or stopped (after a Docker restart, say) is recreated, because `kind get clusters` lists
+# stopped clusters too. `kind export kubeconfig` then selects the cluster's context, so the suite's
+# kubectl starts on this cluster rather than on whatever context was current when it is reused.
+ifeq ($(E2E_REUSE_CLUSTER),1)
+	@echo "E2E_REUSE_CLUSTER=1: reusing Kind cluster '$(KIND_CLUSTER)' while its node is running -- NOT a fresh node."
+	@if [ -z "$$($(CONTAINER_TOOL) ps -q --filter label=io.x-k8s.kind.cluster=$(KIND_CLUSTER))" ]; then \
+		$(KIND) delete cluster --name $(KIND_CLUSTER) >/dev/null 2>&1 || true; \
+		$(KIND) create cluster --name $(KIND_CLUSTER) $(E2E_KIND_CREATE_ARGS); \
+	fi
+	@$(KIND) export kubeconfig --name $(KIND_CLUSTER)
+else
 	@echo "Ensuring a FRESH Kind cluster '$(KIND_CLUSTER)' (delete-if-exists, then create)..."
 	@$(KIND) delete cluster --name $(KIND_CLUSTER) >/dev/null 2>&1 || true
-	@$(KIND) create cluster --name $(KIND_CLUSTER)
+	@$(KIND) create cluster --name $(KIND_CLUSTER) $(E2E_KIND_CREATE_ARGS)
+endif
+ifeq ($(E2E_REGISTRY_CACHE),1)
+	@./hack/e2e-registry-cache.sh attach $(KIND_CLUSTER)
+endif
 
 .PHONY: test-e2e
 test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PRs): operator deploy + external-mode Platform + Connector. Excludes the managed tier.
@@ -258,7 +295,11 @@ test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (f
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: kind ## Tear down the Kind cluster used for e2e tests
+ifeq ($(E2E_REUSE_CLUSTER),1)
+	@echo "E2E_REUSE_CLUSTER=1: keeping Kind cluster '$(KIND_CLUSTER)' (delete it with: make prune-kind-cluster KIND_CLUSTER=$(KIND_CLUSTER))"
+else
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+endif
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -551,6 +592,20 @@ kind-load: kind ## Load the operator Docker image into the Kind cluster.
 kind-export-logs: kind ## Export logs from the Kind cluster into KIND_LOG_DIR (best-effort).
 	@$(KIND) export logs $(KIND_LOG_DIR) --name $(KIND_CLUSTER_NAME) \
 		|| echo "No logs exported: cluster $(KIND_CLUSTER_NAME) does not exist."
+
+# The image cache is shared by every e2e cluster on the machine, so it is managed apart from them:
+# prune-kind-cluster deletes a cluster and leaves the cache (and its warm layers) alone.
+.PHONY: e2e-registry-cache-status
+e2e-registry-cache-status: ## Show the e2e image cache (E2E_REGISTRY_CACHE=1) mirrors and what they hold.
+	@./hack/e2e-registry-cache.sh status
+
+.PHONY: e2e-registry-cache-down
+e2e-registry-cache-down: ## Remove the e2e image cache containers; the cached layers are kept.
+	@./hack/e2e-registry-cache.sh down
+
+.PHONY: e2e-registry-cache-purge
+e2e-registry-cache-purge: ## Remove the e2e image cache containers AND the cached layers.
+	@./hack/e2e-registry-cache.sh purge
 
 ##@ Quality
 

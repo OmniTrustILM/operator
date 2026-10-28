@@ -108,6 +108,12 @@ make test
 # Run E2E tests on Kind cluster
 make test-e2e
 
+# Local-only e2e speedups, opt-in and never set in CI (CONTRIBUTING.md → Running the Kind e2e
+# locally): keep downloaded images across fresh clusters, or additionally keep the cluster itself
+# (stale-node risk — rerun without it before trusting a result)
+make test-e2e-managed E2E_MANAGED_LABEL=managed-keycloak E2E_REGISTRY_CACHE=1
+make test-e2e-managed E2E_MANAGED_LABEL=managed-keycloak E2E_REGISTRY_CACHE=1 E2E_REUSE_CLUSTER=1
+
 # Run tests with coverage verification (80% threshold)
 make coverage
 
