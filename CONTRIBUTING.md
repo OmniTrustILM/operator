@@ -108,6 +108,62 @@ auto-generated release notes by those labels, so an unlabelled PR lands under "O
 Note that **Test** ignores `deploy/charts/**`: a chart-only PR is validated by **Test Chart**
 and nothing else, and a code-only PR never runs the chart jobs.
 
+### Running the Kind e2e locally
+
+The e2e suite is a gate, not the development loop (see [step 2](#2-work-the-fast-loop)). When you
+do run it on your machine, these opt-in switches make a run cheaper. CI sets none of them, and
+with all of them unset every `make test-e2e*` target deletes and recreates the Kind cluster and
+pulls every image from its registry, so each run starts from a pristine node.
+
+**`E2E_REGISTRY_CACHE=1` keeps the downloaded images, not the cluster.** A fresh cluster starts
+with an empty image store, so every run downloads every component image again — a large share of
+the time of a managed block. With the cache on, the cluster is still deleted and recreated every
+run, but its containerd pulls through registry containers on your host (Docker's official
+`registry` image in pull-through mode, one each for `docker.io`, `quay.io`, `ghcr.io` and
+`hub.omnitrustregistry.com`) that keep their layers in Docker volumes. The first run fills the
+cache; later runs read the images from your machine.
+
+```bash
+make test-e2e-managed E2E_MANAGED_LABEL=managed-keycloak E2E_REGISTRY_CACHE=1
+```
+
+- Only image bytes survive between runs, so the stale-node risk below does not apply. While its
+  registry is reachable, a tag is resolved against it on every pull, so a tag that moved still
+  gives you the new image. An image that was removed from its registry after it was cached keeps
+  being served from the cache, though; `make e2e-registry-cache-purge` shows what a fresh machine
+  would get.
+- The mirrors hold no credentials, so they cache only what a registry serves anonymously. An
+  image from any registry not listed above, and every image while a mirror is down, is pulled
+  from its registry as without the cache, and a mirror that cannot be started is skipped with a
+  warning.
+- The mirrors keep running between runs. `make e2e-registry-cache-status` shows what they hold,
+  `make e2e-registry-cache-down` removes the containers and keeps the layers, and
+  `make e2e-registry-cache-purge` removes the layers as well.
+- It needs Docker, like the rest of the Kind setup, and the first use pulls the `registry` image.
+
+**`E2E_REUSE_CLUSTER=1` keeps the cluster too — for iterating locally only.** A running cluster
+is reused and left in place afterwards (one that is missing, or stopped by a Docker restart, is
+created again), so the next run also skips the cluster's create and delete and finds its images
+already in the node. That is exactly what the default avoids: a run that crashed leaves orphaned
+container shims and a half-written image store in the node, and anything the suite did not clean
+up (CRDs, namespaces, upstream operators) stays for the next run. A red *or* a green run on a
+reused cluster may therefore say more about the cluster than about the operator, so rerun without
+it before you trust a result, and never use it for the
+[release gate](docs/release-process.md). `make prune-kind-cluster` deletes the cluster when it
+misbehaves.
+
+The switches combine: set together, the first run creates a cache-enabled cluster and later runs
+reuse it. Turning the cache on for a kept cluster that was created without it stops with a message
+to delete that cluster first, because containerd reads the mirror entries only when it was
+configured for them at creation.
+
+Every `make test-e2e*` run acts on the cluster named by `KIND_CLUSTER` (default
+`ilm-operator-test-e2e`) — deleting it, unless `E2E_REUSE_CLUSTER=1` — and the suite's `kubectl`
+follows the current context of your kubeconfig, which every `kind create cluster` switches. Two
+runs at the same time, from two worktrees say, therefore each need their own `KIND_CLUSTER` and
+their own kubeconfig, for example `KUBECONFIG=$HOME/.kube/e2e-b make test-e2e KIND_CLUSTER=b`;
+`make prune-kind-cluster` needs the same `KIND_CLUSTER`.
+
 ## Where things live
 
 The directory map and the responsibilities of each package are in
