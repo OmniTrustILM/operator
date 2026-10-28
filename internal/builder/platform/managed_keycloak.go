@@ -315,14 +315,39 @@ func keycloakAdditionalOptions(m *otilmv1alpha1.ManagedKeycloakSpec) []interface
 	return opts
 }
 
+// KeycloakFeatureCIMD is the Keycloak feature that lets a client sign in with the URL of a client ID
+// metadata document. MCP's mcp-cimd client policy uses it, so the reconciler removes that policy
+// before the Keycloak CR stops enabling the feature.
+const KeycloakFeatureCIMD = "cimd"
+
+// keycloakEnabledFeatures returns the Keycloak features MCP needs, for spec.features.enabled, or nil
+// when the platform does not serve MCP, so the CR then carries no spec.features at all.
+//
+// token-exchange-delegation lets MCP exchange the signed-in user's token for one that names MCP as the
+// actor: it checks the actor against the token's may_act claim, and parameterized-scopes provides the
+// delegation:client:<client> scope that puts that claim in the token. Both are preview features. cimd,
+// an experimental one, follows spec.mcp.cimd.enabled.
+//
+// The list is []interface{} because an unstructured object holds JSON values only.
+func keycloakEnabledFeatures(p *otilmv1alpha1.Platform) []interface{} {
+	if !MCPEnabled(p) {
+		return nil
+	}
+	features := []interface{}{"token-exchange-delegation", "parameterized-scopes"}
+	if MCPCIMDEnabled(p) {
+		features = append(features, KeycloakFeatureCIMD)
+	}
+	return features
+}
+
 // buildKeycloak renders the Keycloak CR for the managed OIDC provider. The spec is built
 // from the typed surface (instances/version) plus the SHARED-database wiring (spec.db from
 // ResolveDatabaseConnection — vendor/host/port/database + usernameSecret/passwordSecret
-// referencing the platform DB-credentials Secret), the SCC-clean pod template, and the
-// edge hostname when set; then the caller's Overrides JSON-merge patch is applied onto it,
-// with the operator-owned paths protected. A protected-path or malformed override surfaces
-// as an error embedded in the returned object's annotation so the reconciler can degrade
-// with a clear message.
+// referencing the platform DB-credentials Secret), the SCC-clean pod template, the edge
+// hostname when set, and the Keycloak features MCP needs when the platform serves it; then
+// the caller's Overrides JSON-merge patch is applied onto it, with the operator-owned paths
+// protected. A protected-path or malformed override surfaces as an error embedded in the
+// returned object's annotation so the reconciler can degrade with a clear message.
 func buildKeycloak(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
 	m := p.Spec.Keycloak.Managed
 
@@ -397,6 +422,14 @@ func buildKeycloak(p *otilmv1alpha1.Platform) *unstructured.Unstructured {
 	if m.Version != "" {
 		spec["image"] = keycloakImageForVersion(m.Version)
 		spec["startOptimized"] = false
+	}
+
+	// spec.features.enabled: the features MCP needs, absent when the platform does not serve MCP. The
+	// operator runs the stock Keycloak image, not the chart's keycloak-optimized one that bakes its
+	// features in, so they are switched on here, through the CR. spec.features is not a protected
+	// override path: keycloak.managed.overrides may replace the list.
+	if features := keycloakEnabledFeatures(p); features != nil {
+		spec["features"] = map[string]interface{}{"enabled": features}
 	}
 
 	// spec.hostname: when the platform has a public FQDN (PlatformHost — spec.edge.host or

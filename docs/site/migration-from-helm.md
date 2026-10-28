@@ -167,6 +167,10 @@ The chart's per-service blocks map to each component's shared override surface. 
 | `schedulerService.*` | `spec.scheduler.*` | COVERED |
 | `feAdministrator.*` | `spec.feAdministrator.*` | COVERED |
 | `utilsService.*` / `global.utils.enabled` | `spec.utils.*` (+ `enabled`) | COVERED |
+| `global.mcp.{enabled,cimd.enabled,delegation.group}` / `mcpServer.access` | `spec.mcp.{enabled,cimd.enabled,delegation.group,access}` | COVERED (`cimd.enabled` is copied only when you set it: an unset value counts as on, which is also the chart's default) |
+| `mcpServer.image.{registry,repository,name,tag,pullPolicy,resources}`, `mcpServer.{replicaCount,replicas}`, `mcpServer.additionalEnv.variables` | `spec.mcp.{image,replicas,resources,env}` | COVERED |
+| `mcpServer.networkPolicy` | — | UNMAPPED (the operator renders no NetworkPolicy for MCP alone: after migration MCP is isolated only by the platform-wide NetworkPolicies, `spec.networkPolicy`, which admit ingress from the platform's namespace and the operator and allow all egress. A policy you had enabled to limit MCP to listed peers is not recreated, so the isolation is looser) |
+| `global.mcp.clientSecret` / `clientSecretRef`, `mcpServer.security.*`, and any other `mcpServer` key (for example `toolsets`) | — | UNMAPPED (the operator manages MCP's client secret, so not even the reference is copied, and derives the security settings; an `issuer`, `jwkSetUri` or `tokenUri` that points MCP at another identity provider is not carried, because the operator runs MCP against its managed Keycloak only) |
 | `<service>.image.{registry,repository,name,tag,pullPolicy}` | `spec.<component>.image.*` | COVERED |
 | `<service>.replicaCount` / `replicas` | `spec.<component>.replicas` | COVERED |
 | `<service>.resources` | `spec.<component>.resources` | COVERED |

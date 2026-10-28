@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 // Kong gateway constants. The gateway runs DB-less: it reads its declarative
@@ -212,6 +213,12 @@ const (
 	gatewayMqPath       = "/mq"
 	gatewayUtilsPath    = "/utils"
 
+	// gatewayMCPMetadataPath is the path the MCP server publishes its OAuth protected-resource
+	// metadata under (RFC 9728). A client asks for it with the resource's own path appended,
+	// /.well-known/oauth-protected-resource/mcp, and a route path matches by prefix, so this one
+	// path serves that request as well as the bare one.
+	gatewayMCPMetadataPath = "/.well-known/oauth-protected-resource"
+
 	// Internal upstream Service names. These are the operator's clean, unsuffixed
 	// names; the gateway routes to these.
 	gatewayCoreHost  = "core"
@@ -250,9 +257,15 @@ type kongRoute struct {
 	StripPath    bool     `yaml:"strip_path"`
 	PreserveHost bool     `yaml:"preserve_host"`
 	Paths        []string `yaml:"paths"`
+	// ResponseBuffering is left unset for Kong's default (buffered). It is a pointer so that an
+	// explicit false, which turns buffering off, is rendered instead of dropped as empty.
+	ResponseBuffering *bool `yaml:"response_buffering,omitempty"`
+	// Plugins are the plugins that run on this route alone.
+	Plugins []kongPlugin `yaml:"plugins,omitempty"`
 }
 
-// kongPlugin is a global plugin (cors, file-log).
+// kongPlugin is a plugin instance: global (cors, file-log) in kongConfig, or scoped to one route
+// (request-transformer on the MCP route).
 type kongPlugin struct {
 	Name   string                 `yaml:"name"`
 	Config map[string]interface{} `yaml:"config"`
@@ -260,7 +273,7 @@ type kongPlugin struct {
 
 // renderKongYAML builds the Kong declarative config (kong.yml) for the Platform.
 // It always emits the core, core-login-logout, and fe-administrator services and
-// routes; the /utils, /mq, and cors/file-log entries are gated by the CR. The intra-
+// routes; the /utils, /mq, /mcp, and cors/file-log entries are gated by the CR. The intra-
 // platform upstream hosts are the operator's clean Service names; the /mq upstream host
 // is resolved per-mode from the messaging connection (see gatewayMessagingMgmtHost). The
 // /mq route is additionally gated on brokerType==rabbitmq (Service Bus has no management
@@ -379,6 +392,11 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 		})
 	}
 
+	// /mcp — the MCP server, gated by MCPEnabled: the same gate as the workload the route points at.
+	if MCPEnabled(p) {
+		cfg.Services = append(cfg.Services, gatewayMCPService(p))
+	}
+
 	cfg.Plugins = gatewayPluginList(p)
 
 	out, err := yaml.Marshal(cfg)
@@ -396,6 +414,36 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 // vs 5672), so the connection's Host is correct.
 func gatewayMessagingMgmtHost(p *otilmv1alpha1.Platform) string {
 	return ResolveMessagingConnection(p).Host
+}
+
+// gatewayMCPService returns the gateway service that publishes the MCP server: its endpoint
+// (mcpPublicPath) and its OAuth protected-resource metadata. Both are forwarded with the public path
+// and Host intact, because MCP checks tokens against its public resource URL.
+//
+// Response buffering is off because MCP speaks streamable HTTP, whose responses can be event
+// streams: each event has to reach the client as it is produced, not once Kong has read the whole
+// response.
+//
+// The edge forwards the client certificate to Core in a header, and MCP must never receive it, so the
+// route removes that header. It removes it under the name Core is configured to read
+// (clientCertHeaderName), so a renamed header is removed under its new name. The plugin is scoped to
+// this route because Core still reads the header: a global plugin would strip it from Core's routes
+// too.
+func gatewayMCPService(p *otilmv1alpha1.Platform) kongService {
+	return kongService{
+		Name: mcpServerComponent, Host: mcpServerComponent, Port: mcpPort, Protocol: "http",
+		Routes: []kongRoute{{
+			Name: "mcp", StripPath: false, PreserveHost: true,
+			Paths:             []string{mcpPublicPath, gatewayMCPMetadataPath},
+			ResponseBuffering: ptr.To(false),
+			Plugins: []kongPlugin{{
+				Name: "request-transformer",
+				Config: map[string]interface{}{
+					"remove": map[string]interface{}{"headers": []string{clientCertHeaderName(p)}},
+				},
+			}},
+		}},
+	}
 }
 
 // gatewayPluginList returns the global Kong plugins gated by the CR: the cors plugin

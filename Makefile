@@ -194,12 +194,14 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the FAST e2e tier (PR
 
 # E2E_MANAGED_LABEL selects which managed Context(s) run. Defaults to the umbrella 'managed' (all
 # managed blocks, sequential, one cluster — local convenience). CI passes a PER-BLOCK label
-# (managed-postgres / managed-rabbitmq / managed-keycloak / full / matrix-upgrade / matrix-preview
-# / matrix-migration) so each block runs in its OWN parallel job on its OWN fresh Kind cluster — no
-# shared-cluster install/uninstall collisions. The version matrix is THREE blocks: 'matrix-upgrade'
-# (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0 on a pinned vhost -> 2.20.0
-# -> Delete reclaim), 'matrix-preview' (the fresh managed 2.20.0 install) and 'matrix-migration' (the
-# 2.18.0 -> 2.19.0 messaging migration end to end). All three also carry the umbrella label 'matrix'.
+# (managed-postgres / managed-rabbitmq / managed-keycloak / managed-mcp / full / matrix-upgrade /
+# matrix-preview / matrix-migration) so each block runs in its OWN parallel job on its OWN fresh
+# Kind cluster — no shared-cluster install/uninstall collisions. 'managed-mcp' is the optional MCP
+# server on a managed Keycloak, checked against a live Keycloak and Kong. The version matrix is
+# THREE blocks: 'matrix-upgrade' (2.17.0 deploy -> 2.18.0 upgrade -> downgrade refused -> 2.19.0
+# on a pinned vhost -> 2.20.0 -> Delete reclaim), 'matrix-preview' (the fresh managed 2.20.0
+# install) and 'matrix-migration' (the 2.18.0 -> 2.19.0 messaging migration end to end). All three
+# also carry the umbrella label 'matrix'.
 E2E_MANAGED_LABEL ?= managed
 
 .PHONY: test-e2e-managed
@@ -245,12 +247,12 @@ test-e2e-matrix: setup-test-e2e manifests generate fmt vet ## Run ALL version-ma
 .PHONY: test-e2e-all
 test-e2e-all: setup-test-e2e manifests generate fmt vet ## Run BOTH e2e tiers (fast + managed) in one cluster (~2h, full local run).
 	# Full local run: no label filter, so every spec (fast + managed) runs SEQUENTIALLY in one
-	# cluster — the fast tier, the three per-infra managed blocks, the FULL platform block AND the
-	# version matrix (whose THREE blocks are three full bring-ups, the migration one adding two
-	# fence/drain cycles on top). -timeout 195m is the sum-of-blocks ceiling; it replaces the 150m
-	# that predated the migration block and could no longer cover the run. --ginkgo.timeout=190m
-	# raises Ginkgo's own 1h default to just under it, so Ginkgo reports the failing spec instead
-	# of go-test panicking mid-run.
+	# cluster — the fast tier, the three per-infra managed blocks, the MCP block, the FULL platform
+	# block AND the version matrix (whose THREE blocks are three full bring-ups, the migration one
+	# adding two fence/drain cycles on top). -timeout 195m is the sum-of-blocks ceiling; it
+	# replaces the 150m that predated the migration block and could no longer cover the run.
+	# --ginkgo.timeout=190m raises Ginkgo's own 1h default to just under it, so Ginkgo reports the
+	# failing spec instead of go-test panicking mid-run.
 	KIND_CLUSTER=$(KIND_CLUSTER) KIND=$(KIND) E2E_IMAGE_ARCHIVE=$(E2E_IMAGE_ARCHIVE) go test ./test/e2e/ -v -ginkgo.v --ginkgo.timeout=190m -timeout 195m
 	$(MAKE) cleanup-test-e2e
 

@@ -805,6 +805,61 @@ type UtilsSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
+// MCPSpec controls the optional MCP server component: the Model Context Protocol endpoint an AI
+// client (such as Claude Code) uses to work with ILM on behalf of the user who signs in. It embeds
+// the shared ComponentSpec and adds the Enabled toggle (MCP is opt-in), the Access level, and the
+// CIMD and Delegation options of the Keycloak setup the operator keeps in place for it.
+//
+// MCP is supported with a MANAGED Keycloak only: the operator provisions MCP's Keycloak objects
+// through the Keycloak admin API. Enabling it therefore requires keycloak.mode=managed, a public
+// host (common.hostName, or edge.host on an enabled edge) and, when keycloak.managed.version is
+// pinned, 26.8.1 or later. Those rules live on PlatformSpec, which sees all three sections. MCP
+// also needs a platform version whose bundle carries the MCP server image (2.21.0 and later).
+type MCPSpec struct {
+	// ComponentSpec is the shared per-component override surface (inline).
+	ComponentSpec `json:",inline"`
+	// Enabled controls whether the MCP server is deployed. Defaults to false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Access is the level of tools the MCP server offers (ILM_MCP_ACCESS): "read-only" offers only
+	// tools that read, "read-write" adds tools that create and change, and "full" adds tools that
+	// delete, revoke or destroy, and the tools that return protected material such as private keys
+	// and secret content. Defaults to "read-only". MCP's calls keep the signed-in user's own ILM
+	// permissions, so Access only narrows what MCP offers.
+	// +kubebuilder:validation:Enum=read-only;read-write;full
+	// +kubebuilder:default=read-only
+	Access string `json:"access,omitempty"`
+	// CIMD configures sign-in with OAuth Client ID Metadata Documents.
+	CIMD MCPCIMDSpec `json:"cimd,omitempty"`
+	// Delegation configures whom MCP may act for.
+	Delegation MCPDelegationSpec `json:"delegation,omitempty"`
+}
+
+// MCPCIMDSpec configures sign-in with OAuth Client ID Metadata Documents (CIMD): an MCP client
+// such as Claude Code identifies itself with the URL of a metadata document it hosts, so no client
+// has to be registered in Keycloak beforehand. Keycloak offers it as the experimental cimd feature.
+type MCPCIMDSpec struct {
+	// Enabled turns CIMD sign-in on. It defaults to true, and an unset value counts as true. With it
+	// on, the operator enables Keycloak's cimd feature and keeps the client policy that admits
+	// metadata-document clients in the realm. Set it to false to leave both off, in which case MCP
+	// clients have to be registered in Keycloak by hand.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// MCPDelegationSpec configures whom MCP may act for. MCP calls ILM with delegated tokens that
+// name it as the actor, so Keycloak must allow the ilm-mcp client to delegate for a user.
+type MCPDelegationSpec struct {
+	// Group names a top-level Keycloak group of the platform realm. When set, MCP may act only for
+	// the members of that group: the operator creates the group when it is missing, and adding
+	// members is up to you. When empty (the default), MCP may act for every user of the realm. It
+	// is a group name, not a path, so it holds no "/", and is at most 255 characters long.
+	// +kubebuilder:validation:Pattern=`^[^/]{0,255}$`
+	// +optional
+	Group string `json:"group,omitempty"`
+}
+
 // GatewayCorsSpec configures the Kong cors plugin. It maps to
 // https://docs.konghq.com/hub/kong-inc/cors.
 type GatewayCorsSpec struct {
@@ -1284,6 +1339,31 @@ const (
 // a Secret. It lives here (not on TimeQualityMonitorSpec) because messaging.mode is in a
 // sibling sub-tree that rule cannot see.
 // +kubebuilder:validation:XValidation:rule="!has(self.core) || !has(self.core.timeQualityMonitor) || !has(self.core.timeQualityMonitor.enabled) || !self.core.timeQualityMonitor.enabled || self.messaging.mode == 'managed' || (has(self.core.timeQualityMonitor.credentials) && has(self.core.timeQualityMonitor.credentials.secretRef) && self.core.timeQualityMonitor.credentials.secretRef.size() > 0)",message="core.timeQualityMonitor.credentials.secretRef is required when messaging.mode=external (with an external broker the operator has no generated monitor-user Secret to wire)"
+//
+// A sixth cross-field rule gates MCP on a MANAGED Keycloak: the operator provisions MCP's
+// Keycloak objects (its client, client scopes and delegation permission) through the Keycloak
+// admin API, which only exists when the operator provisions Keycloak (keycloak.mode=managed).
+// It lives here (not on MCPSpec) because keycloak.mode is in a sibling sub-tree the MCPSpec rule
+// cannot see.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.keycloak) && self.keycloak.mode == 'managed')",message="mcp.enabled requires keycloak.mode=managed (the operator provisions MCP's Keycloak objects through the admin API)"
+//
+// A seventh cross-field rule gives MCP a public host, the one the operator resolves for the
+// platform: the host of an ENABLED edge, otherwise the canonical common.hostName. The host of a
+// disabled edge is ignored by that resolution, so edge.host satisfies the rule only while
+// edge.enabled is true. MCP builds its issuer and resource URLs
+// (https://<host>/kc/realms/<realm> and https://<host>/mcp) from the resolved host. It lives
+// here because the edge and common blocks are sibling sub-trees the MCPSpec rule cannot see.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.edge) && has(self.edge.enabled) && self.edge.enabled && has(self.edge.host) && self.edge.host.size() > 0) || (has(self.common) && has(self.common.hostName) && self.common.hostName.size() > 0)",message="mcp.enabled needs a public host: set common.hostName, or edge.host on an enabled edge"
+//
+// An eighth cross-field rule keeps a PINNED managed Keycloak at 26.8.1 or later, the release both
+// install paths run. An unpinned version is not checked: the Keycloak Operator prerequisite
+// supplies its own matching 26.8.1 server image. The rule lives here because
+// keycloak.managed.version is in a sibling sub-tree the MCPSpec rule cannot see. The version is
+// a Keycloak image tag, so the pattern accepts 26.8.1 to 26.8.99, 26.9 and later 26.x, and 27 to
+// 99, each optionally followed by a tag suffix such as the -0 of 26.8.1-0. A tag that cannot be
+// shown to be 26.8.1 or later is rejected: one that names no patch of 26.8, or that is not a
+// version at all, such as latest.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || !has(self.keycloak) || !has(self.keycloak.managed) || !has(self.keycloak.managed.version) || self.keycloak.managed.version.size() == 0 || self.keycloak.managed.version.matches('^(26[.]8[.][1-9][0-9]?|26[.](9|[1-9][0-9]+)|(2[7-9]|[3-9][0-9]))([.-].*)?$')",message="mcp.enabled requires keycloak.managed.version 26.8.1 or later (the release both install paths run)"
 type PlatformSpec struct {
 	// Version selects which platform version bundle the operator reconciles this
 	// Platform against — the tested set of component images, env-var wiring, and managed-
@@ -1367,6 +1447,10 @@ type PlatformSpec struct {
 	FeAdministrator FeAdministratorSpec `json:"feAdministrator,omitempty"`
 	// Utils controls the optional utils component.
 	Utils UtilsSpec `json:"utils,omitempty"`
+	// MCP controls the optional MCP server component, which lets an MCP client such as Claude
+	// Code work with ILM on behalf of the signed-in user. It is off and read-only by default, and
+	// enabling it needs a managed Keycloak and a public host.
+	MCP MCPSpec `json:"mcp,omitempty"`
 	// Gateway configures the Kong API gateway and its declarative routing/plugins.
 	Gateway GatewaySpec `json:"gateway,omitempty"`
 	// Edge configures the platform's external edge (Ingress + cert-manager TLS).

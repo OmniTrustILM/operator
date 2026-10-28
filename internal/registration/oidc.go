@@ -88,6 +88,19 @@ type OIDCRegistrar interface {
 	// an HTTP status code). SECURITY: the password, admin creds, and access token are NEVER
 	// logged, returned, or placed in errors.
 	EnsureRealmUser(ctx context.Context, keycloakBaseURL, realm, adminUsername, adminPassword string, user RealmUser) error
+
+	// EnsureMCPRealm creates missing MCP objects, corrects only the fields it sets, and returns the ilm-mcp client
+	// secret. It removes nothing but its own delegation permission of the form no longer configured and, with CIMD
+	// off, its own mcp-cimd client policy and profile. When ilm-mcp needs a correction but carries secret-rotation
+	// state, it leaves that client alone, still keeps every other object, and returns the secret together with a
+	// non-retryable *Error naming the fields left uncorrected. SECURITY: the secret is never logged or placed in
+	// errors; errors carry a step name and at most an HTTP status code.
+	EnsureMCPRealm(ctx context.Context, keycloakBaseURL, realm, adminUsername, adminPassword string,
+		spec MCPRealmSpec) (clientSecret string, err error)
+
+	// RemoveMCPCIMD removes the operator's own mcp-cimd client policy and profile from the realm, if present,
+	// and changes nothing else. Run it while Keycloak still has the cimd feature.
+	RemoveMCPCIMD(ctx context.Context, keycloakBaseURL, realm, adminUsername, adminPassword string) error
 }
 
 // RealmUser is the identity + password the operator ensures as a Keycloak realm user for the

@@ -1,0 +1,77 @@
+# platform_managed_mcp.yaml — the optional MCP server on a managed Keycloak.
+#
+# MCP is the Model Context Protocol endpoint through which an AI client (Claude Code, the
+# hosted Claude apps, Codex) works with ILM on behalf of the user who signs in. It is OFF by
+# default and read-only when on. This Platform turns it on with the three things it needs: a
+# managed Keycloak, a public host and spec.mcp.enabled. Everything else is the smallest
+# configuration that converges, with the database and the broker managed too.
+#
+# PLATFORM VERSION. MCP ships in the 2.21.0 bundle, a PREVIEW bundle: its platform artifacts are
+# not published yet, so it resolves only because spec.version names it. A version whose bundle
+# carries no MCP server renders nothing for it and reports MCPConfigured=False/UnsupportedVersion.
+# The 2.21.0 bundle names the mcp-server 1.0.0 image, which is not published yet; the commented
+# image override under spec.mcp selects the development build. The bundle still runs Core 2.20.0,
+# which ignores the provider's allowedDelegates, so on it a delegated token is not checked against
+# the allowed delegates: that check needs Core 2.21.0 or later.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - The upstream operators: CloudNativePG, RabbitMQ Cluster + Messaging Topology, and the
+#     Keycloak Operator. The Keycloak Operator 26.8.1 supplies the 26.8.1 server image MCP
+#     needs. Install commands: docs/site/installation.md, "Upstream operator prerequisites".
+#   - A route from MCP clients to https://<hostName>/mcp, with a certificate they trust: an edge
+#     (platform_edge_*.yaml, platform_gatewayapi.yaml) or your own ingress to the api-gateway
+#     Service.
+#
+# NO SECRETS TO PRE-CREATE. The upstream operators mint the database, broker and Keycloak admin
+# credentials, and Keycloak generates the ilm-mcp client secret, which the operator relays into
+# the Secret <platform>-mcp-client (ilm-mcp-client here).
+#
+# WHAT THE OPERATOR ADDS FOR MCP
+#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp and
+#     /.well-known/oauth-protected-resource;
+#   - the Keycloak features token-exchange-delegation, parameterized-scopes and cimd, and MCP's
+#     client, client scopes, client policies and delegation permission in the realm;
+#   - the MCPConfigured condition, which reports whether the Keycloak objects are in place and
+#     the client secret is relayed.
+#   Turning MCP on or off restarts the managed Keycloak (a short sign-in outage with one
+#   instance), Core and the gateway.
+#
+# The full guide is docs/site/custom-resources/platform.md, "MCP server".
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.21.0"                 # a bundle that carries the MCP server
+  common:
+    hostName: ilm.example.com       # the public host: MCP's issuer and resource URLs are built from it
+  database:
+    mode: managed
+    managed:
+      instances: 1
+      version: "18"
+      storage:
+        size: 20Gi
+    pgBouncer:
+      managed: true                 # pool the managed database (else Postgres exhausts its connections)
+  messaging:
+    mode: managed
+    brokerType: rabbitmq
+    managed:
+      replicas: 1
+      version: "4.3.1"              # the validated RabbitMQ version; omitted, the Cluster Operator applies an older default
+      storage:
+        size: 10Gi
+  keycloak:
+    mode: managed                   # MCP's Keycloak objects are provisioned through the admin API
+    realm: ilm
+    managed:
+      instances: 1                  # version omitted: the Keycloak Operator's default image is the 26.8.1 MCP needs
+  mcp:
+    enabled: true
+    # access: read-only             # read-only (default) | read-write | full — the tools MCP offers
+    # cimd: { enabled: true }       # default on: Claude Code and the hosted Claude apps sign in with a metadata document
+    # delegation: { group: "" }     # empty (default): MCP may act for every user; a group name limits it to that group's members
+    # image: { tag: develop-latest }  # the development build, until the bundle's mcp-server:1.0.0 image is published

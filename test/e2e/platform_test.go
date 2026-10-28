@@ -7,10 +7,13 @@ SPDX-License-Identifier: Apache-2.0
 package e2e
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +21,7 @@ import (
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
 
+	"github.com/OmniTrustILM/operator/pkg/bom"
 	"github.com/OmniTrustILM/operator/test/utils"
 )
 
@@ -1734,6 +1738,870 @@ func getPlatformPhaseInNS(ns, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(output)
+}
+
+// -------------------------------------------------------------------------
+// Platform E2E Tests (the optional MCP server on a managed Keycloak, behind Kong)
+//
+// MCP depends on a real Keycloak in three ways the unit, builder and golden tiers can only simulate.
+// The operator sets Keycloak features that the server has to switch on. It keeps MCP's objects in the
+// realm through the admin API. And it publishes /mcp and the discovery path through Kong. This block
+// applies one managed Platform with MCP off, turns MCP on, then turns CIMD off, and checks each phase
+// against the real Keycloak Operator, a live Keycloak and a live Kong:
+//
+//   - MCP off: the Keycloak CR carries no spec.features, and the realm holds none of MCP's objects. It
+//     has no delegation:client either, because Keycloak adds that scope only to a realm created with
+//     the delegation features on. The realm therefore predates the features, as the realm of a
+//     platform that turns MCP on later does;
+//   - MCP on: spec.features.enabled on the Keycloak CR holds token-exchange-delegation,
+//     parameterized-scopes and cimd, and the running Keycloak's server info reports all three enabled,
+//     not only requested;
+//   - MCP on: MCPConfigured turns True, and the Secret <platform>-mcp-client holds the relayed client
+//     secret;
+//   - MCP on: the mcp-server Deployment is Ready on the published develop-latest image. The pod runs
+//     with the fleet's 1Mi memory-backed /tmp and has to start within its 300 s startup budget, so a
+//     Ready Deployment that never restarted shows both;
+//   - MCP on: the realm holds ilm-mcp, mcp:access, delegation:client, which the operator creates in
+//     the older realm, the all-users delegation permission, and the client profile and policy of PKCE
+//     and of CIMD, read back through the admin API with the initial admin credentials;
+//   - MCP on: ilm-mcp obtains a client_credentials token with the secret the operator relayed. The
+//     token names no ilm audience unless the client asks for the optional scope ilm-mcp-upstream;
+//   - MCP on: Kong serves the protected-resource metadata of https://<host>/mcp, and answers an
+//     anonymous /mcp request with a 401 whose challenge names mcp:access;
+//   - CIMD off: the Keycloak CR drops cimd, mcp-cimd is gone from the realm, and ilm-mcp still obtains
+//     tokens once the running Keycloak has lost the feature. A stored mcp-cimd without the feature
+//     would make every token request fail with a 500.
+//
+// VERSION. spec.version is "develop". The operator image this suite builds is a development build (the
+// Dockerfile's default VERSION=dev), so develop resolves to the newest bundle the build carries: the
+// 2.21.0 preview, the first one with the MCP server. That bundle names the mcp-server:1.0.0 image,
+// which is not published yet, so the Platform overrides the MCP image tag with develop-latest. The
+// block asserts the resolution itself, so a build that does not resolve develop fails there and not as
+// a timeout further on.
+//
+// SCOPE. The block shows that what MCP needs from Keycloak and Kong is in place and works: the
+// features run, the realm objects exist, ilm-mcp authenticates with the relayed secret, and Kong
+// routes the discovery path and challenges an anonymous request. It does not sign a user in,
+// exchange a token or call Core. Core runs the bundle's 2.20.0 image and, as in the managed-Keycloak
+// block, messaging points at a dummy external broker, so Core is not expected to become Ready here.
+// The delegated calls from MCP to Core are therefore out of scope.
+//
+// CREDENTIALS. The initial admin credentials and the relayed ilm-mcp client secret reach the probe
+// pod by secretKeyRef, so no Pod manifest, command or output the suite logs carries them. Inside the
+// pod, the scripts hand them to curl as arguments. The probes print names, status codes, headers and
+// the audience claim of a token, never the client secret or a token.
+//
+// NAMESPACE. Like the managed-Keycloak block, it runs in the namespace the namespace-scoped Keycloak
+// Operator watches (utils.KeycloakOperatorNamespace).
+// -------------------------------------------------------------------------
+
+// Names this block shares between its specs and helpers.
+const (
+	// mcpServerName is the MCP server's Deployment name; its Service, ServiceAccount, container and
+	// component label carry the same name.
+	mcpServerName = "mcp-server"
+	// mcpImageTag is the published development build of the MCP server image.
+	mcpImageTag = "develop-latest"
+	// mcpConfiguredCondition is the adjunct Platform condition that reports MCP's Keycloak setup.
+	mcpConfiguredCondition = "MCPConfigured"
+	// mcpClientSecretKey is the key of <platform>-mcp-client that holds the ilm-mcp client secret.
+	mcpClientSecretKey = "clientSecret"
+	// mcpAccessScope is the scope MCP's clients request, and the one the 401 challenge names.
+	mcpAccessScope = "mcp:access"
+	// mcpProbePodName is the curl pod that calls Keycloak's admin API, its token endpoint and Kong from
+	// inside the cluster.
+	mcpProbePodName = "mcp-probe"
+	// mcpCIMDFeature is the Keycloak feature that follows spec.mcp.cimd.enabled.
+	mcpCIMDFeature = "cimd"
+)
+
+// mcpDelegationFeatures are the Keycloak features the operator enables for MCP whatever the CIMD
+// setting, and mcpKeycloakFeatures the ones it enables while CIMD is on, which is the default. The
+// first two are preview features, cimd an experimental one. They are written out here rather than
+// imported, so that renaming one in the operator fails this block.
+var (
+	mcpDelegationFeatures = []string{"token-exchange-delegation", "parameterized-scopes"}
+	mcpKeycloakFeatures   = []string{"token-exchange-delegation", "parameterized-scopes", mcpCIMDFeature}
+)
+
+// mcpRealmFacts are the lines mcpKeycloakFactsScript prints for the realm objects MCP needs while it
+// is on: the client, the two client scopes, the all-users delegation permission, and the PKCE client
+// profile and policy. mcpCIMDFacts are the lines for the client profile and policy of CIMD, which the
+// realm holds only while CIMD is on.
+var (
+	mcpRealmFacts = []string{
+		"CLIENT:ilm-mcp",
+		"SCOPE:" + mcpAccessScope,
+		"SCOPE:delegation:client",
+		"PERMISSION:ilm-mcp-all-users-delegation",
+		"PROFILE:mcp-pkce",
+		"POLICY:mcp-pkce",
+	}
+	mcpCIMDFacts = []string{"PROFILE:mcp-cimd", "POLICY:mcp-cimd"}
+)
+
+// mcpProbePodTmpl is the probe pod: a long-lived curl pod the specs run their scripts in. Its
+// arguments, in order: the pod name, the namespace, the image, Keycloak's URL, the realm, the
+// gateway's URL, the Secret holding Keycloak's initial admin credentials, and the Secret holding the
+// relayed ilm-mcp client secret with its key.
+//
+// The URLs and the realm are plain environment values. The credentials are secretKeyRef values: the
+// scripts read them from the environment, so no command or output the suite logs carries them. The
+// reference to the client secret is optional, because that Secret does not exist while MCP is off. A
+// container reads its environment once, so the pod has to be started again after the Secret appears
+// (restartMCPProbePod).
+// Everything is non-root with a read-only root filesystem: the scripts write nothing.
+const mcpProbePodTmpl = `
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %[1]s
+  namespace: %[2]s
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: curl
+    image: %[3]s
+    command: ["sleep", "7200"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    env:
+    - name: KC_URL
+      value: %[4]s
+    - name: KC_REALM
+      value: %[5]s
+    - name: GATEWAY_URL
+      value: %[6]s
+    - name: KC_ADMIN_USER
+      valueFrom:
+        secretKeyRef:
+          name: %[7]s
+          key: username
+    - name: KC_ADMIN_PASS
+      valueFrom:
+        secretKeyRef:
+          name: %[7]s
+          key: password
+    - name: MCP_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: %[8]s
+          key: %[9]s
+          optional: true
+`
+
+// mcpKeycloakFactsScript runs in the probe pod. It signs in to Keycloak's master realm with the
+// initial admin credentials (the admin-cli password grant), and prints what the block asserts, as
+// lines of its own: FEATURES:<the profileInfo document of the server info>, then one KIND:name line
+// for each object of mcpRealmFacts and mcpCIMDFacts it finds, and SCOPE:profile, a scope of Keycloak's
+// own, which shows the realm's scopes were read. The admin-permissions client exists only once the
+// operator has switched fine-grained admin permissions on, so without it the script prints no
+// PERMISSION line. It never prints a response whole: the representation of the ilm-mcp client carries
+// its secret, so it is only searched.
+//
+// It uses sed, grep and cut, which the curl image has, not jq, which it lacks. Keycloak writes its
+// JSON without whitespace, so a name is found as "name":"<name>". The profileInfo document holds only
+// arrays of strings, so it ends at the first closing brace.
+const mcpKeycloakFactsScript = `set -e
+TOKEN=$(curl -sS -f -m 20 --data-urlencode "client_id=admin-cli" --data-urlencode "grant_type=password" \
+  --data-urlencode "username=$KC_ADMIN_USER" --data-urlencode "password=$KC_ADMIN_PASS" \
+  "$KC_URL/realms/master/protocol/openid-connect/token" | grep -o '"access_token"[^,]*' | sed 's/.*:"//;s/"$//')
+[ -n "$TOKEN" ] || { echo "no admin token" >&2; exit 1; }
+api() { curl -sS -f -m 20 -H "Authorization: Bearer $TOKEN" "$KC_URL/admin$1"; }
+has() { printf '%s' "$1" | grep -q "\"name\":\"$2\""; }
+
+INFO=$(api /serverinfo)
+echo "FEATURES:$(printf '%s' "$INFO" | grep -o '"profileInfo":{[^}]*}' | sed 's/^"profileInfo"://')"
+
+CLIENTS=$(api "/realms/$KC_REALM/clients?clientId=ilm-mcp")
+if printf '%s' "$CLIENTS" | grep -q '"clientId":"ilm-mcp"'; then echo "CLIENT:ilm-mcp"; fi
+
+SCOPES=$(api "/realms/$KC_REALM/client-scopes")
+for s in profile mcp:access delegation:client; do
+  if has "$SCOPES" "$s"; then echo "SCOPE:$s"; fi
+done
+
+APID=$(api "/realms/$KC_REALM/clients?clientId=admin-permissions" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+if [ -n "$APID" ]; then
+  PERMISSION=$(api "/realms/$KC_REALM/clients/$APID/authz/resource-server/permission/search?name=ilm-mcp-all-users-delegation")
+  if has "$PERMISSION" ilm-mcp-all-users-delegation; then echo "PERMISSION:ilm-mcp-all-users-delegation"; fi
+fi
+
+PROFILES=$(api "/realms/$KC_REALM/client-policies/profiles")
+POLICIES=$(api "/realms/$KC_REALM/client-policies/policies")
+for n in mcp-pkce mcp-cimd; do
+  if has "$PROFILES" "$n"; then echo "PROFILE:$n"; fi
+  if has "$POLICIES" "$n"; then echo "POLICY:$n"; fi
+done
+`
+
+// mcpGatewayScript runs in the probe pod and asks Kong, as an anonymous client, for MCP's
+// protected-resource metadata and for /mcp. It prints METADATA:<the metadata document>, then the
+// response headers of /mcp followed by MCP_STATUS:<its status code>. Neither request carries a
+// credential.
+const mcpGatewayScript = `set -e
+echo "METADATA:$(curl -sS -f -m 10 "$GATEWAY_URL/.well-known/oauth-protected-resource/mcp")"
+curl -sS -m 10 -o /dev/null -D - -w 'MCP_STATUS:%{http_code}\n' "$GATEWAY_URL/mcp"
+`
+
+// mcpTokenScript runs in the probe pod and asks Keycloak for a client_credentials token as ilm-mcp,
+// with the client secret the operator relayed (MCP_CLIENT_SECRET, a secretKeyRef value): once as it
+// is, and once with the optional scope ilm-mcp-upstream, which gives a token the ilm audience. For
+// each request it prints <PREFIX>_STATUS:<the HTTP status>, and then <PREFIX>_AUD:<the aud claim of
+// the token> after a 200, or <PREFIX>_ERROR:<the OAuth error code> after any other status. The
+// prefixes are TOKEN and UPSTREAM. The response is held in a shell variable and never printed: the
+// script decodes the token there, and only its aud claim leaves it. A JWT's payload is base64url
+// without padding, which base64 -d takes once the alphabet is translated and the padding restored.
+const mcpTokenScript = `set -e
+[ -n "$MCP_CLIENT_SECRET" ] || { echo "the relayed client secret is not in the probe pod" >&2; exit 1; }
+token_facts() {
+  prefix=$1; shift
+  resp=$(curl -sS -m 20 -w '\nHTTP_STATUS:%{http_code}' "$KC_URL/realms/$KC_REALM/protocol/openid-connect/token" \
+    -d grant_type=client_credentials -d client_id=ilm-mcp --data-urlencode "client_secret=$MCP_CLIENT_SECRET" "$@")
+  status=${resp##*HTTP_STATUS:}
+  echo "${prefix}_STATUS:$status"
+  if [ "$status" != 200 ]; then
+    echo "${prefix}_ERROR:$(printf '%s' "$resp" | grep -o '"error":"[^"]*"' | head -1 | cut -d'"' -f4)"
+    return 0
+  fi
+  payload=$(printf '%s' "$resp" | grep -o '"access_token":"[^"]*"' | head -1 | cut -d'"' -f4 | cut -d. -f2 | tr '_-' '/+')
+  case $(( ${#payload} % 4 )) in 2) payload="$payload==";; 3) payload="$payload=";; esac
+  echo "${prefix}_AUD:$(printf '%s' "$payload" | base64 -d 2>/dev/null | grep -oE '"aud":(\[[^]]*\]|"[^"]*")' | head -1)"
+}
+token_facts TOKEN
+token_facts UPSTREAM -d scope=ilm-mcp-upstream
+`
+
+// The lines of the probe scripts' output the specs pick apart.
+var (
+	probeFeaturesRE  = regexp.MustCompile(`(?m)^FEATURES:(\{.*\})\s*$`)
+	probeMetadataRE  = regexp.MustCompile(`(?m)^METADATA:(\{.*\})\s*$`)
+	probeStatusRE    = regexp.MustCompile(`(?m)^MCP_STATUS:(\d{3})\s*$`)
+	probeChallengeRE = regexp.MustCompile(`(?im)^www-authenticate:\s*(.*?)\s*$`)
+)
+
+// platformManagedMCPSpecs registers the managed-MCP Platform e2e as a Context inside the top-level
+// "Manager" Ordered Describe (see e2e_test.go), exactly like platformManagedKeycloakSpecs, so it
+// runs against the operator the "Manager" BeforeAll deploys. It installs CloudNativePG (Keycloak's
+// shared database) and the Keycloak Operator in its own BeforeAll, each skipped when already
+// present, so the block is self-contained.
+//
+// It runs in utils.KeycloakOperatorNamespace because the Keycloak Operator only watches that
+// namespace. Only one Platform per namespace is active, so the BeforeAll drains any leftover one.
+func platformManagedMCPSpecs() {
+	Context("Platform managed MCP reconcile (real Keycloak Operator + CloudNativePG; MCP behind Kong)", Ordered, Label("managed", "managed-mcp"), func() {
+		ns := utils.KeycloakOperatorNamespace
+		const platformName = "ilm-mmcp"
+		const messagingSecretName = "ilm-mmcp-messaging"
+		const realmName = "ilm"
+		// publicHost is the platform's public host. It need not resolve: MCP builds its issuer and
+		// resource URLs from it, and the probes reach Kong in-cluster.
+		const publicHost = "ilm.e2e.test"
+
+		// The operator-owned names for this Platform (see managed_database.go, managed_keycloak.go
+		// and mcp.go):
+		//   CNPG Cluster:         "<platform>-db"
+		//   PgBouncer Pooler:     "<cluster>-pooler"
+		//   Keycloak CR:          "<platform>-keycloak"
+		//   KeycloakRealmImport:  "<keycloak CR>-realm"
+		//   Keycloak Service:     "<keycloak CR>-service"
+		//   initial admin Secret: "<keycloak CR>-initial-admin" (the Keycloak Operator generates it)
+		//   MCP client Secret:    "<platform>-mcp-client"
+		clusterName := platformName + "-db"
+		keycloakCRName := platformName + "-keycloak"
+		realmImportName := keycloakCRName + "-realm"
+		mcpSecretName := platformName + "-mcp-client"
+
+		// Whether each upstream operator was already installed, so AfterAll uninstalls only what
+		// this block added.
+		var cnpgWasInstalled, keycloakOpWasInstalled bool
+
+		BeforeAll(func() {
+			By("installing CloudNativePG for the shared database (skipped if already present)")
+			cnpgWasInstalled = utils.IsCloudNativePGCRDsInstalled()
+			if !cnpgWasInstalled {
+				Expect(utils.InstallCloudNativePG()).To(Succeed(), "Failed to install CloudNativePG")
+			}
+
+			By("installing the Keycloak Operator (skipped if already present)")
+			keycloakOpWasInstalled = utils.HasKeycloakOperatorCRDs()
+			if !keycloakOpWasInstalled {
+				Expect(utils.InstallKeycloakOperator()).To(Succeed(), "Failed to install Keycloak Operator")
+			}
+			Expect(utils.IsKeycloakOperatorCRDsInstalled()).To(BeTrue(),
+				"Keycloak Operator requires all four 26.8.1 CRDs; update pre-existing installations before running this suite")
+
+			By("ensuring the Keycloak Operator namespace exists and holds no leftover Platform")
+			Expect(utils.CreateNamespaceIdempotent(ns)).To(Succeed(), "Failed to ensure Keycloak Operator namespace")
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "platform", "--all",
+				"-n", ns, "--ignore-not-found", "--timeout=120s"))
+			utils.WaitForWorkloadsDrained(ns, "keycloak-operator")
+
+			By("creating the external messaging credentials Secret (basic-auth: username/password)")
+			// The only Secret created by hand: the DB, Keycloak admin and ilm-mcp client credentials
+			// are all generated (by CloudNativePG, the Keycloak Operator and Keycloak).
+			Expect(utils.ApplyResource("secret", "generic", messagingSecretName,
+				"-n", ns,
+				"--type=kubernetes.io/basic-auth",
+				"--from-literal=username=ilm",
+				"--from-literal=password=e2e-broker-password",
+			)).To(Succeed(), "Failed to create messaging credentials Secret")
+		})
+
+		AfterAll(func() {
+			By("deleting the probe pod and the Platform")
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", mcpProbePodName,
+				"-n", ns, "--ignore-not-found", "--wait=false"))
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "platform", platformName,
+				"-n", ns, "--ignore-not-found", "--timeout=120s"))
+
+			By("deleting the managed infra the Retain deletion policy leaves behind, while the upstream operators still run")
+			// Their finalizers are cleared by those operators, so the operators are uninstalled last.
+			for _, ref := range []string{
+				"keycloak.k8s.keycloak.org/" + keycloakCRName,
+				"keycloakrealmimport.k8s.keycloak.org/" + realmImportName,
+				"pooler.postgresql.cnpg.io/" + clusterName + "-pooler",
+				"cluster.postgresql.cnpg.io/" + clusterName,
+			} {
+				_, _ = utils.Run(exec.Command("kubectl", "delete", ref,
+					"-n", ns, "--ignore-not-found", "--timeout=120s"))
+			}
+
+			By("waiting for the workload pods to drain, then deleting the messaging Secret")
+			// The namespace is shared with the other managed blocks, which must not bring their stacks
+			// up beside this one's on a single node.
+			utils.WaitForWorkloadsDrained(ns, "keycloak-operator")
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", messagingSecretName,
+				"-n", ns, "--ignore-not-found"))
+
+			By("uninstalling the operators this block installed")
+			if !keycloakOpWasInstalled {
+				utils.UninstallKeycloakOperator()
+			}
+			if !cnpgWasInstalled {
+				utils.UninstallCloudNativePG()
+			}
+		})
+
+		AfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				dumpMCPDiagnostics(ns, platformName, keycloakCRName)
+			}
+		})
+
+		It("with MCP off, should bring up a managed Keycloak that enables no features and a realm without delegation:client", func() {
+			By("creating the managed Platform CR (managed database and Keycloak, external broker, MCP off)")
+			// Managed database and Keycloak with no realm import: the operator imports its own bundled
+			// realm, whose ilm client carries the Username and Groups mappers MCP's ilm-mcp-upstream
+			// scope copies. The edge is omitted, as the probes reach Kong in-cluster, and
+			// common.hostName is the public host MCP needs. Leaving keycloak.managed.version unset keeps
+			// the Keycloak Operator's default image, the 26.8.1 that MCP needs. MCP starts off, with the
+			// development image tag already set, so that turning it on changes spec.mcp.enabled alone.
+			platformYAML := fmt.Sprintf(`
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  version: develop
+  common:
+    hostName: %s
+  database:
+    mode: managed
+    managed:
+      instances: 1
+      version: "16"
+      storage:
+        size: 1Gi
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: %s
+  keycloak:
+    mode: managed
+    realm: %s
+    managed:
+      instances: 1
+  mcp:
+    enabled: false
+    image:
+      tag: %s
+`, platformName, ns, publicHost, messagingSecretName, realmName, mcpImageTag)
+
+			tmpFile := writeTempYAML(platformYAML)
+			defer func() { _ = os.Remove(tmpFile) }()
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", tmpFile))
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the managed Platform CR")
+
+			By("verifying develop resolved to the newest bundle this operator build carries")
+			// The operator pins the resolved version on status.observedVersion once it has reconciled
+			// the platform. A release build would report develop as unsupported instead.
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "platform", platformName,
+					"-n", ns, "-o", "jsonpath={.status.observedVersion}"))
+				g.Expect(err).NotTo(HaveOccurred(), "Platform %q should be readable", platformName)
+				g.Expect(strings.TrimSpace(out)).To(Equal(bom.NewestVersion()),
+					"spec.version develop should resolve to the newest bundle of the e2e's development build of the operator")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("waiting for the Keycloak CR to be Ready and for the realm to be imported")
+			// The operator applies the Keycloak CR only once the shared database is ready, so on a cold
+			// image cache the CR can appear minutes after the Platform, and the realm import follows
+			// Keycloak's start.
+			Eventually(func(g Gomega) {
+				g.Expect(keycloakCRReady(g, keycloakCRName, ns)).To(BeTrue(),
+					"the Keycloak CR should reach the Ready signal the operator probes")
+				g.Expect(keycloakRealmImportDone(g, realmImportName, ns)).To(BeTrue(),
+					"the KeycloakRealmImport should reach its Done condition")
+			}, 20*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the Keycloak CR carries no spec.features, and the Platform no MCPConfigured condition")
+			Eventually(func(g Gomega) {
+				g.Expect(getKeycloakField(g, "keycloak", keycloakCRName, ns, "{.spec.features}")).To(BeEmpty(),
+					"with MCP off the Keycloak CR should enable no feature")
+				g.Expect(getPlatformConditionStatusInNS(g, ns, platformName, mcpConfiguredCondition)).To(BeEmpty(),
+					"MCPConfigured exists only while MCP is on")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("starting the probe pod, with the initial admin credentials from the Keycloak Operator's Secret")
+			ensureMCPProbePod(ns, keycloakCRName, mcpSecretName, realmName)
+
+			By("reading the realm through Keycloak's admin API: it holds Keycloak's own scopes and none of MCP's objects")
+			// SCOPE:profile is a scope of Keycloak's own. It is the positive control: without it, an
+			// answer the script could not read would pass for a realm that lacks MCP's objects.
+			Eventually(func(g Gomega) {
+				facts := probeFacts(mcpProbeExec(g, ns, mcpKeycloakFactsScript))
+				g.Expect(facts).To(ContainElement("SCOPE:profile"), "the realm's client scopes should have been read")
+				for _, fact := range slices.Concat(mcpRealmFacts, mcpCIMDFacts) {
+					g.Expect(facts).NotTo(ContainElement(fact),
+						"with MCP off the realm should not hold %s; Keycloak does not create delegation:client without its delegation features", fact)
+				}
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("turning MCP on should have the operator request MCP's features on the Keycloak CR", func() {
+			By("enabling MCP on the running Platform")
+			patchPlatform(ns, platformName, `{"spec":{"mcp":{"enabled":true}}}`)
+
+			By("verifying spec.features.enabled on the Keycloak CR holds the three features MCP needs")
+			Eventually(func(g Gomega) {
+				features := strings.Fields(getKeycloakField(g, "keycloak", keycloakCRName, ns, "{.spec.features.enabled[*]}"))
+				g.Expect(features).To(ConsistOf(mcpKeycloakFeatures),
+					"the Keycloak CR should enable exactly token-exchange-delegation, parameterized-scopes and cimd")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should configure MCP's Keycloak objects and relay the ilm-mcp client secret", func() {
+			By("waiting for MCPConfigured=True (Keycloak Ready, MCP's admin API pass done, the secret relayed)")
+			// The pass needs a Ready Keycloak, and the features the CR now requests restart Keycloak
+			// first. It meets the realm of the MCP-off spec, which predates the features, so it also
+			// creates delegation:client. This is the longest wait after the MCP-off spec.
+			Eventually(func(g Gomega) {
+				g.Expect(getPlatformConditionStatusInNS(g, ns, platformName, mcpConfiguredCondition)).To(Equal(conditionStatusTrue),
+					func() string {
+						return "MCPConfigured should reach True; it reports: " + platformConditionDetail(ns, platformName, mcpConfiguredCondition)
+					})
+			}, 20*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying MCPConfigured reports Configured")
+			Expect(platformConditionDetail(ns, platformName, mcpConfiguredCondition)).To(HavePrefix("Configured:"))
+
+			By("verifying the operator-owned MCP client Secret holds a client secret (presence only, never printed)")
+			Eventually(func(g Gomega) {
+				g.Expect(secretKeyIsSet(g, ns, mcpSecretName, mcpClientSecretKey)).To(BeTrue(),
+					"Secret %q should hold a non-empty %s, the client secret Keycloak generated for ilm-mcp", mcpSecretName, mcpClientSecretKey)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should run the mcp-server Deployment on the develop-latest image without a restart", func() {
+			By("verifying the Deployment carries the MCP image override")
+			Eventually(func(g Gomega) {
+				image, err := utils.Run(exec.Command("kubectl", "get", "deployment", mcpServerName, "-n", ns,
+					"-o", fmt.Sprintf(`jsonpath={.spec.template.spec.containers[?(@.name==%q)].image}`, mcpServerName)))
+				g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should exist", mcpServerName)
+				g.Expect(strings.TrimSpace(image)).To(HaveSuffix("/"+mcpServerName+":"+mcpImageTag),
+					"the MCP server should run the image tag spec.mcp.image.tag sets")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the Deployment to be Ready")
+			// Ready means the rollout finished and the pod passed its readiness probe. The pod waits
+			// for <platform>-mcp-client (a required secretKeyRef), then starts on the Kind node's own
+			// anonymous pull of the image, with the fleet's 1Mi memory-backed /tmp, and has the
+			// startup probe's 300 s to come up.
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+mcpServerName,
+					"-n", ns, "--timeout=60s"))
+				g.Expect(err).NotTo(HaveOccurred(), "the mcp-server Deployment should finish rolling out Ready")
+			}, 15*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the Ready pod never restarted, so it started within its startup budget")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", ns,
+					"-l", "app.kubernetes.io/name="+mcpServerName,
+					"-o", "jsonpath={.items[*].status.containerStatuses[*].restartCount}"))
+				g.Expect(err).NotTo(HaveOccurred(), "the mcp-server pods should be listable")
+				restarts := strings.Fields(out)
+				g.Expect(restarts).NotTo(BeEmpty(), "the mcp-server pod should report its container status")
+				g.Expect(restarts).To(HaveEach("0"), "no mcp-server container should have restarted")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+		})
+
+		It("should have Keycloak report the features enabled and hold MCP's realm objects, delegation:client included", func() {
+			By("starting the probe pod (a no-op when an earlier spec started it)")
+			ensureMCPProbePod(ns, keycloakCRName, mcpSecretName, realmName)
+
+			By("reading the server info and the realm through Keycloak's admin API")
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpKeycloakFactsScript)
+
+				// Requested is not running: the CR lists the features, and the server's own report
+				// shows whether it switched them on.
+				expectKeycloakFeatures(g, out, mcpKeycloakFeatures, nil)
+
+				// The realm had no delegation:client before MCP was turned on, so the operator created it.
+				g.Expect(probeFacts(out)).To(ContainElements(slices.Concat(mcpRealmFacts, mcpCIMDFacts)),
+					"the realm should hold the objects MCP needs, the CIMD profile and policy included")
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("should have Kong serve MCP's discovery document and challenge an anonymous /mcp request", func() {
+			By("waiting for the Kong gateway to be Available")
+			Eventually(func(g Gomega) {
+				g.Expect(deploymentAvailable(g, ns, "api-gateway")).To(BeTrue(),
+					"the Kong gateway should be Available with MCP's route loaded")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("starting the probe pod (a no-op when an earlier spec started it)")
+			ensureMCPProbePod(ns, keycloakCRName, mcpSecretName, realmName)
+
+			By("asking Kong, anonymously, for the protected-resource metadata and for /mcp")
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpGatewayScript)
+
+				metadata := probeMetadataRE.FindStringSubmatch(out)
+				g.Expect(metadata).NotTo(BeNil(), "Kong should answer the discovery path; the probe printed: %s", out)
+				var document struct {
+					Resource string `json:"resource"`
+				}
+				g.Expect(json.Unmarshal([]byte(metadata[1]), &document)).To(Succeed(),
+					"the discovery answer should be a JSON document; the probe printed: %s", out)
+				g.Expect(document.Resource).To(Equal("https://"+publicHost+"/mcp"),
+					"the protected-resource metadata should name MCP's public resource URL")
+
+				status := probeStatusRE.FindStringSubmatch(out)
+				g.Expect(status).NotTo(BeNil(), "the probe should report /mcp's status; it printed: %s", out)
+				g.Expect(status[1]).To(Equal("401"), "an anonymous /mcp request should be refused")
+
+				challenge := probeChallengeRE.FindStringSubmatch(out)
+				g.Expect(challenge).NotTo(BeNil(), "the 401 should carry a WWW-Authenticate challenge; the probe printed: %s", out)
+				g.Expect(challenge[1]).To(HavePrefix("Bearer"), "the challenge should be a Bearer challenge")
+				g.Expect(challenge[1]).To(ContainSubstring(mcpAccessScope),
+					"the challenge should name the scope MCP requires")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("should let ilm-mcp obtain a token with the secret the operator relayed", func() {
+			By("restarting the probe pod, so that its environment holds the relayed client secret")
+			// The Secret did not exist when the probe pod started in the MCP-off spec, and a container
+			// reads its environment once.
+			restartMCPProbePod(ns, keycloakCRName, mcpSecretName, realmName)
+
+			By("requesting a client_credentials token as ilm-mcp, as it is and with the optional scope ilm-mcp-upstream")
+			// The second request is the positive control of the first: it shows that the script reads the
+			// audience of a token, so that a token without the ilm audience is not an unread one.
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpTokenScript)
+
+				plain := parseMCPTokenReport(out, "TOKEN")
+				g.Expect(plain.status).To(Equal("200"),
+					"ilm-mcp should obtain a token with the relayed secret (the error code, if any: %q)", plain.errorCode)
+				g.Expect(plain.audience).NotTo(ContainSubstring(`"ilm"`),
+					"a token that does not ask for ilm-mcp-upstream should not name ilm as an audience; its aud claim is %q", plain.audience)
+
+				upstream := parseMCPTokenReport(out, "UPSTREAM")
+				g.Expect(upstream.status).To(Equal("200"),
+					"ilm-mcp should obtain a token that asks for ilm-mcp-upstream (the error code, if any: %q)", upstream.errorCode)
+				g.Expect(upstream.audience).To(ContainSubstring(`"ilm"`),
+					"a token that asks for ilm-mcp-upstream should name ilm as an audience; its aud claim is %q", upstream.audience)
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+
+		It("turning CIMD off should remove mcp-cimd and the cimd feature while ilm-mcp keeps obtaining tokens", func() {
+			By("switching CIMD off on the running Platform")
+			patchPlatform(ns, platformName, `{"spec":{"mcp":{"cimd":{"enabled":false}}}}`)
+
+			By("waiting for MCPConfigured=True at the new spec generation")
+			// The condition is already True since MCP was turned on, so it counts only once the operator
+			// has observed the generation the patch created.
+			Eventually(func(g Gomega) {
+				g.Expect(platformConditionCurrent(g, ns, platformName, mcpConfiguredCondition, conditionStatusTrue)).To(BeTrue(),
+					func() string {
+						return "MCPConfigured should be True for the current spec generation; it reports: " +
+							platformConditionDetail(ns, platformName, mcpConfiguredCondition)
+					})
+			}, 15*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the Keycloak CR no longer enables cimd")
+			Eventually(func(g Gomega) {
+				features := strings.Fields(getKeycloakField(g, "keycloak", keycloakCRName, ns, "{.spec.features.enabled[*]}"))
+				g.Expect(features).To(ConsistOf(mcpDelegationFeatures),
+					"the Keycloak CR should enable token-exchange-delegation and parameterized-scopes, and no longer cimd")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the Keycloak CR to be Ready, and for the running Keycloak to have lost the cimd feature")
+			// The operator applies the CR without cimd only after it has removed mcp-cimd from the realm,
+			// and Keycloak then restarts. The server's own report shows the restart is done, and the realm
+			// read in the same pass shows mcp-cimd is gone while the rest of MCP's objects stay.
+			Eventually(func(g Gomega) {
+				g.Expect(keycloakCRReady(g, keycloakCRName, ns)).To(BeTrue(),
+					"the Keycloak CR should be Ready again after its restart")
+				out := mcpProbeExec(g, ns, mcpKeycloakFactsScript)
+				expectKeycloakFeatures(g, out, mcpDelegationFeatures, []string{mcpCIMDFeature})
+
+				facts := probeFacts(out)
+				g.Expect(facts).To(ContainElements(mcpRealmFacts), "the realm should keep the objects MCP needs")
+				for _, fact := range mcpCIMDFacts {
+					g.Expect(facts).NotTo(ContainElement(fact), "with CIMD off the realm should not hold %s", fact)
+				}
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying ilm-mcp still obtains tokens")
+			// A stored mcp-cimd without the cimd feature would make every token request fail with a 500.
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpTokenScript)
+				for _, prefix := range []string{"TOKEN", "UPSTREAM"} {
+					report := parseMCPTokenReport(out, prefix)
+					g.Expect(report.status).To(Equal("200"),
+						"ilm-mcp should still obtain a token without the cimd feature (%s; the error code, if any: %q)", prefix, report.errorCode)
+				}
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+		})
+	})
+}
+
+// -------------------------------------------------------------------------
+// Managed-MCP e2e helpers
+// -------------------------------------------------------------------------
+
+// keycloakProfileInfo is the part of Keycloak's server info that lists its features. Preview and
+// experimental features appear in their lists whether or not they are on, and every disabled feature
+// appears in DisabledFeatures, each under its upper-case, underscored key.
+type keycloakProfileInfo struct {
+	PreviewFeatures      []string `json:"previewFeatures"`
+	ExperimentalFeatures []string `json:"experimentalFeatures"`
+	DisabledFeatures     []string `json:"disabledFeatures"`
+}
+
+// featureEnabled reports whether the server runs the feature, named as the Keycloak CR names it
+// (token-exchange-delegation). It runs it when Keycloak knows it, as a preview or experimental
+// feature, and does not list it as disabled. A name Keycloak does not know is in neither list.
+func (p keycloakProfileInfo) featureEnabled(name string) bool {
+	key := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	known := slices.Contains(p.PreviewFeatures, key) || slices.Contains(p.ExperimentalFeatures, key)
+	return known && !slices.Contains(p.DisabledFeatures, key)
+}
+
+// expectKeycloakFeatures asserts what the server info in the output of mcpKeycloakFactsScript
+// reports: every feature in running is switched on, and none in stopped is. Requested is not running:
+// the Keycloak CR lists the features, and the server's own report shows whether it switched them on.
+func expectKeycloakFeatures(g Gomega, out string, running, stopped []string) {
+	profile, err := parseKeycloakProfileInfo(out)
+	g.Expect(err).NotTo(HaveOccurred(), "the server info should carry its profileInfo")
+	for _, feature := range running {
+		g.Expect(profile.featureEnabled(feature)).To(BeTrue(),
+			"Keycloak should report the feature %q enabled at runtime, not only requested in the CR", feature)
+	}
+	for _, feature := range stopped {
+		g.Expect(profile.featureEnabled(feature)).To(BeFalse(),
+			"Keycloak should report the feature %q switched off at runtime", feature)
+	}
+}
+
+// parseKeycloakProfileInfo decodes the FEATURES line of mcpKeycloakFactsScript's output.
+func parseKeycloakProfileInfo(out string) (keycloakProfileInfo, error) {
+	var info keycloakProfileInfo
+	match := probeFeaturesRE.FindStringSubmatch(out)
+	if match == nil {
+		return info, errors.New("the probe printed no FEATURES line")
+	}
+	if err := json.Unmarshal([]byte(match[1]), &info); err != nil {
+		return info, fmt.Errorf("the FEATURES line is not a JSON document: %w", err)
+	}
+	return info, nil
+}
+
+// probeFacts returns the KIND:name lines of mcpKeycloakFactsScript's output: every non-empty line
+// except the FEATURES document.
+func probeFacts(out string) []string {
+	var facts []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !probeFeaturesRE.MatchString(line) {
+			facts = append(facts, line)
+		}
+	}
+	return facts
+}
+
+// probeValue returns what a probe script printed after key and a colon, on the line that starts with
+// it, or "" when there is no such line.
+func probeValue(out, key string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), key+":"); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+// mcpTokenReport is what mcpTokenScript printed for one token request: the HTTP status, and either
+// the aud claim of the token it got or the OAuth error code it got instead. A field the script did
+// not print is empty.
+type mcpTokenReport struct {
+	status, audience, errorCode string
+}
+
+// parseMCPTokenReport reads the lines of mcpTokenScript's output that carry the prefix (TOKEN or
+// UPSTREAM).
+func parseMCPTokenReport(out, prefix string) mcpTokenReport {
+	return mcpTokenReport{
+		status:    probeValue(out, prefix+"_STATUS"),
+		audience:  probeValue(out, prefix+"_AUD"),
+		errorCode: probeValue(out, prefix+"_ERROR"),
+	}
+}
+
+// bundleCurlImage returns the curl image of the newest bundle, which is the one the "develop"
+// Platform runs: the pinned image the operator's own init containers use. The probe pod runs it, so
+// the block pulls nothing from Docker Hub and nothing that moves.
+func bundleCurlImage() string {
+	bundle, ok := bom.BundleFor(bom.NewestVersion())
+	Expect(ok).To(BeTrue(), "the newest bundle should exist")
+	image, ok := bundle.Lookup("curl")
+	Expect(ok).To(BeTrue(), "the newest bundle should carry the curl image")
+	repository := image.Repository
+	if repository == "" {
+		repository = bom.DefaultImageRepository
+	}
+	return fmt.Sprintf("%s/%s/%s:%s", bom.DefaultImageRegistry, repository, image.Name, image.Tag)
+}
+
+// ensureMCPProbePod starts the probe pod in ns, and waits until it runs. Applying it again is a no-op,
+// so each spec that needs the pod calls this and the first one creates it. It must run only once the
+// Keycloak Operator has generated the initial admin Secret, as the pod's environment refers to it.
+// The pod holds the relayed client secret only if mcpSecretName existed when it started.
+func ensureMCPProbePod(ns, keycloakCRName, mcpSecretName, realm string) {
+	podYAML := fmt.Sprintf(mcpProbePodTmpl, mcpProbePodName, ns, bundleCurlImage(),
+		fmt.Sprintf("http://%s-service.%s:8080/kc", keycloakCRName, ns), realm,
+		fmt.Sprintf("http://api-gateway.%s:8000", ns), keycloakCRName+"-initial-admin", mcpSecretName, mcpClientSecretKey)
+	tmpFile := writeTempYAML(podYAML)
+	defer func() { _ = os.Remove(tmpFile) }()
+	_, err := utils.Run(exec.Command("kubectl", "apply", "-f", tmpFile))
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the %s pod", mcpProbePodName)
+
+	Eventually(func(g Gomega) {
+		out, err := utils.Run(exec.Command("kubectl", "get", "pod", mcpProbePodName, "-n", ns,
+			"-o", "jsonpath={.status.phase}"))
+		g.Expect(err).NotTo(HaveOccurred(), "the %s pod should be readable", mcpProbePodName)
+		g.Expect(strings.TrimSpace(out)).To(Equal("Running"), "the %s pod should be running", mcpProbePodName)
+	}, 5*time.Minute, 5*time.Second).Should(Succeed())
+}
+
+// restartMCPProbePod replaces the probe pod with a new one. A container reads its environment once,
+// so a probe pod that started before the relayed client secret existed needs this to hold it.
+func restartMCPProbePod(ns, keycloakCRName, mcpSecretName, realm string) {
+	_, err := utils.Run(exec.Command("kubectl", "delete", "pod", mcpProbePodName,
+		"-n", ns, "--ignore-not-found", "--timeout=2m"))
+	Expect(err).NotTo(HaveOccurred(), "Failed to delete the %s pod", mcpProbePodName)
+	ensureMCPProbePod(ns, keycloakCRName, mcpSecretName, realm)
+}
+
+// patchPlatform merge-patches the Platform's spec, and fails the surrounding spec if the patch is refused.
+func patchPlatform(ns, name, patch string) {
+	_, err := utils.Run(exec.Command("kubectl", "patch", "platform", name, "-n", ns,
+		"--type", "merge", "-p", patch))
+	Expect(err).NotTo(HaveOccurred(), "Failed to patch the Platform with %s", patch)
+}
+
+// mcpProbeExec runs a probe script in the probe pod and returns its output. The script text is what
+// the suite logs, and it names the credentials only as environment variables.
+func mcpProbeExec(g Gomega, ns, script string) string {
+	out, err := utils.Run(exec.Command("kubectl", "exec", mcpProbePodName, "-n", ns, "--", "sh", "-c", script))
+	g.Expect(err).NotTo(HaveOccurred(), "the probe script should run in the %s pod", mcpProbePodName)
+	return out
+}
+
+// secretKeyIsSet reports whether the Secret holds a non-empty value under key. It never returns the
+// value, so that no assertion message can put a secret into the log.
+func secretKeyIsSet(g Gomega, ns, name, key string) bool {
+	out, err := utils.Run(exec.Command("kubectl", "get", "secret", name, "-n", ns,
+		"-o", "jsonpath={.data."+key+"}"))
+	g.Expect(err).NotTo(HaveOccurred(), "Secret %q should be readable", name)
+	return strings.TrimSpace(out) != ""
+}
+
+// platformConditionCurrent reports whether the named Platform condition has the status for the
+// Platform's current spec generation. A condition stamped with an older generation has not seen the
+// latest spec, whatever it reads.
+func platformConditionCurrent(g Gomega, ns, name, condType, status string) bool {
+	out, err := utils.Run(exec.Command("kubectl", "get", "platform", name, "-n", ns, "-o",
+		fmt.Sprintf(`jsonpath={.metadata.generation} {.status.conditions[?(@.type==%[1]q)].observedGeneration} {.status.conditions[?(@.type==%[1]q)].status}`, condType)))
+	g.Expect(err).NotTo(HaveOccurred(), "Platform %q should be readable for condition %q", name, condType)
+	fields := strings.Fields(out)
+	return len(fields) == 3 && fields[0] == fields[1] && fields[2] == status
+}
+
+// platformConditionDetail returns "<reason>: <message>" of the named Platform condition, or a
+// placeholder when it cannot be read. The operator's condition messages carry no identity material,
+// so they are safe to put in an assertion message.
+func platformConditionDetail(ns, name, condType string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "platform", name, "-n", ns, "-o",
+		fmt.Sprintf(`jsonpath={.status.conditions[?(@.type==%[1]q)].reason}: {.status.conditions[?(@.type==%[1]q)].message}`, condType)))
+	if err != nil {
+		return "(the Platform could not be read)"
+	}
+	return strings.TrimSpace(out)
+}
+
+// dumpMCPDiagnostics prints what a red managed-MCP spec needs to be diagnosed from the job log
+// alone: the Platform and Keycloak CR (conditions included), the pods, the events, the first
+// lines of the MCP server's log and the operator's log. It never describes or dumps a pod's
+// environment: that is where the client secret is injected.
+func dumpMCPDiagnostics(ns, platformName, keycloakCRName string) {
+	dump := func(label string, args ...string) {
+		if out, err := utils.Run(exec.Command("kubectl", args...)); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "%s:\n%s\n", label, out)
+		}
+	}
+	dump("Platform", "get", "platform", platformName, "-n", ns, "-o", "yaml")
+	dump("Keycloak CR", "get", "keycloak.k8s.keycloak.org", keycloakCRName, "-n", ns, "-o", "yaml")
+	dump("Pods", "get", "pods", "-n", ns, "-o", "wide")
+	dump("Events", "get", "events", "-n", ns, "--sort-by=.lastTimestamp")
+
+	// The first lines of the MCP server's log show how it started. The log is read whole and cut
+	// here, because kubectl can only cut it from the end.
+	if out, err := utils.Run(exec.Command("kubectl", "logs", "-n", ns,
+		"-l", "app.kubernetes.io/name="+mcpServerName, "--tail=-1")); err == nil {
+		lines := strings.SplitN(out, "\n", 61)
+		if len(lines) > 60 {
+			lines = lines[:60]
+		}
+		_, _ = fmt.Fprintf(GinkgoWriter, "mcp-server log (first lines):\n%s\n", strings.Join(lines, "\n"))
+	}
+	dump("Operator log (tail)", "logs", "-n", namespace, "-l", "control-plane=controller-manager", "--tail=200")
 }
 
 // -------------------------------------------------------------------------

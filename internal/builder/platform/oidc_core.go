@@ -97,6 +97,8 @@ const (
 	// oidcScopeOpenID and oidcSkewSeconds are the fixed provider-body values Core expects.
 	oidcScopeOpenID = "openid"
 	oidcSkewSeconds = 60
+	// oidcDelegateClaim is the field of the outermost act claim that holds the delegate's id.
+	oidcDelegateClaim = "client_id"
 	// heredocMarker delimits the QUOTED heredocs the scripts read their composed JSON from.
 	// A quoted heredoc suppresses parameter expansion AND command substitution, so everything
 	// between the markers is inert data. encoding/json emits each body on a SINGLE line (it
@@ -134,6 +136,9 @@ type adminRequest struct {
 // spec.keycloak.realm and the platform hostname, both CR-supplied — are escaped JSON values
 // rather than text spliced into a single-quoted shell argument. The field order mirrors Core's
 // payload and is kept stable for the render snapshots (JSON object order is not semantic).
+//
+// AllowedDelegates and DelegateClaim are set only while MCP is on; without them Core's defaults
+// (no delegates) apply.
 type oidcProviderRequest struct {
 	IssuerURL        string   `json:"issuerUrl"`
 	ClientID         string   `json:"clientId"`
@@ -146,6 +151,8 @@ type oidcProviderRequest struct {
 	Audiences        []string `json:"audiences"`
 	PostLogoutURL    string   `json:"postLogoutUrl"`
 	Skew             int      `json:"skew"`
+	AllowedDelegates []string `json:"allowedDelegates,omitempty"`
+	DelegateClaim    string   `json:"delegateClaim,omitempty"`
 }
 
 // OIDCClientSecretName returns the operator-owned OIDC client Secret name for a Platform:
@@ -334,7 +341,7 @@ curl -X POST \
 // Keycloak, parameterized with the operator-resolved provider config: it takes the client
 // secret as $1, waits for localhost:<coreport> + localhost:<opaport>, then curls a PUT to the
 // LOCALHOST settings endpoint with the provider body (scope ["openid"], audiences
-// [<clientId>], skew 60).
+// [<clientId>], skew 60, and while MCP is on, MCP as the one allowed delegate).
 //
 // URL split: issuer/authorization/logout/postLogout are BROWSER-FACING
 // (https://<host>/realms/<realm>/...); token/jwks are BACK-CHANNEL
@@ -374,9 +381,7 @@ func registerInternalKeycloakScript(p *otilmv1alpha1.Platform) string {
 	// carries a placeholder the operator then SPLITS the body at: the halves are emitted into
 	// QUOTED heredocs and the script concatenates the runtime secret between them, so the secret
 	// stays out of the rendered ConfigMap and out of every argv but curl's.
-	//nolint:gosec // G117: the clientSecret field is marshaled as a PLACEHOLDER, never a credential
-	// — the real secret only ever exists inside the pod, where the script splices it in at runtime.
-	body, _ := json.Marshal(oidcProviderRequest{
+	provider := oidcProviderRequest{
 		IssuerURL:        issuer,
 		ClientID:         OIDCClientID,
 		ClientSecret:     clientSecretPlaceholder,
@@ -388,7 +393,18 @@ func registerInternalKeycloakScript(p *otilmv1alpha1.Platform) string {
 		Audiences:        []string{OIDCClientID},
 		PostLogoutURL:    postLogout,
 		Skew:             oidcSkewSeconds,
-	})
+	}
+	// The PUT replaces the whole provider and Core's default allows no delegates, so a body without
+	// the delegate clears it on every Core start and ILM then refuses every delegated token MCP
+	// sends: while MCP is on, every body carries it. ILM reads the delegate from the delegateClaim
+	// field of the outermost act claim, which for MCP's tokens is act.client_id.
+	if MCPEnabled(p) {
+		provider.AllowedDelegates = []string{mcpClientID}
+		provider.DelegateClaim = oidcDelegateClaim
+	}
+	//nolint:gosec // G117: the clientSecret field is marshaled as a PLACEHOLDER, never a credential
+	// — the real secret only ever exists inside the pod, where the script splices it in at runtime.
+	body, _ := json.Marshal(provider)
 	bodyHead, bodyTail, _ := strings.Cut(string(body), clientSecretPlaceholder)
 
 	return fmt.Sprintf(`#!/bin/sh

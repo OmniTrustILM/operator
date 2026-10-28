@@ -100,7 +100,7 @@ func TestStampConfigChecksumOnlyCore(t *testing.T) {
 		assert.Equal(t, "abc123", dep.Spec.Template.Annotations[ConfigChecksumAnnotation])
 	})
 
-	t.Run("empty checksum is a no-op", func(t *testing.T) {
+	t.Run(testEmptyChecksumNoOp, func(t *testing.T) {
 		dep := coreDeployment(p)
 		require.NotNil(t, dep)
 		assert.False(t, StampConfigChecksum(dep, ""))
@@ -163,7 +163,7 @@ func TestStampGatewayConfigChecksum(t *testing.T) {
 		assert.Equal(t, testKongABC, dep.Spec.Template.Annotations[ConfigChecksumAnnotation])
 	})
 
-	t.Run("empty checksum is a no-op", func(t *testing.T) {
+	t.Run(testEmptyChecksumNoOp, func(t *testing.T) {
 		dep := gatewayDeployment(p)
 		require.NotNil(t, dep)
 		assert.False(t, StampGatewayConfigChecksum(dep, ""))
@@ -187,6 +187,46 @@ func TestStampGatewayConfigChecksum(t *testing.T) {
 		// ...and the gateway stamper does, with its own value.
 		assert.True(t, StampGatewayConfigChecksum(gw, "kong-sum"))
 		assert.Equal(t, "kong-sum", gw.Spec.Template.Annotations[ConfigChecksumAnnotation])
+	})
+}
+
+// TestStampMCPConfigChecksum verifies the checksum annotation is stamped on the mcp-server
+// Deployment's pod template and nowhere else, is a no-op for an empty sum, and stays name-scoped
+// against the Core and gateway stampers in both directions.
+func TestStampMCPConfigChecksum(t *testing.T) {
+	render := func(name string) *appsv1.Deployment {
+		return deploymentByName(RenderPlatformBase(mcpPlatform(nil), testOperatorNamespace), name)
+	}
+
+	t.Run("stamps the MCP server's pod template", func(t *testing.T) {
+		dep := render(mcpServerComponent)
+		require.NotNil(t, dep)
+		assert.True(t, StampMCPConfigChecksum(dep, testMCPChecksum))
+		assert.Equal(t, testMCPChecksum, dep.Spec.Template.Annotations[ConfigChecksumAnnotation])
+	})
+
+	t.Run(testEmptyChecksumNoOp, func(t *testing.T) {
+		dep := render(mcpServerComponent)
+		require.NotNil(t, dep)
+		assert.False(t, StampMCPConfigChecksum(dep, ""))
+		assert.NotContains(t, dep.Spec.Template.Annotations, ConfigChecksumAnnotation)
+	})
+
+	t.Run("Core and the gateway are left alone", func(t *testing.T) {
+		for _, name := range []string{coreComponentName, gatewayName} {
+			dep := render(name)
+			require.NotNil(t, dep, name)
+			assert.False(t, StampMCPConfigChecksum(dep, testMCPChecksum), name)
+			assert.NotContains(t, dep.Spec.Template.Annotations, ConfigChecksumAnnotation, name)
+		}
+	})
+
+	t.Run("the Core and gateway stampers leave the MCP server alone", func(t *testing.T) {
+		dep := render(mcpServerComponent)
+		require.NotNil(t, dep)
+		assert.False(t, StampConfigChecksum(dep, testMCPChecksum))
+		assert.False(t, StampGatewayConfigChecksum(dep, testMCPChecksum))
+		assert.NotContains(t, dep.Spec.Template.Annotations, ConfigChecksumAnnotation)
 	})
 }
 

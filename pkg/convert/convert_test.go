@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // testNamespace is the target namespace used across the Convert() call sites below.
@@ -31,11 +32,12 @@ func decode(t *testing.T, doc string) vals {
 // plaintextSecrets are sensitive literals used in the test fixtures. The rendered CR must
 // NEVER contain any of them — the central secrets-safety guarantee of the tool.
 var plaintextSecrets = []string{
-	"54R0dFPL5Iwo2BS",   // db password
-	"s0qKH5qItTWoxpBt",  // keycloak client secret
-	"super-mq-pass",     // messaging password
-	"my-api-key",        // provisioning api key
-	"BEGIN CERTIFICATE", // any inline PEM
+	"54R0dFPL5Iwo2BS",      // db password
+	"s0qKH5qItTWoxpBt",     // keycloak client secret
+	"super-mq-pass",        // messaging password
+	"my-api-key",           // provisioning api key
+	"BEGIN CERTIFICATE",    // any inline PEM
+	"SYNTHETIC_MCP_SECRET", // MCP client secret
 }
 
 // assertNoPlaintextSecrets fails if any known plaintext secret leaked into the output.
@@ -618,4 +620,332 @@ func TestConvertMapsLoggingFormat(t *testing.T) {
 
 	r = Convert(vals{"logging": vals{"level": "INFO"}}, "ilm", "ilm")
 	assert.Empty(t, r.Platform.Spec.Common.Logging.Format, "an unset format leaves Core's own default")
+}
+
+// reportedLine returns the footer entry the converter recorded for a values path: the bare path, or the path
+// followed by its reason in parentheses.
+func reportedLine(r *Result, path string) (string, bool) {
+	for _, line := range r.unmapped {
+		if line == path || strings.HasPrefix(line, path+" (") {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// unmappedLine returns the footer entry for a values path, failing the test when the path was not reported.
+func unmappedLine(t *testing.T, r *Result, path string) string {
+	t.Helper()
+	line, ok := reportedLine(r, path)
+	require.Truef(t, ok, "%s was not reported as unmapped", path)
+	return line
+}
+
+// TestConvertMapsMCP proves the umbrella's MCP values reach spec.mcp: the three global.mcp settings, the access
+// level, and the mcpServer component overrides. Everything the fixture sets is read by the conversion, so none of it
+// is reported as unmapped.
+func TestConvertMapsMCP(t *testing.T) {
+	values := decode(t, `
+global:
+  mcp:
+    enabled: true
+    cimd:
+      enabled: false
+    delegation:
+      group: ilm-mcp-users
+mcpServer:
+  access: read-write
+  replicaCount: 2
+  image:
+    registry: harbor.example.com
+    repository: ilm
+    name: mcp-server
+    tag: "0.3.0"
+    pullPolicy: Always
+    resources:
+      requests: { cpu: "200m", memory: 384Mi }
+      limits: { memory: 1Gi }
+  additionalEnv:
+    variables:
+      - name: MCP_EXTRA_FLAG
+        value: "true"
+`)
+	r := Convert(values, "ilm", testNamespace)
+	mcp := r.Platform.Spec.MCP
+
+	assert.True(t, mcp.Enabled)
+	require.NotNil(t, mcp.CIMD.Enabled, "an explicit false is a setting, not an absence")
+	assert.False(t, *mcp.CIMD.Enabled)
+	assert.Equal(t, "ilm-mcp-users", mcp.Delegation.Group)
+	assert.Equal(t, "read-write", mcp.Access)
+
+	require.NotNil(t, mcp.Replicas)
+	assert.Equal(t, int32(2), *mcp.Replicas)
+	assert.Equal(t, "harbor.example.com", mcp.Image.Registry)
+	assert.Equal(t, "ilm", mcp.Image.Repository)
+	assert.Equal(t, "mcp-server", mcp.Image.Name)
+	assert.Equal(t, "0.3.0", mcp.Image.Tag)
+	assert.Equal(t, "Always", mcp.Image.PullPolicy)
+	require.NotNil(t, mcp.Resources)
+	assert.Equal(t, "200m", mcp.Resources.Requests.Cpu().String())
+	assert.Equal(t, "1Gi", mcp.Resources.Limits.Memory().String())
+	require.Len(t, mcp.Env, 1)
+	assert.Equal(t, "MCP_EXTRA_FLAG", mcp.Env[0].Name)
+	assert.Equal(t, "true", mcp.Env[0].Value)
+
+	assert.Empty(t, r.unmapped, "every value in the fixture is read, so none is reported")
+
+	// The fixture has no managed Keycloak and no public host. The Platform's admission rules say so when it is
+	// applied, so the converter adds no MCP prerequisite note of its own.
+	for _, note := range r.customization {
+		assert.NotContains(t, strings.ToLower(note), "mcp")
+	}
+}
+
+// quantities flattens a resource list into resource name -> quantity, so a test can compare exactly which resources
+// were converted.
+func quantities(list corev1.ResourceList) map[string]string {
+	out := make(map[string]string, len(list))
+	for name, quantity := range list {
+		out[string(name)] = quantity.String()
+	}
+	return out
+}
+
+// TestConvertMapsMCPResourcesFromTheChartsKey pins where MCP's resources come from. The mcp-server chart keeps them under
+// image, so that key is converted. The top-level key the component pass reads for every service still works when it is
+// the only one set, and the chart's key wins, whole and unmerged, when both are set.
+func TestConvertMapsMCPResourcesFromTheChartsKey(t *testing.T) {
+	tests := []struct {
+		name         string
+		values       string
+		wantRequests map[string]string
+		wantLimits   map[string]string
+	}{
+		{
+			name:         "the chart's key",
+			values:       `mcpServer: {image: {resources: {requests: {cpu: 200m, memory: 384Mi}, limits: {memory: 1Gi}}}}`,
+			wantRequests: map[string]string{"cpu": "200m", "memory": "384Mi"},
+			wantLimits:   map[string]string{"memory": "1Gi"},
+		},
+		{
+			name:         "the top-level key alone",
+			values:       `mcpServer: {resources: {requests: {cpu: 900m}, limits: {memory: 2Gi}}}`,
+			wantRequests: map[string]string{"cpu": "900m"},
+			wantLimits:   map[string]string{"memory": "2Gi"},
+		},
+		{
+			name: "both keys: the chart's wins",
+			values: `mcpServer: {image: {resources: {requests: {cpu: 200m}}},
+  resources: {requests: {cpu: 900m, memory: 2Gi}, limits: {memory: 4Gi}}}`,
+			wantRequests: map[string]string{"cpu": "200m"},
+			wantLimits:   map[string]string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Convert(decode(t, tt.values), "ilm", testNamespace)
+
+			resources := r.Platform.Spec.MCP.Resources
+			require.NotNil(t, resources)
+			assert.Equal(t, tt.wantRequests, quantities(resources.Requests))
+			assert.Equal(t, tt.wantLimits, quantities(resources.Limits))
+		})
+	}
+}
+
+// TestConvertCopiesMCPCIMDOnlyWhenSet pins the rule for global.mcp.cimd.enabled. The Platform counts an unset value as
+// true, which is also the chart's default, so the converter copies the setting only when the values file carries it,
+// true or false, and otherwise leaves the field unset.
+func TestConvertCopiesMCPCIMDOnlyWhenSet(t *testing.T) {
+	tests := []struct {
+		name   string
+		values string
+		want   *bool
+	}{
+		{name: "no mcp block", values: `global: {}`, want: nil},
+		{name: "no cimd block", values: `global: {mcp: {enabled: true}}`, want: nil},
+		{name: "empty cimd block", values: `global: {mcp: {enabled: true, cimd: {}}}`, want: nil},
+		{name: "the chart default is copied", values: `global: {mcp: {cimd: {enabled: true}}}`, want: ptrTo(true)},
+		{name: "false is copied", values: `global: {mcp: {cimd: {enabled: false}}}`, want: ptrTo(false)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Convert(decode(t, tt.values), "ilm", testNamespace)
+			assert.Equal(t, tt.want, r.Platform.Spec.MCP.CIMD.Enabled)
+		})
+	}
+}
+
+// TestConvertWithoutMCPValuesLeavesMCPOff pins that a values file that never turns MCP on converts to a Platform with
+// an untouched MCP section and nothing to report: either no MCP values at all, or only the chart's own off defaults.
+func TestConvertWithoutMCPValuesLeavesMCPOff(t *testing.T) {
+	tests := []struct {
+		name   string
+		values string
+	}{
+		{name: "no MCP values", values: `global: {hostName: ilm.example.com}`},
+		{name: "the chart's off defaults", values: `
+global:
+  mcp:
+    enabled: false
+    clientSecret: ""
+    clientSecretRef: {}
+    delegation:
+      group: ""
+`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Convert(decode(t, tt.values), "ilm", testNamespace)
+			assert.Equal(t, otilmv1alpha1.MCPSpec{}, r.Platform.Spec.MCP)
+			assert.Empty(t, r.unmapped)
+			assert.Empty(t, r.secretTODOs)
+		})
+	}
+}
+
+// TestConvertDoesNotCopyTheMCPClientSecret proves MCP's client secret never leaves the values file: neither the value
+// nor a reference to a Secret holding it reaches the Platform or the report, and the report says why. The operator
+// generates the secret with MCP's Keycloak client and relays it, so no Secret is scaffolded either.
+func TestConvertDoesNotCopyTheMCPClientSecret(t *testing.T) {
+	values := decode(t, `
+global:
+  mcp:
+    enabled: true
+    clientSecret: SYNTHETIC_MCP_SECRET
+    clientSecretRef:
+      name: synthetic-mcp-secret-ref
+      key: synthetic-mcp-secret-key
+mcpServer:
+  security:
+    clientSecretRef:
+      name: synthetic-mcp-secret-ref
+      key: synthetic-mcp-secret-key
+`)
+	r := Convert(values, "ilm", testNamespace)
+	rendered, err := r.Render()
+	require.NoError(t, err)
+
+	assertNoPlaintextSecrets(t, rendered)
+	for _, ref := range []string{"synthetic-mcp-secret-ref", "synthetic-mcp-secret-key"} {
+		assert.NotContains(t, rendered, ref, "a reference to MCP's client secret is not copied either")
+	}
+	assert.Empty(t, r.secretTODOs, "the operator manages the secret, so none is scaffolded")
+
+	for _, path := range []string{"global.mcp.clientSecret", "global.mcp.clientSecretRef", "mcpServer.security.clientSecretRef"} {
+		assert.Contains(t, unmappedLine(t, r, path), "the operator manages MCP's client secret", path)
+	}
+}
+
+// TestConvertReportsMCPSecurityAsUnmapped pins that the values the operator derives, or does not render for MCP at all,
+// are reported, not dropped. mcpServer.security is reported key by key; an issuer, key set or token endpoint says it
+// points MCP at another identity provider and that the conversion did not keep it. mcpServer.networkPolicy is reported
+// as one block that says what isolates MCP after the migration.
+func TestConvertReportsMCPSecurityAsUnmapped(t *testing.T) {
+	values := decode(t, `
+mcpServer:
+  security:
+    clientId: ilm-mcp
+    exchangeMode: delegation
+    exchangeScope: ""
+    issuer: https://idp.example.invalid/realms/other
+    jwkSetUri: https://idp.example.invalid/realms/other/protocol/openid-connect/certs
+    tokenUri: https://idp.example.invalid/realms/other/protocol/openid-connect/token
+  networkPolicy:
+    enabled: true
+    ingress:
+      - podSelector: {matchLabels: {app.kubernetes.io/name: api-gateway}}
+`)
+	r := Convert(values, "ilm", testNamespace)
+	rendered, err := r.Render()
+	require.NoError(t, err)
+
+	for _, path := range []string{"mcpServer.security.clientId", "mcpServer.security.exchangeMode"} {
+		assert.Contains(t, unmappedLine(t, r, path), "the operator derives", path)
+	}
+	// The operator renders no policy for MCP alone, so a reader who had enabled one must learn that MCP falls under the
+	// looser platform-wide policies, not that the operator derived an equivalent.
+	networkPolicy := unmappedLine(t, r, "mcpServer.networkPolicy")
+	assert.Contains(t, networkPolicy, "renders no NetworkPolicy for MCP alone")
+	assert.Contains(t, networkPolicy, "platform-wide")
+	assert.Contains(t, networkPolicy, "looser")
+	assert.NotContains(t, networkPolicy, "derives")
+	for _, path := range []string{"mcpServer.security.issuer", "mcpServer.security.jwkSetUri", "mcpServer.security.tokenUri"} {
+		line := unmappedLine(t, r, path)
+		assert.Contains(t, line, "not converted", path)
+		assert.Contains(t, line, "another identity provider", path)
+	}
+
+	// The report names paths only. No endpoint reaches the output, so nothing reads as if the conversion kept
+	// the other provider.
+	assert.NotContains(t, rendered, "idp.example.invalid")
+	_, bareBlock := reportedLine(r, "mcpServer.security")
+	assert.False(t, bareBlock, "security is accounted for key by key")
+	_, emptyValue := reportedLine(r, "mcpServer.security.exchangeScope")
+	assert.False(t, emptyValue, "an empty value is a default, not a setting to report")
+}
+
+// TestConvertReportsUnmappedMCPServerKeys pins that an mcpServer value the Platform does not take is reported by its
+// exact path, never dropped: keys with no Platform field, such as toolsets, and the nested keys of the blocks the
+// conversion reads only in part (image, additionalEnv). The values it does read are not reported, and no value is
+// printed.
+func TestConvertReportsUnmappedMCPServerKeys(t *testing.T) {
+	values := decode(t, `
+mcpServer:
+  access: read-only
+  replicaCount: 1
+  toolsets: dropped-toolsets
+  apiUrl: http://dropped.invalid/api
+  nameOverride: dropped-name
+  service:
+    name: dropped-service
+  fullnameOverride: ""
+  nodeSelector: {}
+  tolerations: []
+  image:
+    tag: "0.3.0"
+    digest: dropped-digest
+    pullSecrets: []
+  additionalEnv:
+    variables:
+      - { name: MCP_EXTRA_FLAG, value: "true" }
+    configMaps: []
+    secrets: [dropped-secret]
+`)
+	r := Convert(values, "ilm", testNamespace)
+	rendered, err := r.Render()
+	require.NoError(t, err)
+
+	for _, path := range []string{
+		"mcpServer.toolsets", "mcpServer.apiUrl", "mcpServer.nameOverride", "mcpServer.service",
+		"mcpServer.image.digest", "mcpServer.additionalEnv.secrets",
+	} {
+		assert.Equal(t, path, unmappedLine(t, r, path), "a value with no mapping is reported by its bare path")
+	}
+	for _, path := range []string{
+		"mcpServer", "mcpServer.access", "mcpServer.replicaCount", "mcpServer.image", "mcpServer.image.tag",
+		"mcpServer.additionalEnv", "mcpServer.additionalEnv.variables",
+	} {
+		_, reported := reportedLine(r, path)
+		assert.Falsef(t, reported, "%s is read by the conversion, so it must not be reported", path)
+	}
+	for _, path := range []string{
+		"mcpServer.fullnameOverride", "mcpServer.nodeSelector", "mcpServer.tolerations",
+		"mcpServer.image.pullSecrets", "mcpServer.additionalEnv.configMaps",
+	} {
+		_, reported := reportedLine(r, path)
+		assert.Falsef(t, reported, "%s is empty, so there is nothing to report", path)
+	}
+
+	assert.NotContains(t, rendered, "dropped-", "the report names paths only, never values")
+}
+
+// TestConvertReportsAnMCPDelegationGroupItCannotCopy pins that a delegation group the converter cannot read as a string,
+// such as an unquoted number, is reported. Dropping it silently would widen MCP from one group's members to every user.
+func TestConvertReportsAnMCPDelegationGroupItCannotCopy(t *testing.T) {
+	r := Convert(decode(t, `global: {mcp: {enabled: true, delegation: {group: 2024}}}`), "ilm", testNamespace)
+
+	assert.Empty(t, r.Platform.Spec.MCP.Delegation.Group)
+	assert.Contains(t, unmappedLine(t, r, "global.mcp.delegation.group"), "MCP acts for every user")
 }

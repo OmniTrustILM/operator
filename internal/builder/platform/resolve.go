@@ -295,14 +295,21 @@ func sharedCredSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []commo
 	return refs
 }
 
+// clientCertHeaderName returns the name of the request header that carries the client certificate
+// the edge forwards for Core: spec.core.clientCertHeader, or the selected version bundle's default
+// when that is empty. Core is told to read it (coreEnv) and Kong removes it from the requests it
+// routes to MCP (gatewayMCPService), so both resolve the name here and cannot drift apart.
+func clientCertHeaderName(p *otilmv1alpha1.Platform) string {
+	if name := p.Spec.Core.ClientCertHeader; name != "" {
+		return name
+	}
+	return wiringFor(p).HeaderNameValue
+}
+
 // coreEnv composes Core's inline (static/derived) environment variables. Secret-
 // and ConfigMap-backed vars are added separately (see coreSecretEnv and the
 // ConfigMapEnv wiring in ResolveCore). Env-var names come from the wiring profile.
 func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
-	headerName := p.Spec.Core.ClientCertHeader
-	if headerName == "" {
-		headerName = w.HeaderNameValue
-	}
 	logLevel := p.Spec.Common.Logging.Level
 	if logLevel == "" {
 		logLevel = defaultLogLevel
@@ -314,7 +321,7 @@ func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 
 	env := []common.EnvPair{
 		{Name: w.HeaderEnabledEnv, Value: "true"},
-		{Name: w.HeaderNameEnv, Value: headerName},
+		{Name: w.HeaderNameEnv, Value: clientCertHeaderName(p)},
 		{Name: w.OPABaseURLEnv, Value: w.OPABaseURL},
 		{Name: w.AuthURLEnv, Value: w.AuthURL},
 		{Name: w.SchedulerURLEnv, Value: w.SchedulerURL},

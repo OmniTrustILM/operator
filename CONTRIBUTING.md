@@ -102,7 +102,7 @@ auto-generated release notes by those labels, so an unlabelled PR lands under "O
 | **Test** (`test.yaml`) | every PR, except chart-only changes | `golangci-lint`; `make test` plus an inline 80% coverage check; builds the operator image once; runs the **fast** e2e tier (`!managed`) on Kind from that image |
 | **Test Docker image** (`test_docker_image.yaml`) | every PR, except chart-only changes | the shared organisation container test + scan |
 | **Test Chart** (`test_chart.yaml`) | PRs touching `deploy/charts/**` | the `-develop` version check, `ct lint`, and `ct install` on Kind |
-| **E2E Managed** (`e2e-managed.yaml`) | PRs touching the managed-infra paths listed in the workflow; nightly at 02:30 UTC; on demand | the seven managed blocks in parallel, each on its own Kind cluster with the real CloudNativePG / RabbitMQ / Keycloak operators |
+| **E2E Managed** (`e2e-managed.yaml`) | PRs touching the managed-infra paths listed in the workflow; nightly at 02:30 UTC; on demand | the managed blocks in parallel, each on its own Kind cluster with the real CloudNativePG / RabbitMQ / Keycloak operators |
 | **Sonar** (`dispatch-sonar.yaml` → `sonar.yaml`) | after **Test** succeeds on a PR | SonarCloud analysis with the coverage and lint reports from that run |
 
 Note that **Test** ignores `deploy/charts/**`: a chart-only PR is validated by **Test Chart**

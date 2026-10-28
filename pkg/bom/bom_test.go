@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package bom
 
 import (
+	"maps"
 	"reflect"
 	"regexp"
 	"testing"
@@ -25,9 +26,14 @@ const (
 	testVersion2180 = "2.18.0"
 	testVersion2190 = "2.19.0"
 	testVersion2200 = "2.20.0"
+	testVersion2210 = "2.21.0"
 	testVersion2100 = "2.10.0"
 	testVersion290  = "2.9.0"
 )
+
+// testComponentMCPServer is the MCP server's bundle key and published image name, independent of
+// the production component const for the same reason as the version literals above.
+const testComponentMCPServer = "mcp-server"
 
 // Test-local literals for the time-quality/provider queue names, independent of the
 // production queue name consts in bom.go for the same reason as the version literals above.
@@ -267,6 +273,17 @@ func addSyntheticPreviewBundle(t *testing.T) string {
 	return previewVersion
 }
 
+// TestNewestVersionIsThePreview pins the shipped data to the release-process rule that main always
+// carries a preview one version ahead of the last release
+// (docs/release-process.md, The platform-release trigger): the newest bundle, which a development
+// platform follows, is the 2.21.0 preview, and it is never advertised.
+// TestNewestVersionIncludesPreviewBundle proves the mechanism with a synthetic bundle; this proves
+// the data keeps the rule.
+func TestNewestVersionIsThePreview(t *testing.T) {
+	assert.Equal(t, testVersion2210, NewestVersion())
+	assert.NotContains(t, SupportedVersions(), testVersion2210, "a preview is never advertised")
+}
+
 // TestDefaultVersionIsReleased is the ONE invariant DefaultVersion must satisfy: it must name
 // a RELEASED bundle (an empty spec.version can never land a fresh install on a preview). It
 // does NOT need to be the NEWEST released bundle — a release-day flip PR is free to mark a
@@ -322,10 +339,10 @@ func TestVersionListsShareTheSemverSort(t *testing.T) {
 	for _, v := range SupportedVersions() {
 		assert.Contains(t, AllVersions(), v, "AllVersions must include every released version")
 	}
-	assert.Equal(t, testVersion2200, AllVersions()[len(AllVersions())-1],
+	assert.Equal(t, testVersion2210, AllVersions()[len(AllVersions())-1],
 		"the newest bundle is last in the full key set")
 	assert.Equal(t, testVersion2200, SupportedVersions()[len(SupportedVersions())-1],
-		"the newest RELEASED bundle is last in the advertised set")
+		"the newest RELEASED bundle is last in the advertised set; the 2.21.0 preview is not advertised")
 }
 
 // TestPackageWrappersResolveDefaultBundle proves the version-agnostic package wrappers
@@ -645,5 +662,39 @@ func TestCoreReadGrantCoversItsQueues(t *testing.T) {
 	}
 	for _, q := range []string{testQueueTimeQualityConfig, "proxy.instance", "provider.other", "provider.discovery-work-x"} {
 		assert.False(t, grant.MatchString(q), "core must not be able to read %s", q)
+	}
+}
+
+// TestBundle2210 pins the 2.21.0 preview: the 2.20.0 bundle plus the MCP server image and the
+// Keycloak 26.8.1 pin, and unreleased. Everything else is 2.20.0's, so it is compared against the
+// 2.20.0 bundle, which TestBundle2200 pins in full, instead of being restated.
+func TestBundle2210(t *testing.T) {
+	b, ok := BundleFor(testVersion2210)
+	require.True(t, ok, "2.21.0 must resolve via explicit spec.version")
+	b200, ok := BundleFor(testVersion2200)
+	require.True(t, ok)
+
+	assert.False(t, b.Released, "2.21.0 stays a preview until its platform images are published")
+	assert.NotEqual(t, testVersion2210, DefaultVersion, "a preview is never the fresh-install default")
+
+	want := b200
+	want.Released = false
+	want.KeycloakVersion = "26.8.1"
+	want.Components = maps.Clone(b200.Components)
+	want.Components[testComponentMCPServer] = Image{Name: testComponentMCPServer, Tag: "1.0.0"}
+	assert.Equal(t, want, b, "2.21.0 is 2.20.0 plus the MCP server image and the Keycloak 26.8.1 pin")
+
+	assert.Equal(t, "26.6.3", b200.KeycloakVersion, "the released 2.20.0 keeps its Keycloak pin")
+}
+
+// TestMCPServerOnlyFrom2210 pins which bundles carry the MCP server image: it is a 2.21.0
+// component, so no older bundle carries it and every bundle from 2.21.0 on does.
+func TestMCPServerOnlyFrom2210(t *testing.T) {
+	require.Contains(t, AllVersions(), testVersion2210, "the 2.21.0 bundle must exist to carry the MCP server")
+	for _, v := range AllVersions() {
+		b, ok := BundleFor(v)
+		require.True(t, ok, testBundleContext, v)
+		_, found := b.Lookup(testComponentMCPServer)
+		assert.Equal(t, !semverLess(v, testVersion2210), found, "mcp-server presence in bundle %s", v)
 	}
 }

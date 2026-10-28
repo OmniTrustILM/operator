@@ -547,3 +547,81 @@ func TestRegisterInternalKeycloakScriptKeepsSecretOutOfExtraArgv(t *testing.T) {
 	assert.NotContains(t, script, clientSecretPlaceholder,
 		"the placeholder is consumed by the split; it must not survive into the script")
 }
+
+// runtimeSecret stands in for the client secret the Core pod splices between the two halves of the
+// provider body when it runs register-internal-keycloak.sh.
+const runtimeSecret = "runtime-client-secret"
+
+// internalProviderBody returns the provider body register-internal-keycloak.sh sends to Core,
+// decoded as the generic JSON object Core receives: the script's two heredoc halves rejoined
+// around runtimeSecret, as the pod joins them. A generic map pins the wire names of the fields,
+// which a round trip through oidcProviderRequest would not.
+func internalProviderBody(t *testing.T, p *otilmv1alpha1.Platform) map[string]any {
+	t.Helper()
+	cm := BuildCoreScriptsConfigMap(p)
+	require.NotNil(t, cm, "a managed Keycloak renders the core-scripts ConfigMap")
+	bodies, _ := quotedHeredocBodies(t, cm.Data[oidcScriptName])
+	require.Len(t, bodies, 2, "the body is split at the clientSecret slot")
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal([]byte(bodies[0]+runtimeSecret+bodies[1]), &body),
+		"the rejoined body must be valid JSON")
+	return body
+}
+
+// TestRegisterInternalKeycloakScriptAllowsMCPDelegate pins the MCP delegate in the provider body
+// whenever MCP is on, whatever its other settings. Core re-registers its internal provider with a
+// PUT on every start, the PUT replaces the whole provider, and Core's default allows no delegates,
+// so a body without the delegate leaves ILM refusing every delegated token MCP sends.
+func TestRegisterInternalKeycloakScriptAllowsMCPDelegate(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+	}{
+		{"defaults", nil},
+		{"CIMD off", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = boolPtr(false) }},
+		{"delegation limited to a group", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Delegation.Group = "mcp-users" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := mcpPlatform(tc.mutate)
+			require.True(t, MCPEnabled(p), "the case must render MCP")
+
+			body := internalProviderBody(t, p)
+
+			assert.Equal(t, []any{"ilm-mcp"}, body["allowedDelegates"])
+			assert.Equal(t, "client_id", body["delegateClaim"])
+		})
+	}
+}
+
+// TestRegisterInternalKeycloakScriptWithoutMCPIsUnchanged pins the body of a platform that renders
+// no MCP server. Core's config checksum includes this script, so an operator upgrade must leave it
+// alone for such a platform: the body carries neither delegate field, which keeps Core's own
+// defaults in force, and every other field keeps its value.
+func TestRegisterInternalKeycloakScriptWithoutMCPIsUnchanged(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+	}{
+		{"MCP off", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }},
+		{"MCP on, but the bundle has no MCP image", func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion220 }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := mcpPlatform(tc.mutate)
+			require.False(t, MCPEnabled(p), "the case must render no MCP")
+
+			body := internalProviderBody(t, p)
+
+			assert.NotContains(t, body, "allowedDelegates")
+			assert.NotContains(t, body, "delegateClaim")
+			assert.Equal(t, "https://ilm.example.com/kc/realms/ilm", body["issuerUrl"])
+			assert.Equal(t, OIDCClientID, body["clientId"])
+			assert.Equal(t, runtimeSecret, body["clientSecret"])
+			assert.Equal(t, []any{oidcScopeOpenID}, body["scope"])
+			assert.Equal(t, []any{OIDCClientID}, body["audiences"])
+			assert.EqualValues(t, oidcSkewSeconds, body["skew"])
+		})
+	}
+}

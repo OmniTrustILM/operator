@@ -2467,6 +2467,11 @@ func TestComponentPullSecretsUnion(t *testing.T) {
 			resolve: ResolveUtils,
 		},
 		{
+			name:    testMCPName,
+			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.MCP.Image.PullSecrets = s },
+			resolve: ResolveMCP,
+		},
+		{
 			name:    "auth-opa-policies",
 			set:     func(p *otilmv1alpha1.Platform, s []string) { p.Spec.AuthOpaPolicies.Image.PullSecrets = s },
 			resolve: ResolveAuthOpaPolicies,

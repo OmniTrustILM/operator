@@ -14,7 +14,8 @@ SPDX-License-Identifier: Apache-2.0
 // credentials) it emits the CR's Secret REFERENCE (e.g. database.credentials.secretRef)
 // plus a top-of-file "# TODO: create Secret" block with a ready-to-edit
 // `kubectl create secret` line. Secret creation stays a human decision; the tool only
-// scaffolds it.
+// scaffolds it. MCP's client secret is the one secret with no reference: the operator
+// generates it, so neither it nor a reference to it is copied, and the report says why.
 //
 // The conversion is best-effort, not 100%: values with no CR equivalent are flagged with
 // "# UNMAPPED: <values path>" and customization the user must move by hand (connectors,
@@ -23,6 +24,7 @@ package convert
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -609,12 +611,14 @@ func platformComponents() []componentMap {
 			return &s.FeAdministrator.ComponentSpec
 		}},
 		{"utilsService", func(s *otilmv1alpha1.PlatformSpec) *otilmv1alpha1.ComponentSpec { return &s.Utils.ComponentSpec }},
+		{"mcpServer", func(s *otilmv1alpha1.PlatformSpec) *otilmv1alpha1.ComponentSpec { return &s.MCP.ComponentSpec }},
 	}
 }
 
 // mapComponents fills each platform component's shared override surface (image, env,
 // resources, replicas) from its umbrella values block. Core's image comes from the
-// top-level `image` block (the chart's core image), the others from their own block.
+// top-level `image` block (the chart's core image), the others from their own block. The
+// MCP server is one of them; mapMCP adds its settings and accounts for the rest of its block.
 func (r *Result) mapComponents(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	for _, cm := range platformComponents() {
 		block := mapOf(values[cm.valuesKey])
@@ -643,6 +647,7 @@ func (r *Result) mapComponents(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	if en, ok := boolOf(mapOf(values["utilsService"])["enabled"]); ok {
 		spec.Utils.Enabled = en
 	}
+	r.mapMCP(values, spec)
 }
 
 // mapComponentImage fills a component's image override. For Core (valuesKey "image") the
@@ -692,6 +697,130 @@ func (r *Result) mapComponentReplicas(block vals, comp *otilmv1alpha1.ComponentS
 			comp.Replicas = ptrTo(n)
 			return
 		}
+	}
+}
+
+// Reasons the report gives for an MCP value that is not converted.
+const (
+	// mcpClientSecretNote is shared by every values path that holds MCP's client secret or a
+	// reference to it.
+	mcpClientSecretNote = "not copied: the operator manages MCP's client secret. It relays the one Keycloak " +
+		"generates for the ilm-mcp client into a Secret it owns, so there is no Secret to create or reference"
+	// mcpIdentityProviderNote is the reason for an issuer, key-set or token endpoint. It says what
+	// the value was for, so the line cannot be read as if the conversion kept it.
+	mcpIdentityProviderNote = "not converted: it points MCP at another identity provider, but the operator " +
+		"runs MCP against the platform's managed Keycloak only and derives these endpoints itself"
+	// mcpSecurityNote is the reason for every other mcpServer.security value.
+	mcpSecurityNote = "not converted: the operator derives MCP's security settings to match the Keycloak " +
+		"objects it provisions for MCP"
+	// mcpNetworkPolicyNote is the reason for mcpServer.networkPolicy.
+	mcpNetworkPolicyNote = "not converted: the operator renders no NetworkPolicy for MCP alone. After migration MCP " +
+		"is isolated only by the platform-wide NetworkPolicies (spec.networkPolicy), which admit ingress from the " +
+		"platform's namespace and the operator and allow all egress. A policy you had enabled to limit MCP to " +
+		"listed peers is not recreated, so the isolation is looser"
+	// mcpGroupNote is the reason for a delegation group that is not a string. Leaving it out of the
+	// Platform widens MCP from one group's members to every user, so the report must say so.
+	mcpGroupNote = "not converted: the value is not a string, and without spec.mcp.delegation.group MCP acts " +
+		"for every user. Set the group by hand"
+)
+
+// mcpServerRead lists what the conversion reads from the umbrella's mcpServer block: the access
+// level, the override surface mapComponents fills for every component, and image.resources, which
+// mapMCP reads because the chart keeps the container's resources there. A block that is read only
+// in part lists the sub-keys it reads; any other entry is read whole. It must match those reads: a
+// value listed here that nothing reads would vanish without a report.
+var mcpServerRead = map[string][]string{
+	"access":        nil,
+	"replicaCount":  nil,
+	"replicas":      nil,
+	"resources":     nil,
+	"image":         {"registry", "repository", "name", "tag", "pullPolicy", "resources"},
+	"additionalEnv": {"variables"},
+}
+
+// mapMCP maps the umbrella's MCP values onto spec.mcp. The settings live under global.mcp. The
+// component's own values live under mcpServer: mapComponents has already filled its image,
+// replicas, resources and env through the component table, so what is read here is the access
+// level and the resources the chart keeps under image. The component table reads a top-level
+// resources key, which the chart does not have, so the chart's key wins when both are set.
+//
+// global.mcp.cimd.enabled is copied only when the values set it. The chart defaults it to true and
+// the Platform counts an unset value as true, so an absent value stays absent instead of becoming
+// a second spelling of the default.
+//
+// MCP's client secret is never copied, and neither is a reference to it: the operator generates
+// the secret with MCP's Keycloak client and relays it itself. Every other mcpServer value the
+// Platform does not take is reported by its exact path. The report names paths only, never values.
+func (r *Result) mapMCP(values vals, spec *otilmv1alpha1.PlatformSpec) {
+	mcp := mapOf(mapOf(values["global"])["mcp"])
+	if enabled, ok := boolOf(mcp["enabled"]); ok {
+		spec.MCP.Enabled = enabled
+	}
+	if cimd, ok := boolOf(mapOf(mcp["cimd"])["enabled"]); ok {
+		spec.MCP.CIMD.Enabled = ptrTo(cimd)
+	}
+	group := mapOf(mcp["delegation"])["group"]
+	spec.MCP.Delegation.Group = str(group)
+	if spec.MCP.Delegation.Group == "" && !isEmpty(group) {
+		r.unmapped = append(r.unmapped, "global.mcp.delegation.group ("+mcpGroupNote+")")
+	}
+	for _, key := range []string{"clientSecret", "clientSecretRef"} {
+		if !isEmpty(mcp[key]) {
+			r.unmapped = append(r.unmapped, "global.mcp."+key+" ("+mcpClientSecretNote+")")
+		}
+	}
+
+	server := mapOf(values["mcpServer"])
+	spec.MCP.Access = str(server["access"])
+	if resources := resourcesFrom(mapOf(server["image"])); resources != nil {
+		spec.MCP.Resources = resources
+	}
+	r.flagUnmappedMCPServerKeys(server)
+}
+
+// flagUnmappedMCPServerKeys reports every non-empty mcpServer value the conversion does not read,
+// by its exact values path. flagUnmappedTopLevel looks at top-level keys only and the component
+// table reads just part of each block, so without this a key such as toolsets, or an image sub-key
+// such as digest, would vanish with no note.
+func (r *Result) flagUnmappedMCPServerKeys(server vals) {
+	for key, v := range server {
+		if isEmpty(v) {
+			continue
+		}
+		read, isRead := mcpServerRead[key]
+		switch {
+		case key == "security":
+			r.flagUnmappedMCPSecurityKeys(mapOf(v))
+		case key == "networkPolicy":
+			r.unmapped = append(r.unmapped, "mcpServer.networkPolicy ("+mcpNetworkPolicyNote+")")
+		case !isRead:
+			r.unmapped = append(r.unmapped, "mcpServer."+key)
+		case read != nil: // a block read only in part: report the sub-keys it does not read
+			for sub, subValue := range mapOf(v) {
+				if !isEmpty(subValue) && !slices.Contains(read, sub) {
+					r.unmapped = append(r.unmapped, "mcpServer."+key+"."+sub)
+				}
+			}
+		}
+	}
+}
+
+// flagUnmappedMCPSecurityKeys reports each non-empty mcpServer.security value with the reason that
+// fits it. An issuer, key-set or token endpoint means MCP is pointed at another identity provider,
+// which the operator does not run MCP against.
+func (r *Result) flagUnmappedMCPSecurityKeys(security vals) {
+	for key, v := range security {
+		if isEmpty(v) {
+			continue
+		}
+		note := mcpSecurityNote
+		switch key {
+		case "issuer", "jwkSetUri", "tokenUri":
+			note = mcpIdentityProviderNote
+		case "clientSecretRef":
+			note = mcpClientSecretNote
+		}
+		r.unmapped = append(r.unmapped, "mcpServer.security."+key+" ("+note+")")
 	}
 }
 
@@ -898,6 +1027,9 @@ var knownTopLevel = func() map[string]bool {
 		"global", "image", "additionalEnv", "logging", "ingress", "letsEncrypt",
 		"apiGateway", "registerAdmin", "authService", "authOpaPolicies",
 		"schedulerService", "feAdministrator", "utilsService",
+		// "mcpServer" is registered although mapMCP reads only part of the block: flagUnmappedTopLevel
+		// is top-level-only, so the keys left over are reported one by one (flagUnmappedMCPServerKeys).
+		"mcpServer",
 		// Core-shape values handled by mapCoreFeatures. "messaging" is registered even though it
 		// is only PARTLY mapped (timeQuality maps; the broker coordinates come from
 		// global.messaging): flagUnmappedTopLevel is top-level-only, so leaving it out would

@@ -16,9 +16,14 @@ SPDX-License-Identifier: Apache-2.0
 // pairing a variant name with the Platform CR that enables its feature set. The variant
 // set covers the breadth the project ships: the minimal smoke, the three cert-managed /
 // BYO edge modes (internal CA chain, ACME / letsEncrypt, bring-your-own TLS Secret), the
-// Gateway API edge, the utils on/off toggle, external messaging, the gateway
-// cors / request-logging / management-UI options, and the managed CloudNativePG database
-// with the default-on pooler and with the pooler opted out (direct-connection wiring).
+// Gateway API edge, the utils on/off toggle, the MCP server on a managed Keycloak, external
+// messaging, the gateway cors / request-logging / management-UI options, and the managed
+// CloudNativePG database with the default-on pooler and with the pooler opted out
+// (direct-connection wiring).
+//
+// RenderPlatform does not return the managed Keycloak objects, which the controller applies
+// through its own gate. TestGoldenManagedKeycloakResolved snapshots them for one variant in the
+// same way (testdata/<variant>-resolved.golden.yaml).
 //
 // Regenerating the golden files: when an intentional render change updates the shipped
 // objects, re-record every golden with
@@ -69,6 +74,8 @@ const (
 	// version2200 pins a variant to the 2.20.0 bundle — the default bundle, pinned here
 	// explicitly so the variant is stable across future default moves.
 	version2200 = "2.20.0"
+	// version2210 pins a variant to the 2.21.0 preview bundle.
+	version2210 = "2.21.0"
 )
 
 // updateGolden, when true (UPDATE_GOLDEN=1 in the environment, or -update on the test
@@ -160,12 +167,15 @@ func variants() []variant {
 		edgeBYOSecretVariant(),
 		edgeGatewayAPIVariant(),
 		utilsOnVariant(),
+		mcpOnVariant(),
+		managedKeycloakVariant(),
 		externalMessagingVariant(),
 		gatewayOptionsVariant(),
 		managedDBVariant(),
 		managedDBNoPoolerVariant(),
 		version2190Variant(),
 		version2200Variant(),
+		version2210Variant(),
 		timeQualityVariant(),
 		coreInstanceIDVariant(),
 		coreStatefulSetVariant(),
@@ -237,6 +247,39 @@ func utilsOnVariant() variant {
 	spec := fullFeatureSpec()
 	spec.Utils = otilmv1alpha1.UtilsSpec{Enabled: true}
 	return variant{name: "utils-on", platform: platformFor(spec)}
+}
+
+// mcpOnVariant: the MCP server enabled on a managed Keycloak behind a public host — the setup the
+// CRD's validation requires — so its Deployment/Service/ServiceAccount must be PRESENT, carrying
+// the delegation-mode environment. It pins the 2.21.0 preview bundle, which spec.version "develop"
+// resolves to on a development build: the controller resolves that alias before rendering, so the
+// builders only ever see the concrete version.
+func mcpOnVariant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2210
+	spec.Common.HostName = "ilm.example.com"
+	spec.Keycloak = &otilmv1alpha1.KeycloakSpec{
+		Mode: "managed", Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1},
+	}
+	spec.MCP = otilmv1alpha1.MCPSpec{Enabled: true}
+	return variant{name: "mcp-on", platform: platformFor(spec)}
+}
+
+// managedKeycloakVariant: a managed Keycloak behind a public host, MCP left off, on the released
+// 2.20.0 bundle. The render of a managed Keycloak platform without MCP must stay byte-identical
+// across operator upgrades, because any change rolls Keycloak or Core on platforms that never
+// turned MCP on. Two goldens pin it: managed-keycloak holds what RenderPlatform returns (Core's
+// register-internal-keycloak.sh and its postStart hook, the gateway's /kc route and every other
+// object) and managed-keycloak-resolved holds the Keycloak CR and the realm import that
+// ResolveManagedKeycloak returns, which the controller applies separately.
+func managedKeycloakVariant() variant {
+	spec := fullFeatureSpec()
+	spec.Version = version2200
+	spec.Common.HostName = "ilm.example.com"
+	spec.Keycloak = &otilmv1alpha1.KeycloakSpec{
+		Mode: "managed", Managed: &otilmv1alpha1.ManagedKeycloakSpec{Instances: 1},
+	}
+	return variant{name: "managed-keycloak", platform: platformFor(spec)}
 }
 
 // externalMessagingVariant: an external broker referenced by host/port, with a global
@@ -324,6 +367,14 @@ func version2200Variant() variant {
 	return variant{name: "version-2200", platform: platformFor(spec)}
 }
 
+// version2210Variant: version2200Variant's CR pinned to the 2.21.0 preview bundle instead. Its diff
+// against version-2200's golden is the whole rendered delta of the 2.21.0 bundle for that CR.
+func version2210Variant() variant {
+	p := version2200Variant().platform
+	p.Spec.Version = version2210
+	return variant{name: "version-2210", platform: p}
+}
+
 // timeQualityVariant: the 2.19.0 platform with BOTH time-quality controls on — Core's
 // integration env and the monitor sidecar (external broker, so the monitor's credentials come
 // from an explicit Secret reference). It is the byte-for-byte record of the private sidecar
@@ -394,45 +445,70 @@ func TestGoldenVariants(t *testing.T) {
 			if err != nil {
 				t.Fatalf("render variant %q: %v", v.name, err)
 			}
-
-			path := filepath.Join(goldenDir, v.name+".golden.yaml")
-
-			if *updateGolden {
-				if err := os.MkdirAll(goldenDir, 0o755); err != nil { //nolint:gosec // test fixture dir
-					t.Fatalf("create golden dir: %v", err)
-				}
-				if err := os.WriteFile(path, got, 0o644); err != nil { //nolint:gosec // golden fixture, world-readable by design
-					t.Fatalf("write golden %q: %v", path, err)
-				}
-				t.Logf("updated golden file %s (%d bytes)", path, len(got))
-				return
-			}
-
-			want, err := os.ReadFile(path) //nolint:gosec // path is a fixed in-repo fixture name
-			if err != nil {
-				t.Fatalf("read golden %q: %v (run `UPDATE_GOLDEN=1 go test ./test/golden/...` to create it)", path, err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Errorf("render for variant %q does not match golden file %s.\n"+
-					"If this change is intentional, regenerate with `UPDATE_GOLDEN=1 go test ./test/golden/...` and review the diff.\n\n%s",
-					v.name, path, firstDiff(want, got))
-			}
+			assertGolden(t, v.name, got)
 		})
 	}
 }
 
-// renderToYAML renders the operator's objects for a CR and serializes them to a stable,
-// canonical multi-document YAML stream: each typed object is converted to unstructured
-// with its GVK populated from the scheme, the objects are sorted by (apiVersion, kind,
-// namespace, name), and each is marshaled via sigs.k8s.io/yaml (which sorts map keys),
-// so the output is deterministic across runs.
+// TestGoldenManagedKeycloakResolved snapshots the objects ResolveManagedKeycloak returns for the
+// managed-keycloak variant's Platform: the Keycloak CR and the realm import. RenderPlatform does
+// not return them, because the controller applies them through its own gate, so TestGoldenVariants
+// cannot pin them. They go through the same serialization as the render.
+func TestGoldenManagedKeycloakResolved(t *testing.T) {
+	v := managedKeycloakVariant()
+	// The controller defaults the shared image registry on its copy of the Platform before it
+	// resolves these objects, so the snapshot does too.
+	platformbuilder.DefaultImageRegistry(v.platform)
+	got, err := serializeObjects(platformbuilder.ResolveManagedKeycloak(v.platform))
+	if err != nil {
+		t.Fatalf("resolve the managed Keycloak objects of variant %q: %v", v.name, err)
+	}
+	assertGolden(t, v.name+"-resolved", got)
+}
+
+// assertGolden asserts that got is byte-equal to the golden file <name>.golden.yaml. With -update
+// (or UPDATE_GOLDEN=1) it rewrites that file from got instead.
+func assertGolden(t *testing.T, name string, got []byte) {
+	t.Helper()
+	path := filepath.Join(goldenDir, name+".golden.yaml")
+
+	if *updateGolden {
+		if err := os.MkdirAll(goldenDir, 0o755); err != nil { //nolint:gosec // test fixture dir
+			t.Fatalf("create golden dir: %v", err)
+		}
+		if err := os.WriteFile(path, got, 0o644); err != nil { //nolint:gosec // golden fixture, world-readable by design
+			t.Fatalf("write golden %q: %v", path, err)
+		}
+		t.Logf("updated golden file %s (%d bytes)", path, len(got))
+		return
+	}
+
+	want, err := os.ReadFile(path) //nolint:gosec // path is a fixed in-repo fixture name
+	if err != nil {
+		t.Fatalf("read golden %q: %v (run `UPDATE_GOLDEN=1 go test ./test/golden/...` to create it)", path, err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("render %q does not match golden file %s.\n"+
+			"If this change is intentional, regenerate with `UPDATE_GOLDEN=1 go test ./test/golden/...` and review the diff.\n\n%s",
+			name, path, firstDiff(want, got))
+	}
+}
+
+// renderToYAML renders the operator's objects for a CR and serializes them with serializeObjects.
 func renderToYAML(p *otilmv1alpha1.Platform) ([]byte, error) {
+	return serializeObjects(platformbuilder.RenderPlatform(p, operatorNamespace))
+}
+
+// serializeObjects serializes objects to a stable, canonical multi-document YAML stream: each
+// typed object is converted to unstructured with its GVK populated from the scheme, the
+// objects are sorted by (apiVersion, kind, namespace, name), and each is marshaled via
+// sigs.k8s.io/yaml (which sorts map keys), so the output is deterministic across runs.
+func serializeObjects(rendered []client.Object) ([]byte, error) {
 	scheme, err := operatorScheme()
 	if err != nil {
 		return nil, err
 	}
 
-	rendered := platformbuilder.RenderPlatform(p, operatorNamespace)
 	objs := make([]*unstructured.Unstructured, 0, len(rendered))
 	for _, o := range rendered {
 		u, err := toUnstructured(scheme, o)

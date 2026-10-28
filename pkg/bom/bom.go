@@ -73,6 +73,7 @@ const (
 	version2180 = "2.18.0"
 	version2190 = "2.19.0"
 	version2200 = "2.20.0"
+	version2210 = "2.21.0"
 )
 
 // componentAuthOPAPolicies is the operator's component identity for the
@@ -116,6 +117,10 @@ const componentKeycloakTheme = "keycloak-theme"
 // image name.
 const componentTimeQualityMonitor = "time-quality-monitor"
 
+// componentMCPServer is the operator's component identity for the ILM MCP server image, reused as
+// both the bundle map key and the published image name. It exists only in 2.21.0+ bundles.
+const componentMCPServer = "mcp-server"
+
 // Tags shared by every CURRENT bundle: opa and curl are third-party/base images
 // pinned identically across all supported platform versions today. This is a dedup of
 // today's data, not a promise of cross-version alignment — a bundle that needs a
@@ -128,6 +133,10 @@ const (
 // keycloakVersion2663 is a managed Keycloak pin several bundles share; like the tags above, a
 // dedup of today's data, not a promise of cross-version alignment.
 const keycloakVersion2663 = "26.6.3"
+
+// keycloakVersion2681 is the Keycloak server version that Keycloak Operator 26.8.1, the version the
+// prerequisite installer deploys, selects when a managed Keycloak pins none.
+const keycloakVersion2681 = "26.8.1"
 
 // Image is the per-component image coordinates from a bundle. Repository is set only
 // for components published outside the default repository (e.g. ilm-private) — empty
@@ -290,6 +299,21 @@ var bundles = map[string]Bundle{
 		// lock and indexes it, which can outlast the default on a large installation.
 		CoreStartupFailureThreshold: 180,
 	},
+	// 2.21.0 — a PREVIEW until the platform images are published; the release-day PR sets
+	// Released (docs/release-process.md). It is the 2.20.0 bundle plus the MCP server image
+	// (images2210) and the Keycloak 26.8.1 pin. The wiring and the messaging topology are 2.20.0's.
+	version2210: {
+		Components:      images2210,
+		Wiring:          wiring2200,
+		Messaging:       messagingTopology2210,
+		HasProvisioning: true,
+		Released:        false,
+		RabbitMQVersion: "4.3.1",
+		CNPGVersion:     "18",
+		KeycloakVersion: keycloakVersion2681,
+		// This bundle still runs the 2.20.0 Core, so it keeps that bundle's migration budget.
+		CoreStartupFailureThreshold: 180,
+	},
 	version2170: {
 		// 2.17.0 is the pre-rebrand CZERTAINLY release. Its images are republished under the
 		// SAME registry/repository as 2.18.0 (hub.omnitrustregistry.com/ilm) — only the tags
@@ -358,6 +382,18 @@ var images2200 = func() map[string]Image {
 	m[ComponentProxy] = Image{Name: "proxy", Tag: "1.0.1"}
 	// 1.0.0 runs as a named user, which runAsNonRoot without a runAsUser cannot verify.
 	m[componentTimeQualityMonitor] = Image{Name: componentTimeQualityMonitor, Tag: "1.0.1", Repository: "ilm-private"}
+	return m
+}()
+
+// images2210 is the 2.20.0 image set plus the MCP server, which no earlier bundle carries. A clone,
+// so the two bundles never share a map.
+//
+// Core and fe-administrator stay on 2.20.0 until 2.21.0 is published. That Core ignores the OAuth2
+// provider's allowedDelegates and delegateClaim, so a platform on this bundle does not check
+// delegated tokens against the allowed delegates. The 2.21.0 release must move both images.
+var images2210 = func() map[string]Image {
+	m := maps.Clone(images2200)
+	m[componentMCPServer] = Image{Name: componentMCPServer, Tag: "1.0.0"}
 	return m
 }()
 
@@ -1125,7 +1161,11 @@ func newMessagingTopology2190() MessagingTopology {
 // provider.discovery-work queue, its binding from the ilm exchange, and Core's read grant on it.
 // The vhost and the exchanges are unchanged, so 2.19.0 -> 2.20.0 is an additive apply, not a
 // messaging migration.
-var messagingTopology2200 = func() MessagingTopology {
+var messagingTopology2200 = newMessagingTopology2200()
+
+// newMessagingTopology2200 returns a fresh 2.20.0 topology on every call, so the 2.21.0 topology,
+// which is the same data, never shares its slices or queue Arguments maps with it.
+func newMessagingTopology2200() MessagingTopology {
 	t := newMessagingTopology2190()
 	for i := range t.Users {
 		if t.Users[i].Role == MessagingUserCore {
@@ -1139,7 +1179,11 @@ var messagingTopology2200 = func() MessagingTopology {
 	t.Bindings = slices.Insert(t.Bindings, afterBinding,
 		MessagingBinding{Source: exchangeIlm, Destination: queueProviderDiscoveryWork, RoutingKey: queueProviderDiscoveryWork})
 	return t
-}()
+}
+
+// messagingTopology2210 is the 2.21.0 topology: 2.20.0's, unchanged, so 2.20.0 -> 2.21.0 is no
+// messaging migration.
+var messagingTopology2210 = newMessagingTopology2200()
 
 // messagingTopology2170 is the platform's managed-RabbitMQ topology for platform version
 // 2.17.0: a SINGLE broker user (2.17.0 used one messaging credential, not the five-user 2.18.0

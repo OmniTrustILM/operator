@@ -101,6 +101,14 @@ matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 |---|---|
 | [`platform_vault_injection.yaml`](./platform_vault_injection.yaml) | Inject secrets with the HashiCorp Vault Agent Injector (fleet-wide passthrough). |
 
+### MCP server
+| Sample | Shows |
+|---|---|
+| [`platform_managed_mcp.yaml`](./platform_managed_mcp.yaml) | The optional **MCP server** on a managed Keycloak: a public host and `mcp.enabled`, on platform version 2.21.0 (a preview bundle — it resolves only because `spec.version` names it). |
+
+Full explanation:
+[The Platform CR → MCP server](../../docs/site/custom-resources/platform.md#mcp-server).
+
 ### Other
 | Sample | Shows |
 |---|---|

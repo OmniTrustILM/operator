@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package platform
 
 import (
+	"strings"
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -185,6 +186,10 @@ func TestBuildGlobalConfigMapConditionalsOff(t *testing.T) {
 	// its own URL, so the gateway never proxies it.
 	_, hasKc := serviceByName(cfg, "keycloak")
 	assert.False(t, hasKc, "/kc route must be absent when Keycloak is not managed")
+	// The MCP server is off by default, and its route must not point the gateway at a Service that
+	// does not exist.
+	_, hasMCP := serviceByName(cfg, testMCPName)
+	assert.False(t, hasMCP, "the MCP route must be absent when the MCP server is off")
 
 	assert.Empty(t, cfg.Plugins, "no plugins when cors and logging.request are off")
 }
@@ -268,6 +273,145 @@ func TestBuildGlobalConfigMapMqRouteAbsentForServiceBus(t *testing.T) {
 
 	_, ok := serviceByName(cfg, testMessagingService)
 	assert.False(t, ok, "/mq route must be absent for brokerType=servicebus even with management.expose on")
+}
+
+// removedHeaders returns the request-transformer config that strips the named request headers, as
+// it reads back from a rendered kong.yml.
+func removedHeaders(names ...string) map[string]interface{} {
+	headers := make([]interface{}, len(names))
+	for i, name := range names {
+		headers[i] = name
+	}
+	return map[string]interface{}{"remove": map[string]interface{}{"headers": headers}}
+}
+
+// TestBuildGlobalConfigMapMCPRoute pins the gateway service that publishes the MCP server: its
+// upstream, the two public paths, unbuffered responses, and the removal of Core's client-certificate
+// header.
+func TestBuildGlobalConfigMapMCPRoute(t *testing.T) {
+	cfg := parseKong(t, BuildGlobalConfigMap(mcpPlatform(nil)))
+
+	svc, ok := serviceByName(cfg, testMCPName)
+	require.True(t, ok, "an enabled MCP server must add a gateway service")
+	assert.Equal(t, testMCPName, svc.Host, "the gateway reaches MCP by its Service name")
+	assert.Equal(t, 8080, svc.Port)
+	assert.Equal(t, "http", svc.Protocol)
+	assert.Empty(t, svc.Path, "no service path, so the public path reaches MCP unchanged")
+
+	require.Len(t, svc.Routes, 1)
+	route := svc.Routes[0]
+	assert.Equal(t, "mcp", route.Name)
+	assert.Equal(t, []string{"/mcp", testMCPMetadataPath}, route.Paths,
+		"the MCP endpoint and, by prefix, its protected-resource metadata under /mcp too")
+	assert.False(t, route.StripPath, "strip_path=false so MCP sees the path it is served under")
+	assert.True(t, route.PreserveHost, "preserve_host so MCP builds its URLs from the public host")
+	require.NotNil(t, route.ResponseBuffering, "response buffering must be switched off explicitly")
+	assert.False(t, *route.ResponseBuffering, "MCP streams its responses, so the gateway must not buffer them")
+
+	require.Len(t, route.Plugins, 1)
+	assert.Equal(t, testRequestTransformer, route.Plugins[0].Name)
+	assert.Equal(t, removedHeaders(testDefaultClientCertHeader), route.Plugins[0].Config,
+		"the route strips the client-certificate header so it never reaches MCP")
+
+	// Core still reads that header, so the removal is scoped to the MCP route: it is not a global
+	// plugin, and no other route sets plugins or buffering.
+	assert.Empty(t, cfg.Plugins, "the header removal must not be a global plugin")
+	for _, other := range cfg.Services {
+		if other.Name == testMCPName {
+			continue
+		}
+		for _, r := range other.Routes {
+			assert.Empty(t, r.Plugins, "route %s must keep the client-certificate header", r.Name)
+			assert.Nil(t, r.ResponseBuffering, "route %s keeps the gateway's default buffering", r.Name)
+		}
+	}
+}
+
+// TestBuildGlobalConfigMapMCPRouteRemovesCustomClientCertHeader proves the route strips the header
+// Core is configured to read: a platform that renames it must not leak the client certificate to
+// MCP under the new name.
+func TestBuildGlobalConfigMapMCPRouteRemovesCustomClientCertHeader(t *testing.T) {
+	p := mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Core.ClientCertHeader = testCustomClientCertHeader })
+
+	svc, ok := serviceByName(parseKong(t, BuildGlobalConfigMap(p)), testMCPName)
+	require.True(t, ok, "an enabled MCP server must add a gateway service")
+	require.Len(t, svc.Routes, 1)
+	require.Len(t, svc.Routes[0].Plugins, 1)
+	assert.Equal(t, removedHeaders(testCustomClientCertHeader), svc.Routes[0].Plugins[0].Config,
+		"the route strips the configured header, not the default name")
+}
+
+// TestBuildGlobalConfigMapMCPRouteFollowsMCPEnabled proves the route renders only when the MCP
+// server does: asking for MCP on a version whose bundle carries no MCP image renders neither the
+// workload nor a gateway route to it.
+func TestBuildGlobalConfigMapMCPRouteFollowsMCPEnabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+		want   bool
+	}{
+		{"mcp.enabled is false", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }, false},
+		{"the version bundle carries no MCP image", func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion220 }, false},
+		{"the MCP server renders", nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ok := serviceByName(parseKong(t, BuildGlobalConfigMap(mcpPlatform(tc.mutate))), testMCPName)
+			assert.Equal(t, tc.want, ok)
+		})
+	}
+}
+
+// TestRenderedKongPluginsAreEnabledOnTheGateway proves every plugin the declarative config names,
+// global or on a route, is in KONG_PLUGINS: Kong refuses a config that names a plugin it was not
+// started with, so a plugin missing from that list would stop the gateway at boot.
+func TestRenderedKongPluginsAreEnabledOnTheGateway(t *testing.T) {
+	p := mcpPlatform(func(p *otilmv1alpha1.Platform) {
+		p.Spec.Gateway.Cors.Enabled = true
+		p.Spec.Gateway.Logging.Request = true
+	})
+	enabled := strings.Split(envMap(ResolveGateway(p))["KONG_PLUGINS"], ",")
+
+	cfg := parseKong(t, BuildGlobalConfigMap(p))
+	var named []string
+	for _, plugin := range cfg.Plugins {
+		named = append(named, plugin.Name)
+	}
+	for _, svc := range cfg.Services {
+		for _, route := range svc.Routes {
+			for _, plugin := range route.Plugins {
+				named = append(named, plugin.Name)
+			}
+		}
+	}
+
+	require.Contains(t, named, testRequestTransformer, "the MCP route's plugin must be among those checked")
+	for _, name := range named {
+		assert.Contains(t, enabled, name, "KONG_PLUGINS must enable %s", name)
+	}
+}
+
+// TestCoreEnvUsesClientCertHeaderName proves Core reads the client certificate from the header
+// clientCertHeaderName names: spec.core.clientCertHeader, or the version bundle's default when that
+// is empty. Kong strips the same header from the requests it routes to MCP, so both resolve it
+// through that one function.
+func TestCoreEnvUsesClientCertHeaderName(t *testing.T) {
+	tests := []struct{ name, header, want string }{
+		{"an unset header falls back to the bundle default", "", testDefaultClientCertHeader},
+		{"a custom header replaces the default", testCustomClientCertHeader, testCustomClientCertHeader},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := basePlatform()
+			p.Spec.Core.ClientCertHeader = tc.header
+			w := wiringFor(p)
+
+			assert.Equal(t, tc.want, clientCertHeaderName(p))
+			got, ok := envValue(coreEnv(p, w), w.HeaderNameEnv)
+			require.Truef(t, ok, "%s must be set", w.HeaderNameEnv)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestBuildGlobalConfigMapCorsAndFileLog(t *testing.T) {

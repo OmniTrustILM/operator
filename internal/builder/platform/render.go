@@ -109,8 +109,8 @@ type componentMetrics struct {
 // ResolvePlatformServiceMonitors returns one Prometheus ServiceMonitor per platform
 // component whose metrics ServiceMonitor is enabled (spec.<component>.metrics.
 // serviceMonitor.enabled). The operator emits a precise per-component ServiceMonitor
-// selecting that component's pods on its "http" port. The utils ServiceMonitor is
-// rendered only when utils itself is enabled (same gate as the workload). Returns
+// selecting that component's pods on its "http" port. The utils and mcp-server ServiceMonitors
+// are rendered only when the component itself is (same gate as the workload). Returns
 // nil when no component opts in.
 func ResolvePlatformServiceMonitors(p *otilmv1alpha1.Platform) []client.Object {
 	candidates := []componentMetrics{
@@ -123,6 +123,9 @@ func ResolvePlatformServiceMonitors(p *otilmv1alpha1.Platform) []client.Object {
 	}
 	if p.Spec.Utils.Enabled {
 		candidates = append(candidates, componentMetrics{ResolveUtils(p), p.Spec.Utils.Metrics})
+	}
+	if MCPEnabled(p) {
+		candidates = append(candidates, componentMetrics{ResolveMCP(p), p.Spec.MCP.Metrics})
 	}
 	// provisioning-rabbitmq's ServiceMonitor is rendered only when the component itself is
 	// (provisioning.mode=deploy), same gate as the workload.
@@ -232,6 +235,19 @@ func RenderPlatformBase(p *otilmv1alpha1.Platform, operatorNamespace string) []c
 			common.BuildServiceAccount(utils),
 			buildWorkload(utils),
 			common.BuildService(utils),
+		)
+	}
+
+	// mcp-server: ServiceAccount + Deployment + Service — only when enabled and the version's
+	// bundle carries its image. The Deployment reads its client secret by secretKeyRef from the
+	// operator-owned Secret named by MCPClientSecretName, which is not part of the render model.
+	// A platform that leaves MCP off renders nothing here.
+	if MCPEnabled(p) {
+		mcp := withPlatformGlobals(p, ResolveMCP(p))
+		objs = append(objs,
+			common.BuildServiceAccount(mcp),
+			buildWorkload(mcp),
+			common.BuildService(mcp),
 		)
 	}
 

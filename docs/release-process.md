@@ -51,7 +51,7 @@ operators:
 make test-e2e-managed
 ```
 
-Locally that runs all seven managed blocks serially and takes hours; the suite is
+Locally that runs every managed block serially and takes hours; the suite is
 `ContinueOnFailure`, so one run reports every failure rather than stopping at the first. To
 narrow a re-run, pass a single block:
 
@@ -59,10 +59,10 @@ narrow a re-run, pass a single block:
 make test-e2e-managed E2E_MANAGED_LABEL=matrix-migration
 ```
 
-The blocks are `managed-postgres`, `managed-rabbitmq`, `managed-keycloak`, `full`,
-`matrix-upgrade`, `matrix-preview` and `matrix-migration`. The faster option for a release gate
-is to dispatch the **E2E Managed** workflow on GitHub Actions, which runs all seven in parallel,
-each on its own Kind cluster.
+The blocks are `managed-postgres`, `managed-rabbitmq`, `managed-keycloak`, `managed-mcp`,
+`full`, `matrix-upgrade`, `matrix-preview` and `matrix-migration`. The faster option for a
+release gate is to dispatch the **E2E Managed** workflow on GitHub Actions, which runs all of them
+in parallel, each on its own Kind cluster.
 
 **Verify the BOM against the component releases.** The bundle for `$platform_version` in
 `pkg/bom/bom.go` — image coordinates, wiring env-var names, Secret keys, managed messaging
