@@ -1292,7 +1292,12 @@ func platformManagedKeycloakSpecs() {
 				"-n", keycloakNS, "--ignore-not-found", "--timeout=120s")
 			_, _ = utils.Run(cmd)
 
-			By("deleting the CNPG Cluster left behind by the Retain deletion policy")
+			By("deleting the CNPG Pooler and Cluster left behind by the Retain deletion policy")
+			// A managed database renders a PgBouncer Pooler by default and its pod outlives the
+			// Cluster, so without this delete the drain wait below runs to its whole deadline.
+			cmd = exec.Command("kubectl", "delete", "pooler.postgresql.cnpg.io", clusterName+"-pooler",
+				"-n", keycloakNS, "--ignore-not-found", "--timeout=120s")
+			_, _ = utils.Run(cmd)
 			cmd = exec.Command("kubectl", "delete", "cluster.postgresql.cnpg.io", clusterName,
 				"-n", keycloakNS, "--ignore-not-found", "--timeout=120s")
 			_, _ = utils.Run(cmd)
