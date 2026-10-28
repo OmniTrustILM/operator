@@ -702,6 +702,16 @@ spec:
 	// fetches + relays the ilm client secret; Core self-registers the provider in-pod).
 	platformManagedKeycloakSpecs()
 
+	// Platform managed-MCP specs (defined in platform_test.go): a managed Platform that starts with the
+	// optional MCP server off, turns it on, then turns CIMD off. Registered the same way; they install
+	// CloudNativePG and the Keycloak Operator in their own BeforeAll, and check against a live Keycloak
+	// and Kong that the operator enables MCP's Keycloak features, keeps MCP's realm objects (creating
+	// delegation:client in a realm that predates the features), relays the ilm-mcp client secret, runs
+	// the MCP server, routes /mcp, and removes mcp-cimd before the cimd feature goes. Like the
+	// managed-Keycloak spec they run in the Keycloak Operator's namespace and drain it in their
+	// AfterAll, so the FULL block below starts from an empty one.
+	platformManagedMCPSpecs()
+
 	// FULL managed-platform specs (defined in platform_test.go): database + messaging +
 	// keycloak ALL managed, the edge enabled with cert-manager, AND the real PUBLIC ILM
 	// application images. Registered LAST so it runs after the managed-Keycloak spec drains

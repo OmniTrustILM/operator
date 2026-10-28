@@ -1013,6 +1013,28 @@ spec:
               but with an EXTERNAL broker it manages no users and has nothing to wire, so the CR must name
               a Secret. It lives here (not on TimeQualityMonitorSpec) because messaging.mode is in a
               sibling sub-tree that rule cannot see.
+
+              A sixth cross-field rule gates MCP on a MANAGED Keycloak: the operator provisions MCP's
+              Keycloak objects (its client, client scopes and delegation permission) through the Keycloak
+              admin API, which only exists when the operator provisions Keycloak (keycloak.mode=managed).
+              It lives here (not on MCPSpec) because keycloak.mode is in a sibling sub-tree the MCPSpec rule
+              cannot see.
+
+              A seventh cross-field rule gives MCP a public host, the one the operator resolves for the
+              platform: the host of an ENABLED edge, otherwise the canonical common.hostName. The host of a
+              disabled edge is ignored by that resolution, so edge.host satisfies the rule only while
+              edge.enabled is true. MCP builds its issuer and resource URLs
+              (https://<host>/kc/realms/<realm> and https://<host>/mcp) from the resolved host. It lives
+              here because the edge and common blocks are sibling sub-trees the MCPSpec rule cannot see.
+
+              An eighth cross-field rule keeps a PINNED managed Keycloak at 26.8.1 or later, the release both
+              install paths run. An unpinned version is not checked: the Keycloak Operator prerequisite
+              supplies its own matching 26.8.1 server image. The rule lives here because
+              keycloak.managed.version is in a sibling sub-tree the MCPSpec rule cannot see. The version is
+              a Keycloak image tag, so the pattern accepts 26.8.1 to 26.8.99, 26.9 and later 26.x, and 27 to
+              99, each optionally followed by a tag suffix such as the -0 of 26.8.1-0. A tag that cannot be
+              shown to be 26.8.1 or later is rejected: one that names no patch of 26.8, or that is not a
+              version at all, such as latest.
             properties:
               additionalEnv:
                 description: |-
@@ -5650,6 +5672,721 @@ spec:
                 x-kubernetes-validations:
                 - message: keycloak.managed is required when mode=managed
                   rule: self.mode != 'managed' || has(self.managed)
+              mcp:
+                description: |-
+                  MCP controls the optional MCP server component, which lets an MCP client such as Claude
+                  Code work with ILM on behalf of the signed-in user. It is off and read-only by default, and
+                  enabling it needs a managed Keycloak and a public host.
+                properties:
+                  access:
+                    default: read-only
+                    description: |-
+                      Access is the level of tools the MCP server offers (ILM_MCP_ACCESS): "read-only" offers only
+                      tools that read, "read-write" adds tools that create and change, and "full" adds tools that
+                      delete, revoke or destroy, and the tools that return protected material such as private keys
+                      and secret content. Defaults to "read-only". MCP's calls keep the signed-in user's own ILM
+                      permissions, so Access only narrows what MCP offers.
+                    enum:
+                    - read-only
+                    - read-write
+                    - full
+                    type: string
+                  affinity:
+                    description: |-
+                      Affinity sets the component's pod affinity/anti-affinity and node affinity rules.
+                      The schema is preserved opaquely (x-kubernetes-preserve-unknown-fields) rather than
+                      expanding the full corev1.Affinity OpenAPI inline in seven component blocks, which
+                      would bloat the CRD past the etcd object-size limit; the Go type stays corev1.Affinity
+                      so it marshals correctly, and the apiserver/kubelet still validate it as a PodSpec field.
+                    x-kubernetes-preserve-unknown-fields: true
+                  autoscaling:
+                    description: |-
+                      Autoscaling configures an optional HorizontalPodAutoscaler for this component. When
+                      set the operator renders an HPA targeting this component's Deployment and OMITS
+                      .spec.replicas on the Deployment, so the HPA owns the replica count (under
+                      Server-Side Apply the operator's field manager never sends, and so never clobbers,
+                      replicas). Autoscaling takes precedence over Replicas and over any HA-default
+                      replica count.
+                    properties:
+                      maxReplicas:
+                        description: |-
+                          MaxReplicas is the upper bound the autoscaler scales up to. It is required and must
+                          be greater than or equal to MinReplicas.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      minReplicas:
+                        description: |-
+                          MinReplicas is the lower bound the autoscaler scales down to. When unset the
+                          autoscaling/v2 default (1) applies.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      targetCPUUtilization:
+                        description: |-
+                          TargetCPUUtilization is the target average CPU utilization (percentage of the
+                          container's CPU request) the autoscaler maintains. When set it renders a Resource
+                          metric on cpu. Requires the component to declare a CPU resource request.
+                        format: int32
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                      targetMemoryUtilization:
+                        description: |-
+                          TargetMemoryUtilization is the target average memory utilization (percentage of the
+                          container's memory request) the autoscaler maintains. When set it renders a Resource
+                          metric on memory. Requires the component to declare a memory resource request.
+                        format: int32
+                        maximum: 100
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxReplicas
+                    type: object
+                  cimd:
+                    description: CIMD configures sign-in with OAuth Client ID Metadata
+                      Documents.
+                    properties:
+                      enabled:
+                        default: true
+                        description: |-
+                          Enabled turns CIMD sign-in on. It defaults to true, and an unset value counts as true. With it
+                          on, the operator enables Keycloak's cimd feature and keeps the client policy that admits
+                          metadata-document clients in the realm. Set it to false to leave both off, in which case MCP
+                          clients have to be registered in Keycloak by hand.
+                        type: boolean
+                    type: object
+                  configMapRefs:
+                    description: |-
+                      ConfigMapRefs references Kubernetes ConfigMaps consumed as env (envFrom /
+                      configMapKeyRef with key mapping) or mounted as volumes, mirroring the Connector CR.
+                    items:
+                      description: ConfigMapRef defines a reference to a Kubernetes
+                        configmap.
+                      properties:
+                        keys:
+                          description: Keys defines the individual key mappings from
+                            the configmap.
+                          items:
+                            description: ConfigMapKeyMapping defines the mapping of
+                              a key from a configmap.
+                            properties:
+                              configMapKey:
+                                description: ConfigMapKey is the key in the configmap
+                                  to reference.
+                                type: string
+                              envVar:
+                                description: EnvVar is the environment variable name
+                                  to map to (for env type).
+                                type: string
+                              path:
+                                description: Path is the file path to mount to (for
+                                  volume type).
+                                type: string
+                            type: object
+                          type: array
+                        mountPath:
+                          description: MountPath is the path to mount the configmap
+                            (required when type=volume).
+                          type: string
+                        name:
+                          description: Name is the name of the configmap.
+                          type: string
+                        type:
+                          description: Type defines how the configmap is consumed
+                            (env or volume).
+                          enum:
+                          - env
+                          - volume
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    type: array
+                  delegation:
+                    description: Delegation configures whom MCP may act for.
+                    properties:
+                      group:
+                        description: |-
+                          Group names a top-level Keycloak group of the platform realm. When set, MCP may act only for
+                          the members of that group: the operator creates the group when it is missing, and adding
+                          members is up to you. When empty (the default), MCP may act for every user of the realm. It
+                          is a group name, not a path, so it holds no "/", and is at most 255 characters long.
+                        pattern: ^[^/]{0,255}$
+                        type: string
+                    type: object
+                  enabled:
+                    default: false
+                    description: Enabled controls whether the MCP server is deployed.
+                      Defaults to false.
+                    type: boolean
+                  env:
+                    description: |-
+                      Env is a list of non-sensitive inline environment variables, appended AFTER the
+                      operator-derived env so a user variable of the same name wins (last-wins
+                      container-env semantics). Sensitive values must be supplied via SecretRefs.
+                    items:
+                      description: EnvVar defines an environment variable for a workload.
+                      properties:
+                        name:
+                          description: Name is the environment variable name.
+                          type: string
+                        value:
+                          description: |-
+                            Value is the environment variable value. It is optional so a valueless or
+                            empty-string variable can be set, mirroring core/v1 EnvVar.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  image:
+                    description: |-
+                      Image overrides the component's image settings, per field (registry/repository/
+                      name/tag/digest/pullPolicy/command/args). Unset fields fall back to the shared
+                      spec.image and then the version bundle.
+                    properties:
+                      args:
+                        description: |-
+                          Args overrides the container's command arguments. When unset the image's own CMD
+                          is used.
+                        items:
+                          type: string
+                        type: array
+                      command:
+                        description: |-
+                          Command overrides the container entrypoint (the container's command). When unset
+                          the image's own ENTRYPOINT is used.
+                        items:
+                          type: string
+                        type: array
+                      digest:
+                        description: |-
+                          Digest pins the image by content digest (e.g. "sha256:abc123..."). When set it
+                          takes precedence over Tag and the reference is composed as
+                          registry/repository/name@digest, so the workload runs an immutable image.
+                        type: string
+                      name:
+                        description: Name is the image name (optional; defaults from
+                          the version bundle when applicable).
+                        type: string
+                      pullPolicy:
+                        description: |-
+                          PullPolicy defines the image pull policy. A Platform component that leaves it unset
+                          uses spec.common.image.pullPolicy; IfNotPresent applies when no pull policy is set.
+                        type: string
+                      pullSecrets:
+                        description: PullSecrets is a list of secret names for pulling
+                          the image.
+                        items:
+                          type: string
+                        type: array
+                      registry:
+                        description: Registry is the image registry host (optional;
+                          for example, registry.example.com).
+                        type: string
+                      repository:
+                        description: Repository is the image repository or path.
+                        type: string
+                      tag:
+                        description: |-
+                          Tag is the image tag (optional; defaults from the version bundle when applicable).
+                          Ignored when Digest is set (a digest pins the image immutably).
+                        type: string
+                    type: object
+                  initContainers:
+                    description: |-
+                      InitContainers are extra init containers appended (after the operator's own) to run
+                      before the main container. They are SCC-hardened (forced restricted-v2 fields) like
+                      every other container, so a user init container cannot weaken pod security. The
+                      schema is preserved opaquely (x-kubernetes-preserve-unknown-fields) rather than
+                      expanding the full corev1.Container OpenAPI inline in seven component blocks (which
+                      would bloat the CRD past the etcd object-size limit); the Go type stays
+                      []corev1.Container so it marshals correctly and the kubelet validates it.
+                    x-kubernetes-preserve-unknown-fields: true
+                  metrics:
+                    description: |-
+                      Metrics configures the component's metrics endpoint and an optional per-component
+                      Prometheus ServiceMonitor. When metrics.serviceMonitor.enabled is true the operator
+                      renders a ServiceMonitor for this component (gated on the Prometheus operator CRD).
+                    properties:
+                      enabled:
+                        description: Enabled indicates whether metrics are enabled.
+                        type: boolean
+                      path:
+                        default: /v1/metrics
+                        description: Path is the HTTP path for metrics endpoint.
+                        type: string
+                      port:
+                        default: 8080
+                        description: |-
+                          Port is the port for the metrics endpoint.
+                          Currently reserved for future use when metrics are served on a separate port.
+                          The ServiceMonitor uses the service port (spec.service.port) for scraping.
+                        format: int32
+                        type: integer
+                      serviceMonitor:
+                        description: ServiceMonitor defines the ServiceMonitor configuration.
+                        properties:
+                          enabled:
+                            description: Enabled indicates whether a ServiceMonitor
+                              should be created.
+                            type: boolean
+                          interval:
+                            description: Interval defines the scrape interval.
+                            type: string
+                          labels:
+                            additionalProperties:
+                              type: string
+                            description: Labels are additional labels to add to the
+                              ServiceMonitor.
+                            type: object
+                        required:
+                        - enabled
+                        type: object
+                    required:
+                    - enabled
+                    type: object
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: NodeSelector constrains the component's pods to nodes
+                      with matching labels.
+                    type: object
+                  podAnnotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PodAnnotations are arbitrary annotations merged onto the component's pod template
+                      (e.g. for Vault Agent Injector or Istio sidecar injection).
+                    type: object
+                  podDisruptionBudget:
+                    description: |-
+                      PodDisruptionBudget configures an optional PodDisruptionBudget for this component
+                      (guarding voluntary-disruption availability). When unset and the platform's
+                      spec.highAvailability is enabled the operator renders a default PDB (minAvailable 1)
+                      for the stateless components; an explicit PodDisruptionBudget here overrides that
+                      default.
+                    properties:
+                      enabled:
+                        description: Enabled indicates whether a PodDisruptionBudget
+                          should be created.
+                        type: boolean
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is the maximum number/percentage of pods that may be unavailable. It is
+                          honoured only when MinAvailable is unset (a PodDisruptionBudget may carry at most one).
+                        x-kubernetes-int-or-string: true
+                      minAvailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MinAvailable is the minimum number/percentage of pods that must be available. It is
+                          mutually exclusive with MaxUnavailable and takes precedence when both are set.
+                        x-kubernetes-int-or-string: true
+                    required:
+                    - enabled
+                    type: object
+                  podLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PodLabels are arbitrary labels merged onto the component's pod template. They are
+                      merged with the operator-managed labels; operator labels take precedence (they are
+                      immutable selectors).
+                    type: object
+                  probes:
+                    description: |-
+                      Probes overrides the component's liveness/readiness/startup probes. When unset the
+                      operator's per-component default probes apply.
+                    properties:
+                      liveness:
+                        description: Liveness defines the liveness probe configuration.
+                        properties:
+                          failureThreshold:
+                            description: FailureThreshold is the number of consecutive
+                              failures before the probe is considered failed.
+                            format: int32
+                            type: integer
+                          initialDelaySeconds:
+                            description: InitialDelaySeconds is the number of seconds
+                              after the container starts before the probe is initiated.
+                            format: int32
+                            type: integer
+                          path:
+                            description: Path is the HTTP path to probe.
+                            type: string
+                          periodSeconds:
+                            description: PeriodSeconds is how often (in seconds) to
+                              perform the probe.
+                            format: int32
+                            type: integer
+                        type: object
+                      readiness:
+                        description: Readiness defines the readiness probe configuration.
+                        properties:
+                          failureThreshold:
+                            description: FailureThreshold is the number of consecutive
+                              failures before the probe is considered failed.
+                            format: int32
+                            type: integer
+                          initialDelaySeconds:
+                            description: InitialDelaySeconds is the number of seconds
+                              after the container starts before the probe is initiated.
+                            format: int32
+                            type: integer
+                          path:
+                            description: Path is the HTTP path to probe.
+                            type: string
+                          periodSeconds:
+                            description: PeriodSeconds is how often (in seconds) to
+                              perform the probe.
+                            format: int32
+                            type: integer
+                        type: object
+                      startup:
+                        description: Startup defines the startup probe configuration.
+                        properties:
+                          failureThreshold:
+                            description: FailureThreshold is the number of consecutive
+                              failures before the probe is considered failed.
+                            format: int32
+                            type: integer
+                          initialDelaySeconds:
+                            description: InitialDelaySeconds is the number of seconds
+                              after the container starts before the probe is initiated.
+                            format: int32
+                            type: integer
+                          path:
+                            description: Path is the HTTP path to probe.
+                            type: string
+                          periodSeconds:
+                            description: PeriodSeconds is how often (in seconds) to
+                              perform the probe.
+                            format: int32
+                            type: integer
+                        type: object
+                    type: object
+                  replicas:
+                    description: |-
+                      Replicas is the desired replica count for this component. It is ignored when
+                      Autoscaling is set (an HPA then owns scaling and the operator omits
+                      .spec.replicas). When the platform's spec.highAvailability is enabled a component
+                      that sets neither Replicas nor Autoscaling receives an HA-default replica count; an
+                      explicit Replicas here overrides that default.
+                    format: int32
+                    type: integer
+                  resources:
+                    description: |-
+                      Resources overrides the container resource requirements (requests/limits) for this
+                      component.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  secretRefs:
+                    description: |-
+                      SecretRefs references Kubernetes Secrets consumed as env (envFrom / secretKeyRef
+                      with key mapping) or mounted as volumes, mirroring the Connector CR. Values are
+                      projected by reference — never copied into the rendered objects.
+                    items:
+                      description: SecretRef defines a reference to a Kubernetes secret.
+                      properties:
+                        keys:
+                          description: Keys defines the individual key mappings from
+                            the secret.
+                          items:
+                            description: RefKeyMapping defines the mapping of a key
+                              from a secret or configmap.
+                            properties:
+                              envVar:
+                                description: EnvVar is the environment variable name
+                                  to map to (for env type).
+                                type: string
+                              path:
+                                description: Path is the file path to mount to (for
+                                  volume type).
+                                type: string
+                              secretKey:
+                                description: SecretKey is the key in the secret to
+                                  reference.
+                                type: string
+                            type: object
+                          type: array
+                        mountPath:
+                          description: MountPath is the path to mount the secret (required
+                            when type=volume).
+                          type: string
+                        name:
+                          description: Name is the name of the secret.
+                          type: string
+                        type:
+                          description: Type defines how the secret is consumed (env
+                            or volume).
+                          enum:
+                          - env
+                          - volume
+                          type: string
+                      required:
+                      - name
+                      - type
+                      type: object
+                    type: array
+                  securityContext:
+                    description: |-
+                      SecurityContext tunes the per-workload runtime decisions of the pod and container
+                      security context (readOnlyRootFilesystem and the pod-level fsGroup). It is always
+                      merged through SCC hardening (fill-don't-replace): the four SCC-critical fields
+                      (runAsNonRoot, no privilege escalation, drop ALL capabilities, seccomp
+                      RuntimeDefault) are guaranteed even if the user omits them, so a partial context
+                      can never silently weaken pod security.
+                    properties:
+                      fsGroup:
+                        description: |-
+                          FSGroup is added to every container's supplementary groups. The kubelet also applies it
+                          as the group owner of mounted volumes, but only for volume types and CSI drivers that
+                          support ownership management. It carries no default: OpenShift's restricted-v2 SCC
+                          assigns fsGroup from the namespace's allocated range and rejects a value outside it, so
+                          whether to pin one is the deployment's decision.
+                        format: int64
+                        maximum: 2147483647
+                        minimum: 0
+                        type: integer
+                      readOnlyRootFilesystem:
+                        default: true
+                        description: ReadOnlyRootFilesystem indicates that the container
+                          has a read-only root filesystem.
+                        type: boolean
+                      runAsNonRoot:
+                        default: true
+                        description: RunAsNonRoot indicates that the container must
+                          run as a non-root user.
+                        type: boolean
+                    type: object
+                  service:
+                    description: |-
+                      Service overrides the component's Service settings (port/type). When unset the
+                      operator's default Service shape applies.
+                    properties:
+                      port:
+                        default: 8080
+                        description: Port is the service port.
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      type:
+                        default: ClusterIP
+                        description: Type is the Kubernetes service type.
+                        enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
+                        type: string
+                    type: object
+                  serviceAccount:
+                    description: |-
+                      ServiceAccount overrides the component's ServiceAccount name and annotations. When
+                      unset the operator renders a dedicated, least-privilege ServiceAccount named after
+                      the component.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          Annotations are extra annotations stamped onto the rendered ServiceAccount (e.g.
+                          a cloud workload-identity binding). They are non-sensitive routing metadata only.
+                        type: object
+                      name:
+                        description: |-
+                          Name overrides the ServiceAccount name the component uses (and is named after).
+                          When unset the component's own name is used.
+                        type: string
+                    type: object
+                  sidecars:
+                    description: |-
+                      Sidecars are extra containers appended (after the main container) to run alongside
+                      it in the pod. They are SCC-hardened (forced restricted-v2 fields) like every other
+                      container, so a user sidecar cannot weaken pod security. The schema is preserved
+                      opaquely (x-kubernetes-preserve-unknown-fields) for the same CRD-size reason as
+                      InitContainers; the Go type stays []corev1.Container.
+                    x-kubernetes-preserve-unknown-fields: true
+                  tolerations:
+                    description: Tolerations allow the component's pods to schedule
+                      onto tainted nodes.
+                    items:
+                      description: |-
+                        The pod this Toleration is attached to tolerates any taint that matches
+                        the triple <key,value,effect> using the matching operator <operator>.
+                      properties:
+                        effect:
+                          description: |-
+                            Effect indicates the taint effect to match. Empty means match all taint effects.
+                            When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                          type: string
+                        key:
+                          description: |-
+                            Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                            If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                          type: string
+                        operator:
+                          description: |-
+                            Operator represents a key's relationship to the value.
+                            Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
+                            Exists is equivalent to wildcard for value, so that a pod can
+                            tolerate all taints of a particular category.
+                            Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
+                          type: string
+                        tolerationSeconds:
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration (which must be
+                            of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                            it is not set, which means tolerate the taint forever (do not evict). Zero and
+                            negative values will be treated as 0 (evict immediately) by the system.
+                          format: int64
+                          type: integer
+                        value:
+                          description: |-
+                            Value is the taint value the toleration matches to.
+                            If the operator is Exists, the value should be empty, otherwise just a regular string.
+                          type: string
+                      type: object
+                    type: array
+                  volumes:
+                    description: |-
+                      Volumes are additional pod volumes mounted into the main container, appended to
+                      the operator's own volumes.
+                    items:
+                      description: |-
+                        VolumeSpec defines a volume to mount in the workload pod. A volume takes one source: an
+                        emptyDir, which the kubelet creates fresh for each pod, or a PersistentVolumeClaim,
+                        whose contents outlive the pod. Naming neither leaves an emptyDir.
+                      properties:
+                        emptyDir:
+                          description: EmptyDir defines the emptyDir volume source.
+                          properties:
+                            medium:
+                              description: Medium is the storage medium type (e.g.,
+                                "", "Memory").
+                              type: string
+                            sizeLimit:
+                              description: SizeLimit is the maximum size of the emptyDir
+                                volume.
+                              type: string
+                          type: object
+                        mountPath:
+                          description: MountPath is the path to mount the volume in
+                            the container.
+                          type: string
+                        name:
+                          description: Name is the name of the volume.
+                          type: string
+                        persistentVolumeClaim:
+                          description: |-
+                            PersistentVolumeClaim mounts an existing claim, for state a pod restart must keep.
+                            Writing it from a container that runs as an unprivileged uid needs a pod-level
+                            fsGroup, which spec.securityContext.fsGroup supplies.
+                          properties:
+                            claimName:
+                              description: ClaimName is the PersistentVolumeClaim's
+                                name in the workload's namespace.
+                              minLength: 1
+                              type: string
+                            readOnly:
+                              description: ReadOnly mounts the claim read-only.
+                              type: boolean
+                          required:
+                          - claimName
+                          type: object
+                      required:
+                      - mountPath
+                      - name
+                      type: object
+                      x-kubernetes-validations:
+                      - message: a volume takes either emptyDir or persistentVolumeClaim,
+                          not both
+                        rule: '!(has(self.emptyDir) && has(self.persistentVolumeClaim))'
+                    type: array
+                  workloadType:
+                    default: Deployment
+                    description: |-
+                      WorkloadType selects the apps/v1 workload kind the operator renders for this
+                      component: a Deployment (the default) or a StatefulSet. A StatefulSet gives the
+                      component's pods a stable, ordinal network identity (a per-pod hostname under the
+                      component's headless Service) and an ordered, one-at-a-time rolling update — useful
+                      for a component that needs predictable pod names or strict rollout ordering. The
+                      default, Deployment, fits the platform's stateless components (interchangeable pods,
+                      parallel rollout). Switching the kind on an existing component is NOT a seamless
+                      in-place mutation: the operator applies the new kind and prunes the old one, so the
+                      component briefly restarts — safe because platform state lives in the database/broker,
+                      not in the pod. The rendered StatefulSet currently carries no volumeClaimTemplates
+                      (the platform components are stateless); persistent per-pod storage is a future knob.
+                      All other shaping (the hardened pod template, replicas/HPA semantics, scheduling,
+                      probes, env) is identical to the Deployment path. The allowed values are enumerated
+                      on the WorkloadKind type.
+                    enum:
+                    - Deployment
+                    - StatefulSet
+                    type: string
+                type: object
               messaging:
                 description: Messaging is the required AMQP broker connection (external
                   or managed).
@@ -8394,6 +9131,21 @@ spec:
                 || !self.core.timeQualityMonitor.enabled || self.messaging.mode ==
                 ''managed'' || (has(self.core.timeQualityMonitor.credentials) && has(self.core.timeQualityMonitor.credentials.secretRef)
                 && self.core.timeQualityMonitor.credentials.secretRef.size() > 0)'
+            - message: mcp.enabled requires keycloak.mode=managed (the operator provisions
+                MCP's Keycloak objects through the admin API)
+              rule: '!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled
+                || (has(self.keycloak) && self.keycloak.mode == ''managed'')'
+            - message: 'mcp.enabled needs a public host: set common.hostName, or edge.host
+                on an enabled edge'
+              rule: '!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled
+                || (has(self.edge) && has(self.edge.enabled) && self.edge.enabled
+                && has(self.edge.host) && self.edge.host.size() > 0) || (has(self.common)
+                && has(self.common.hostName) && self.common.hostName.size() > 0)'
+            - message: mcp.enabled requires keycloak.managed.version 26.8.1 or later
+                (the release both install paths run)
+              rule: '!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled
+                || !has(self.keycloak) || !has(self.keycloak.managed) || !has(self.keycloak.managed.version)
+                || self.keycloak.managed.version.size() == 0 || self.keycloak.managed.version.matches(''^(26[.]8[.][1-9][0-9]?|26[.](9|[1-9][0-9]+)|(2[7-9]|[3-9][0-9]))([.-].*)?$'')'
           status:
             description: PlatformStatus is the observed state.
             properties:

@@ -259,6 +259,17 @@ spec:
   # [IMPLEMENTED] optional utils (plus the per-component override surface inline).
   utils: { enabled: false }
 
+  # [IMPLEMENTED] optional MCP server (plus the per-component override surface inline) — lets an
+  # MCP client such as Claude Code work with ILM on behalf of the signed-in user. OFF and read-only
+  # by default; it renders only for a platform version whose bundle carries the MCP server image
+  # (2.21.0 and later). Enabling it needs a managed Keycloak and a public host, which
+  # admission checks.
+  mcp:
+    enabled: false                     # default false
+    access: read-only                  # read-only (default) | read-write | full — the tools MCP offers
+    cimd: { enabled: true }            # default true: clients sign in with a client ID metadata document (Keycloak's cimd feature)
+    delegation: { group: "" }          # empty (default): MCP may act for every realm user; a name: only for that Keycloak group's members (no "/")
+
   # [IMPLEMENTED] ILM Core. Carries the shared per-component override surface (see the note
   # below) PLUS the Core-only wiring field clientCertHeader. (Provisioning is a platform-
   # level concern at spec.provisioning, not here; JVM tuning is plain env — set JAVA_OPTS in
@@ -269,7 +280,7 @@ spec:
     clientCertHeader: ssl-client-cert
     # ── the shared per-component override surface (below) is honored on Core and on EVERY
     #    other component (gateway / auth / scheduler / authOpaPolicies /
-    #    feAdministrator / utils); shown here once. Every field is optional. ──
+    #    feAdministrator / utils / mcp); shown here once. Every field is optional. ──
     image: { repository: "", name: core, tag: "", digest: "", command: [], args: [] }
     replicas: 1                        # ignored when autoscaling is set (the HPA then owns scaling)
     workloadType: Deployment           # Deployment (default) | StatefulSet

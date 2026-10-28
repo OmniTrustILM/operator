@@ -1,0 +1,160 @@
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  labels:
+    app.kubernetes.io/component: keycloak
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/part-of: ilm
+  name: ilm-keycloak
+  namespace: ilm
+spec:
+  additionalOptions:
+  - name: http-relative-path
+    value: /kc
+  db:
+    database: ilm
+    host: db.example.com
+    passwordSecret:
+      key: password
+      name: core-secret
+    port: 5432
+    schema: keycloak
+    usernameSecret:
+      key: username
+      name: core-secret
+    vendor: postgres
+  hostname:
+    hostname: https://ilm.example.com/kc
+  http:
+    httpEnabled: true
+  ingress:
+    enabled: false
+  instances: 1
+  proxy:
+    headers: xforwarded
+  unsupported:
+    podTemplate:
+      spec:
+        containers:
+        - name: keycloak
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+          - mountPath: /opt/keycloak/themes
+            name: ilm-theme
+        initContainers:
+        - command:
+          - /bin/sh
+          - -c
+          - cp -a /themes/. /data/
+          image: hub.omnitrustregistry.com/ilm/keycloak-theme:0.1.4
+          imagePullPolicy: IfNotPresent
+          name: init-theme
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+          - mountPath: /data
+            name: ilm-theme
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        volumes:
+        - emptyDir: {}
+          name: ilm-theme
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  labels:
+    app.kubernetes.io/component: keycloak-realm-import
+    app.kubernetes.io/instance: ilm
+    app.kubernetes.io/managed-by: ilm-operator
+    app.kubernetes.io/name: keycloak-realm-import
+    app.kubernetes.io/part-of: ilm
+  name: ilm-keycloak-realm
+  namespace: ilm
+spec:
+  keycloakCRName: ilm-keycloak
+  realm:
+    clients:
+    - attributes:
+        post.logout.redirect.uris: https://ilm.example.com/administrator/
+      bearerOnly: false
+      clientAuthenticatorType: client-secret
+      clientId: ilm
+      defaultClientScopes:
+      - web-origins
+      - acr
+      - profile
+      - roles
+      - email
+      directAccessGrantsEnabled: true
+      enabled: true
+      fullScopeAllowed: true
+      implicitFlowEnabled: false
+      name: ilm
+      protocol: openid-connect
+      protocolMappers:
+      - config:
+          access.token.claim: "true"
+          aggregate.attrs: "false"
+          claim.name: roles
+          id.token.claim: "true"
+          multivalued: "true"
+          user.attribute: groups
+          userinfo.token.claim: "true"
+        name: Groups
+        protocol: openid-connect
+        protocolMapper: oidc-usermodel-attribute-mapper
+      - config:
+          access.token.claim: "true"
+          claim.name: username
+          id.token.claim: "true"
+          jsonType.label: String
+          user.attribute: username
+          userinfo.token.claim: "true"
+        name: Username
+        protocol: openid-connect
+        protocolMapper: oidc-usermodel-property-mapper
+      - config:
+          access.token.claim: "true"
+          id.token.claim: "true"
+          included.client.audience: ilm
+          userinfo.token.claim: "false"
+        name: Audience
+        protocol: openid-connect
+        protocolMapper: oidc-audience-mapper
+      publicClient: false
+      redirectUris:
+      - https://ilm.example.com/api/login/oauth2/code/internal
+      serviceAccountsEnabled: false
+      standardFlowEnabled: true
+      webOrigins:
+      - https://ilm.example.com
+    components:
+      org.keycloak.userprofile.UserProfileProvider:
+      - config:
+          kc.user.profile.config:
+          - '{"attributes":[{"name":"username","displayName":"${username}","validations":{"length":{"min":3,"max":255},"username-prohibited-characters":{},"up-username-not-idn-homograph":{}},"permissions":{"view":["admin","user"],"edit":["admin","user"]},"multivalued":false},{"name":"email","displayName":"${email}","validations":{"email":{},"length":{"max":255}},"required":{"roles":["user"]},"permissions":{"view":["admin","user"],"edit":["admin","user"]},"multivalued":false},{"name":"firstName","displayName":"${firstName}","validations":{"length":{"max":255},"person-name-prohibited-characters":{}},"required":{"roles":["user"]},"permissions":{"view":["admin","user"],"edit":["admin","user"]},"multivalued":false},{"name":"lastName","displayName":"${lastName}","validations":{"length":{"max":255},"person-name-prohibited-characters":{}},"required":{"roles":["user"]},"permissions":{"view":["admin","user"],"edit":["admin","user"]},"multivalued":false}],"groups":[{"name":"user-metadata","displayHeader":"User
+            metadata","displayDescription":"Attributes, which refer to user metadata"}],"unmanagedAttributePolicy":"ADMIN_EDIT"}'
+        providerId: declarative-user-profile
+    enabled: true
+    loginTheme: ilm
+    realm: ilm

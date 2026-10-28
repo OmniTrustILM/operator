@@ -24,6 +24,7 @@ The fields on `spec` itself; [How configuration is organized](./platform.md#how-
 | `provisioning` | `external` | Remote-proxy provisioning wiring; `deploy` renders the bundled service. |
 | `auth` | — | Auth overrides, plus `create.createUnknownUsers`/`createUnknownRoles` (both `false`; `registerAdmin.password` turns `createUnknownUsers` on) and `syncPolicy` (`create-only`). |
 | `scheduler` / `authOpaPolicies` / `feAdministrator` / `utils` / `gateway` | — | Component overrides. `utils.enabled` is opt-in; `gateway` adds `cors`, `logging.request`, and `trustedIps`; `feAdministrator` adds `url`. |
+| `mcp` | off | The optional MCP server, for platform versions whose bundle carries its image (2.21.0 and later), plus the shared component overrides. `enabled` (default `false`) turns it on, and `access` sets the tools it offers: `read-only` (default), `read-write`, or `full`. `cimd.enabled` (default `true`) lets clients sign in with a client ID metadata document, and `delegation.group` limits whom MCP may act for to the members of one Keycloak group instead of every user. See [MCP server](./platform.md#mcp-server) for what admission requires. |
 | `edge` | none | The external HTTPS edge — Ingress or Gateway API, plus TLS. |
 | `registerAdmin` | off | First-administrator bootstrap, by certificate and/or password. Both methods are walked through in [Read back the generated credentials](./platform.md#read-back-the-generated-credentials). |
 | `deletionPolicy` | `Retain` | Managed-infrastructure deletion behavior; `Delete` reclaims it. |

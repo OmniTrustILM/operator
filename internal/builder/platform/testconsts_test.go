@@ -42,6 +42,15 @@ const (
 
 	// gateway_test.go.
 	testMessagingService = "messaging-service"
+	// testDefaultClientCertHeader is the header the version bundle's wiring names for the client
+	// certificate the edge forwards; testCustomClientCertHeader is a spec.core.clientCertHeader that
+	// replaces it.
+	testDefaultClientCertHeader = "ssl-client-cert"
+	testCustomClientCertHeader  = "x-client-cert"
+	// testMCPMetadataPath is the OAuth protected-resource metadata path the MCP route serves, and
+	// testRequestTransformer the Kong plugin that strips the client-certificate header from it.
+	testMCPMetadataPath    = "/.well-known/oauth-protected-resource"
+	testRequestTransformer = "request-transformer"
 
 	// managed_database_test.go.
 	testDefaultKeptMsg = "default kept when not overridden"
@@ -121,14 +130,35 @@ const (
 	testTLSCA                = "tls-ca"
 
 	// trustedcerts_test.go.
-	testMyTrust = "my-trust"
-	testKongABC = "kong-abc"
+	testMyTrust           = "my-trust"
+	testKongABC           = "kong-abc"
+	testMCPChecksum       = "mcp-abc"
+	testEmptyChecksumNoOp = "empty checksum is a no-op"
 
 	// version_test.go.
 	testVersion217 = "2.17.0"
 	testVersion218 = "2.18.0"
 	testVersion219 = "2.19.0"
 	testVersion220 = "2.20.0"
+	// testVersion221 is the preview bundle that carries the MCP server image.
+	testVersion221 = "2.21.0"
+
+	// mcp_test.go.
+	testMCPName            = "mcp-server"
+	testMCPImage           = "hub.omnitrustregistry.com/ilm/mcp-server:1.0.0"
+	testMCPTag             = "develop-latest"
+	testMCPClientSecret    = "ilm-mcp-client"
+	testMCPClientSecretKey = "clientSecret"
+	testMCPClientSecretEnv = "ILM_MCP_SECURITY_CLIENT_SECRET"
+	testMCPAccessReadOnly  = "read-only"
+	testMCPAccessReadWrite = "read-write"
+	testMCPAccessFull      = "full"
+	testMCPIssuerEnv       = "ILM_MCP_SECURITY_ISSUER"
+	testMCPResourceEnv     = "ILM_MCP_SECURITY_RESOURCE"
+	testMCPJWKSEnv         = "ILM_MCP_SECURITY_JWK_SET_URI"
+	testMCPTokenEnv        = "ILM_MCP_SECURITY_TOKEN_URI"
+	testMCPReadinessPath   = "/actuator/health/readiness"
+	testMCPLivenessPath    = "/actuator/health/liveness"
 
 	// resolve_test.go — the per-bundle proxy exchange names (2.19.0 renamed them).
 	testExchangeCzertainlyProxy = "czertainly-proxy"

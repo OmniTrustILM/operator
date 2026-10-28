@@ -492,7 +492,7 @@ const (
 
 // ComponentSpec is the shared per-component override surface embedded (inline) by
 // every platform component (core/auth/scheduler/auth-opa-policies/
-// fe-administrator/utils/api-gateway). It mirrors the Connector CR's override
+// fe-administrator/utils/mcp-server/api-gateway). It mirrors the Connector CR's override
 // surface so a platform component is as fully configurable as a standalone Connector,
 // with component-specific extras layered on top by each component's own spec.
 //

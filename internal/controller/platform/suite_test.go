@@ -71,22 +71,36 @@ type realmUserCall struct {
 	user            registration.RealmUser
 }
 
+// mcpRealmCall captures one EnsureMCPRealm invocation for assertions.
+type mcpRealmCall struct {
+	keycloakBaseURL string
+	realm           string
+	adminUsername   string
+	adminPassword   string
+	spec            registration.MCPRealmSpec
+}
+
 // fakeOIDCRegistrar is a goroutine-safe registration.OIDCRegistrar stand-in: specs configure
 // the outcome under a lock before creating a Platform and
 // read the recorded calls after. It returns a canned client secret on success (the value the
 // reconciler relays into the operator-owned OIDC client Secret), and records EnsureRealmUser
-// calls for the password-admin specs.
+// calls for the password-admin specs. EnsureMCPRealm returns the configured MCP secret and error;
+// RemoveMCPCIMD counts its calls and returns the configured error.
 type fakeOIDCRegistrar struct {
-	mu        sync.Mutex
-	err       error
-	secret    string
-	calls     []oidcCall
-	userErr   error
-	userCalls []realmUserCall
+	mu              sync.Mutex
+	err             error
+	secret          string
+	calls           []oidcCall
+	userErr         error
+	userCalls       []realmUserCall
+	mcpSecret       string
+	mcpErr          error
+	removeCIMDErr   error
+	removeCIMDCalls int
 }
 
 func newFakeOIDCRegistrar() *fakeOIDCRegistrar {
-	return &fakeOIDCRegistrar{secret: "fake-kc-client-secret"}
+	return &fakeOIDCRegistrar{secret: "fake-kc-client-secret", mcpSecret: testMCPClientSecretValue}
 }
 
 // FetchClientSecret records the call and returns the configured secret/outcome.
@@ -108,6 +122,21 @@ func (f *fakeOIDCRegistrar) EnsureRealmUser(_ context.Context, keycloakBaseURL, 
 	return f.userErr
 }
 
+// EnsureMCPRealm returns the configured MCP client secret and error.
+func (f *fakeOIDCRegistrar) EnsureMCPRealm(_ context.Context, _, _, _, _ string, _ registration.MCPRealmSpec) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mcpSecret, f.mcpErr
+}
+
+// RemoveMCPCIMD counts the call and returns the configured error.
+func (f *fakeOIDCRegistrar) RemoveMCPCIMD(_ context.Context, _, _, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeCIMDCalls++
+	return f.removeCIMDErr
+}
+
 // setOutcome configures the next (and subsequent) FetchClientSecret return value.
 func (f *fakeOIDCRegistrar) setOutcome(err error) {
 	f.mu.Lock()
@@ -120,6 +149,13 @@ func (f *fakeOIDCRegistrar) setUserOutcome(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.userErr = err
+}
+
+// setMCPOutcome configures the next (and subsequent) EnsureMCPRealm return values.
+func (f *fakeOIDCRegistrar) setMCPOutcome(secret string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mcpSecret, f.mcpErr = secret, err
 }
 
 // callCount returns how many times FetchClientSecret has been invoked.
@@ -147,11 +183,9 @@ type fakeDetector struct {
 
 func newFakeDetector() *fakeDetector { return &fakeDetector{available: map[string]bool{}} }
 
-// setGroup marks an API group available or absent for subsequent detections. The
-// available flag is a parameter so the helper reads as a general availability setter,
-// even though current specs only mark groups absent (envtest serves none of them).
-//
-//nolint:unparam // available is intentionally a parameter for a reusable availability setter
+// setGroup marks an API group available or absent for subsequent detections. Specs mark
+// groups absent unless they install the group's CRDs themselves (envtest serves only the
+// operator's own).
 func (f *fakeDetector) setGroup(group string, available bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

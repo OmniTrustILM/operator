@@ -9,6 +9,7 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"time"
 
@@ -95,6 +96,11 @@ func (r *Reconciler) gateKeycloak(ctx context.Context, p *otilmv1alpha1.Platform
 	// version upgrade guard is attached here (the deletion path's descriptor needs none).
 	gate := r.keycloakProvisionGate(p)
 	gate.versionGuard = keycloakVersionGuard(p, bundle)
+	// The CIMD guard runs inside the shared gate, right before the apply, so a pass that applies
+	// nothing (CRDs absent, a rejected override) never calls Keycloak. The provisioning gate's only
+	// object is the Keycloak CR, and the guard adjusts that same object.
+	rendered := gate.objects[0]
+	gate.beforeApply = func(ctx context.Context) (bool, error) { return r.guardCIMDRemoval(ctx, p, rendered) }
 	ready, requeue, err = r.gateManagedInfra(ctx, p, desired, gate)
 	if err != nil || !ready {
 		return ready, requeue, err
@@ -198,39 +204,44 @@ func keycloakCRObject(p *otilmv1alpha1.Platform) client.Object {
 	return objs[0]
 }
 
-// managedKeycloakReady reports whether the managed Keycloak CR is Ready. It GETs the
-// Keycloak CR as unstructured (its GVK is preset; the type is not registered in the scheme)
-// and checks the Keycloak Operator's documented readiness signal:
-//   - status.conditions[type=Ready].status == "True".
-//
-// A NotFound (the Keycloak CR was just applied and has no status yet, or detection is
-// momentarily behind) is "not ready". The Keycloak CR exposes a
-// status condition of type "Ready" whose status is the string "True"/"False" (the e2e observed
-// it transition False→True as Keycloak booted against the shared CNPG DB).
+// managedKeycloakReady reports whether the managed Keycloak CR is Ready. A Keycloak CR that
+// does not exist yet (just applied, or detection momentarily behind) is "not ready".
 func (r *Reconciler) managedKeycloakReady(ctx context.Context, p *otilmv1alpha1.Platform) (bool, error) {
-	var u unstructured.Unstructured
-	u.SetGroupVersionKind(platformbuilder.ManagedKeycloakGVK())
-	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.ManagedKeycloakName(p)}, &u); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
+	live, found, err := r.liveKeycloakCR(ctx, p)
+	if err != nil || !found {
 		return false, err
 	}
+	return keycloakCRReady(live), nil
+}
 
-	conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
-	if !found {
-		return false, nil
+// liveKeycloakCR GETs the managed Keycloak CR as unstructured (its GVK is preset; the type is
+// not registered in the scheme). found is false, with no error, when the CR does not exist or the
+// cluster does not serve the Keycloak kind at all, in which case no CR can exist either.
+func (r *Reconciler) liveKeycloakCR(ctx context.Context, p *otilmv1alpha1.Platform) (*unstructured.Unstructured, bool, error) {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(platformbuilder.ManagedKeycloakGVK())
+	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.ManagedKeycloakName(p)}, live); err != nil {
+		if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
 	}
+	return live, true, nil
+}
+
+// keycloakCRReady reports whether a Keycloak CR carries the Keycloak Operator's documented
+// readiness signal: status.conditions[type=Ready].status == "True". The status is the string
+// "True"/"False" (the e2e observed it transition False→True as Keycloak booted against the shared
+// CNPG DB).
+func keycloakCRReady(kc *unstructured.Unstructured) bool {
+	conds, _, _ := unstructured.NestedSlice(kc.Object, "status", "conditions")
 	for _, c := range conds {
 		cm, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if cm["type"] == conditionTypeReady && keycloakConditionStatusTrue(cm["status"]) {
-			return true, nil
+		if ok && cm["type"] == conditionTypeReady && keycloakConditionStatusTrue(cm["status"]) {
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // keycloakConditionStatusTrue reports whether a Keycloak status-condition "status" value
@@ -247,6 +258,82 @@ func keycloakConditionStatusTrue(status interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// keycloakFeaturesPath is where a Keycloak CR lists the features it enables.
+var keycloakFeaturesPath = []string{"spec", "features", "enabled"}
+
+// guardCIMDRemoval keeps the cimd feature on the rendered Keycloak CR until MCP's mcp-cimd client
+// policy is out of the realm. On Keycloak 26.8.1 a stored mcp-cimd without the feature fails every
+// sign-in, token request and admin client update in the realm with HTTP 500; removing mcp-cimd
+// while the feature is still on avoids that.
+//
+// So when the live CR enables cimd and the rendered one does not (CIMD switched off, or MCP turned
+// off), the guard first removes mcp-cimd through the admin API. Until that succeeds it puts cimd
+// back on the rendered CR and returns hold=true, so the gate applies the CR with cimd and requeues:
+// a Keycloak that is not Ready, missing admin credentials and a failed call all hold. Readiness
+// comes from the live CR the guard has just read, not from KeycloakReady: before the apply that
+// condition is the previous pass's verdict, and a missing realm-import ConfigMap also turns it
+// False.
+//
+// An error means the gate must apply nothing: the live CR could not be read, so whether cimd is
+// going away is unknown, or an override left spec.features no list to keep cimd in.
+func (r *Reconciler) guardCIMDRemoval(ctx context.Context, p *otilmv1alpha1.Platform, rendered client.Object) (hold bool, err error) {
+	kc, ok := rendered.(*unstructured.Unstructured)
+	if !ok || keycloakFeatureEnabled(kc, platformbuilder.KeycloakFeatureCIMD) {
+		return false, nil
+	}
+	live, found, err := r.liveKeycloakCR(ctx, p)
+	if err != nil {
+		return false, safeErrorf(err, "reading the managed Keycloak failed (%s)", apiFailureReason(err))
+	}
+	if !found || !keycloakFeatureEnabled(live, platformbuilder.KeycloakFeatureCIMD) {
+		return false, nil
+	}
+	if r.removeMCPCIMD(ctx, p, live) {
+		return false, nil
+	}
+	if ferr := enableKeycloakFeature(kc, platformbuilder.KeycloakFeatureCIMD); ferr != nil {
+		return false, safeErrorf(ferr, "keycloak.managed.overrides: spec.features is not an object, so the cimd "+
+			"feature cannot be kept until MCP's mcp-cimd client policy is removed")
+	}
+	return true, nil
+}
+
+// removeMCPCIMD removes MCP's mcp-cimd client policy and profile from the platform realm through
+// the admin API, and reports whether it did. A Keycloak that is not Ready, missing admin
+// credentials and a failed call are each logged and reported as false.
+func (r *Reconciler) removeMCPCIMD(ctx context.Context, p *otilmv1alpha1.Platform, live *unstructured.Unstructured) bool {
+	logger := log.FromContext(ctx)
+	if !keycloakCRReady(live) {
+		logger.Info("keeping Keycloak's cimd feature until the managed Keycloak is ready to remove MCP's mcp-cimd client policy")
+		return false
+	}
+	user, pass, ok, err := r.readKeycloakAdminCreds(ctx, p)
+	if err != nil || !ok {
+		logger.Info("keeping Keycloak's cimd feature until the Keycloak admin credentials exist")
+		return false
+	}
+	if err := r.OIDCRegistrar.RemoveMCPCIMD(ctx, r.keycloakBaseURL(p), platformbuilder.KeycloakRealmName(p), user, pass); err != nil {
+		logger.Info("keeping Keycloak's cimd feature: removing MCP's mcp-cimd client policy failed; will retry",
+			"error", mcpConfigFailureMessage(err))
+		return false
+	}
+	logger.Info("removed MCP's mcp-cimd client policy, so Keycloak's cimd feature can go")
+	return true
+}
+
+// keycloakFeatureEnabled reports whether a Keycloak CR lists feature in spec.features.enabled.
+func keycloakFeatureEnabled(kc *unstructured.Unstructured, feature string) bool {
+	features, _, _ := unstructured.NestedStringSlice(kc.Object, keycloakFeaturesPath...)
+	return slices.Contains(features, feature)
+}
+
+// enableKeycloakFeature appends feature to a Keycloak CR's spec.features.enabled, creating the list
+// when the CR has none. It fails only when spec.features is not an object.
+func enableKeycloakFeature(kc *unstructured.Unstructured, feature string) error {
+	features, _, _ := unstructured.NestedStringSlice(kc.Object, keycloakFeaturesPath...)
+	return unstructured.SetNestedStringSlice(kc.Object, append(features, feature), keycloakFeaturesPath...)
 }
 
 // reconcileKeycloakRealmImport imports the platform realm into the managed Keycloak ONCE

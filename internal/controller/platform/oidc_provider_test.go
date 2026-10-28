@@ -24,26 +24,35 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // localOIDCFake is a goroutine-safe OIDCRegistrar stand-in local to these direct-call unit
 // tests (the envtest suite has its own fakeOIDC). It records the calls and returns a configured
 // (secret, err): a successful fetch returns the canned secret the reconciler must relay into
-// the operator-owned OIDC client Secret.
+// the operator-owned OIDC client Secret. EnsureMCPRealm records its calls and returns the
+// configured MCP secret and error; RemoveMCPCIMD counts its calls and returns the configured error.
 type localOIDCFake struct {
-	mu        sync.Mutex
-	err       error
-	secret    string
-	calls     []oidcCall
-	userErr   error
-	userCalls []realmUserCall
+	mu              sync.Mutex
+	err             error
+	secret          string
+	calls           []oidcCall
+	userErr         error
+	userCalls       []realmUserCall
+	mcpSecret       string
+	mcpErr          error
+	mcpCalls        []mcpRealmCall
+	removeCIMDErr   error
+	removeCIMDCalls int
 }
 
 func (f *localOIDCFake) FetchClientSecret(_ context.Context, kcURL, realm, user, pass, clientID string) (string, error) {
@@ -65,7 +74,45 @@ func (f *localOIDCFake) EnsureRealmUser(_ context.Context, kcURL, realm, user, p
 	return f.userErr
 }
 
+// EnsureMCPRealm records the call and returns the configured MCP client secret and error.
+func (f *localOIDCFake) EnsureMCPRealm(_ context.Context, kcURL, realm, user, pass string, spec registration.MCPRealmSpec) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mcpCalls = append(f.mcpCalls, mcpRealmCall{kcURL, realm, user, pass, spec})
+	return f.mcpSecret, f.mcpErr
+}
+
+// RemoveMCPCIMD counts the call and returns the configured error.
+func (f *localOIDCFake) RemoveMCPCIMD(_ context.Context, _, _, _, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removeCIMDCalls++
+	return f.removeCIMDErr
+}
+
 func (f *localOIDCFake) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.calls) }
+
+// mcpCallList returns a copy of the recorded EnsureMCPRealm calls.
+func (f *localOIDCFake) mcpCallList() []mcpRealmCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]mcpRealmCall(nil), f.mcpCalls...)
+}
+
+// setMCPOutcome configures the next (and subsequent) EnsureMCPRealm return values.
+func (f *localOIDCFake) setMCPOutcome(secret string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mcpSecret, f.mcpErr = secret, err
+}
+
+// removeCIMDCount returns how many times RemoveMCPCIMD has been invoked.
+func (f *localOIDCFake) removeCIMDCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.removeCIMDCalls
+}
+
 func (f *localOIDCFake) last() (oidcCall, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -380,6 +427,104 @@ func TestOIDCConfigFailureMessage(t *testing.T) {
 	// A non-registration error falls back to the generic phrase.
 	generic := oidcConfigFailureMessage(errors.New("some wrapped error"))
 	assert.Equal(t, "OIDC configuration failed: contacting Keycloak or Core", generic)
+}
+
+// relayFailures are the ways the write of a relayed client Secret fails, each with the reason a condition names for
+// it: the API server refusing the write with a message that quotes an admission webhook, another controller owning
+// the Secret, and a failure the API server did not classify. The text of none of them may be published.
+var relayFailures = []struct {
+	name   string
+	reason string
+	// inject returns the objects the fake API server holds besides the Platform, and how it answers a Create.
+	inject func(namespace, secret string) ([]client.Object, interceptor.Funcs)
+}{
+	{
+		name: "the API server refuses the write", reason: "Forbidden",
+		inject: func(_, secret string) ([]client.Object, interceptor.Funcs) {
+			return nil, failingCreate(apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, secret, errors.New(testRelayDenial)))
+		},
+	},
+	{
+		name: "another controller owns the Secret", reason: "owned by another controller",
+		inject: func(namespace, secret string) ([]client.Object, interceptor.Funcs) {
+			return []client.Object{foreignOwnedSecret(namespace, secret)}, interceptor.Funcs{}
+		},
+	},
+	{
+		name: "the API server cannot be reached", reason: "Unknown",
+		inject: func(string, string) ([]client.Object, interceptor.Funcs) {
+			return nil, failingCreate(errors.New("dial tcp: " + testRelayDenial))
+		},
+	},
+}
+
+// failingCreate is a fake API server that refuses every Create with err.
+func failingCreate(err error) interceptor.Funcs {
+	return interceptor.Funcs{Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error { return err }}
+}
+
+// foreignOwnedSecret is a Secret that another controller controls.
+func foreignOwnedSecret(namespace, name string) *corev1.Secret {
+	yes := true
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: namespace, Name: name,
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "example.invalid/v1", Kind: "SecretMirror", Name: testForeignOwner,
+			UID: types.UID("foreign-owner-uid"), Controller: &yes,
+		}},
+	}}
+}
+
+// newRelayFailureReconciler builds a Reconciler over a fake API server that fails the write of the Secret named secret
+// the way inject says, and holds seed besides.
+func newRelayFailureReconciler(t *testing.T, reg registration.OIDCRegistrar, inject func(namespace, secret string) ([]client.Object, interceptor.Funcs),
+	namespace, secret string, seed ...client.Object) *Reconciler {
+	t.Helper()
+	held, funcs := inject(namespace, secret)
+	s := oidcScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(append(seed, held...)...).WithInterceptorFuncs(funcs).Build()
+	return &Reconciler{Client: c, Scheme: s, OIDCRegistrar: reg}
+}
+
+// TestRelayClientSecretFailureCarriesOnlyASafeReason: whatever the write of a relayed Secret fails with, the error's
+// text is the reason alone. Nothing of the cause's own text reaches it, since an admission webhook's denial or a foreign
+// controller's name makes that text arbitrary.
+func TestRelayClientSecretFailureCarriesOnlyASafeReason(t *testing.T) {
+	for _, tt := range relayFailures {
+		t.Run(tt.name, func(t *testing.T) {
+			p := oidcPlatformCR()
+			target := relayedSecret{name: platformbuilder.OIDCClientSecretName(p), key: platformbuilder.OIDCClientSecretKey, component: coreDeploymentName}
+			r := newRelayFailureReconciler(t, nil, tt.inject, p.Namespace, target.name, p)
+
+			err := r.relayClientSecret(context.Background(), p, target, testOIDCClientSecretValue, newDesiredSet())
+
+			require.Error(t, err)
+			assert.Equal(t, tt.reason, err.Error())
+		})
+	}
+}
+
+// TestReconcileOIDCNamesWhyTheRelayFailed: when writing the OIDC client Secret fails, OIDCConfigured is False and names
+// why, the step requeues, and neither the condition nor the log carries the failure's own text.
+func TestReconcileOIDCNamesWhyTheRelayFailed(t *testing.T) {
+	for _, tt := range relayFailures {
+		t.Run(tt.name, func(t *testing.T) {
+			p := withKeycloakReady(oidcPlatformCR())
+			r := newRelayFailureReconciler(t, &localOIDCFake{secret: testOIDCClientSecretValue}, tt.inject, p.Namespace,
+				platformbuilder.OIDCClientSecretName(p), p, keycloakAdminSecret(p))
+			ctx, logged := loggingContext()
+
+			assert.True(t, r.reconcileOIDCProvider(ctx, p, newDesiredSet()), "a failed write retries")
+
+			cond := oidcConfiguredCondition(p)
+			require.NotNil(t, cond)
+			assert.Equal(t, metav1.ConditionFalse, cond.Status)
+			assert.Equal(t, reasonOIDCConfigFailed, cond.Reason)
+			assert.Equal(t, "OIDC client secret relay failed ("+tt.reason+")", cond.Message)
+			assert.Contains(t, logged.String(), tt.reason, "the log names the reason")
+			assertNoLeak(t, p, logged.String(), kcAdminPassword, testOIDCClientSecretValue, testRelayDenial, testForeignOwner)
+		})
+	}
 }
 
 // TestReconcileOIDCDropsStaleConditionWhenSwitchedToExternal verifies that switching a

@@ -70,6 +70,12 @@ type managedInfraGate struct {
 	// spec.<infra>.managed.upgradeAcknowledged=true, as an adjunct (never degrades). nil for
 	// a component that pins no engine version (none today; all three set it).
 	versionGuard *infraVersionGuard
+	// beforeApply, when non-nil, runs after the version guard and BEFORE the apply, so only in a
+	// pass that applies: the CRDs are served and no object carries a render error. It may adjust
+	// the rendered objects in place against the live cluster. hold=true makes the gate requeue
+	// like a blocked upgrade, without marking the component not ready; an error stops the gate
+	// before anything is applied. The managed Keycloak gate uses it for its CIMD guard.
+	beforeApply func(ctx context.Context) (hold bool, err error)
 	// conditionType is the adjunct status condition this gate manages (e.g. "DatabaseReady").
 	conditionType string
 	// waitingReason / readyReason are the condition reasons for the not-yet-ready and ready
@@ -118,8 +124,10 @@ func managedReadyProbe(ctx context.Context, clusterReady func(context.Context) (
 //   - render-time error (rejected override) → hard error (degrade).
 //   - a dep absent (or transient detection error) → condition False/<dep.Reason> + Event,
 //     mark objects desired (prune-preservation across a flap), ready=false, requeue.
-//   - deps present → apply every object (NO owner ref — applyManaged), then probe ready:
-//     not ready → False/<waitingReason>, ready=false, requeue; ready → True, ready=true.
+//   - deps present → run the version guard and beforeApply (a beforeApply error stops the gate
+//     before any apply), apply every object (NO owner ref — applyManaged), then probe ready:
+//     not ready → False/<waitingReason>, ready=false, requeue; ready → True, ready=true, and a
+//     requeue when either guard held a change back.
 func (r *Reconciler) gateManagedInfra(ctx context.Context, p *otilmv1alpha1.Platform, desired desiredSet, g managedInfraGate) (ready bool, requeue bool, err error) {
 	if !g.managed {
 		// External: nothing to provision or probe; drop any stale condition from a previous
@@ -166,6 +174,13 @@ func (r *Reconciler) gateManagedInfra(ctx context.Context, p *otilmv1alpha1.Plat
 	if g.versionGuard != nil {
 		upgradeBlocked = r.guardMajorUpgrade(ctx, p, g.objects, *g.versionGuard)
 	}
+	held := false
+	if g.beforeApply != nil {
+		var herr error
+		if held, herr = g.beforeApply(ctx); herr != nil {
+			return false, false, herr
+		}
+	}
 
 	// CRDs present: apply the managed objects. They carry NO controller owner reference
 	// (deletion safety) — applyManaged stamps only the managed-by/instance labels and never
@@ -195,10 +210,10 @@ func (r *Reconciler) gateManagedInfra(ctx context.Context, p *otilmv1alpha1.Plat
 		Message: g.readyMessage, ObservedGeneration: p.Generation,
 	})
 	// The running cluster is Ready (its current engine version is healthy). When a major
-	// upgrade is blocked pending acknowledgement we still requeue so the operator re-checks
-	// (and lets the upgrade through once acknowledged) without the cluster ever being marked
-	// not-ready — the bump is suppressed, not the running broker/database.
-	return true, upgradeBlocked, nil
+	// upgrade is blocked pending acknowledgement, or beforeApply held a change back, we still
+	// requeue so the operator re-checks (and lets the change through once it may) without the
+	// cluster ever being marked not-ready — the change is suppressed, not the running component.
+	return true, upgradeBlocked || held, nil
 }
 
 // firstMissingDependency probes the gate's upstream-CRD prerequisites in order and returns

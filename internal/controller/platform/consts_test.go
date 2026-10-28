@@ -88,6 +88,22 @@ const (
 	// its DefaultVersion, whose topology only ADDS to 2.19.0's, used to prove that move applies
 	// additively.
 	platformVersion220 = "2.20.0"
+	// platformVersion221 is the 2.21.0 preview bundle, the first that carries the MCP server.
+	platformVersion221 = "2.21.0"
+
+	// MCP fixtures: the client secret the fake registrars hand back, a delegation group, and the
+	// two Keycloak features MCP switches on besides cimd.
+	testMCPClientSecretValue = "fake-mcp-client-secret"
+	testMCPDelegationGroup   = "ilm-mcp-users"
+	featureTokenExchange     = "token-exchange-delegation"
+	featureParamScopes       = "parameterized-scopes"
+
+	// Relay failure fixtures: the client secret the OIDC fake registrar hands back, and text a failed
+	// write of a relayed client Secret can carry, an admission webhook's denial and the name of the
+	// controller that owns the Secret, neither of which may reach a condition or a log.
+	testOIDCClientSecretValue = "fake-oidc-client-secret"
+	testRelayDenial           = "denied by webhook relay-policy-7c1d"
+	testForeignOwner          = "foreign-mirror-3b9e"
 
 	// Repeated Ginkgo step descriptions.
 	stepCreatingNamespace       = "creating the dedicated namespace"

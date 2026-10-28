@@ -290,7 +290,7 @@ A `Platform` has four kinds of configuration:
 1. **Platform version** — `spec.version` selects a tested bundle of component images and wiring. See [Upgrading](../upgrading.md#how-a-version-is-resolved).
 2. **Infrastructure** — `database`, `messaging`, and the optional `keycloak`, each **`external`** (bring your own) or **`managed`** (operator-provisioned through an upstream operator). The three are independent, so you can [mix them per dependency](#infrastructure-external-or-managed).
 3. **Fleet-wide configuration** — `spec.common` applies to **every** component: the shared image, the public `hostName`, the outbound proxy, logging, the trusted CA bundle, and the pod-template passthrough.
-4. **Per-component overrides** — each component (`core`, `auth`, `scheduler`, `authOpaPolicies`, `feAdministrator`, `utils`, `gateway`) embeds the same override surface.
+4. **Per-component overrides** — each component (`core`, `auth`, `scheduler`, `authOpaPolicies`, `feAdministrator`, `utils`, `mcp`, `gateway`) embeds the same override surface.
 
 :::tip[The placement rule]
 Anything that applies to *every* component lives under `spec.common`; a per-component block overrides or augments it. See [Cross-component configuration](#cross-component-configuration-speccommon).
@@ -315,6 +315,7 @@ Anything that applies to *every* component lives under `spec.common`; a per-comp
 | Bootstrap the first administrator | [`platform_registeradmin_*.yaml`](https://github.com/OmniTrustILM/operator/tree/main/config/samples) | `registerAdmin.*` |
 | Inject secrets through Vault | [`platform_vault_injection.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_vault_injection.yaml) | `common.initContainers`/`sidecars` |
 | Give Core a stable per-pod identity | [`platform_core_statefulset.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_core_statefulset.yaml) | `core.workloadType: StatefulSet` |
+| Let an MCP client such as Claude Code work with ILM | [`platform_managed_mcp.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_managed_mcp.yaml) | `mcp.enabled`, `keycloak.mode: managed` |
 
 ## Infrastructure: external or managed
 
@@ -478,6 +479,8 @@ The operator does **not** configure Core across the network. Core's settings API
 
 The URLs the script writes follow a deliberate split: the browser-facing issuer, authorization, and logout URLs are built from the **external** platform host over HTTPS so split-horizon DNS does not break redirects, while the back-channel token and JWKS URLs use the **in-cluster** Keycloak Service. The outcome is reported by the `OIDCConfigured` condition and is adjunct — a not-yet-ready Keycloak or a transient failure is a non-fatal `False` plus a requeue, never a `Degraded`. The admin credentials, the fetched client secret, the Keycloak token, and every response body stay out of logs, status, conditions, and events; the fetched secret is written only into that one Secret.
 
+**Features for MCP.** When `mcp.enabled` turns the MCP server on, the operator also sets the `Keycloak` spec's `features.enabled` to the features MCP's delegated sign-in needs — the preview features `token-exchange-delegation` and `parameterized-scopes`, plus the experimental `cimd` unless `mcp.cimd.enabled` is `false`. What each is for, and what an `overrides` patch of that list must keep, is in [MCP server](#mcp-server).
+
 **Overrides.** `keycloak.managed.overrides` is a JSON-merge patch applied onto the rendered `Keycloak` spec. Operator-owned paths are rejected: `metadata.name`, `metadata.namespace`, `metadata.ownerReferences`, `spec.db` (the database-sharing contract), `spec.hostname` (the edge-host wiring), and `spec.proxy` (the gateway `X-Forwarded` trust — overriding it would make Keycloak advertise wrong-scheme URLs behind the edge).
 
 ## Connection pooling (PgBouncer)
@@ -546,7 +549,7 @@ Each managed dependency has its own `version`, selecting the **upstream operator
 **Omitting a `version` does not select a matched image.** The operator sends no image at all, and the upstream operator applies **its own default** — which is not necessarily the version this platform release was validated against. The RabbitMQ Cluster Operator, for example, ships an older server than the validated 4.3.1. Pin `database.managed.version` and `messaging.managed.version` deliberately: [`platform_quickstart.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_quickstart.yaml) and [`platform_managed_pinned_versions.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_managed_pinned_versions.yaml) both do. The engine versions each platform version was validated against are listed in [Upgrading](../upgrading.md).
 
 :::note[Keycloak is the exception — leave its version unset unless you must diverge]
-Pinning `keycloak.managed.version` composes the stock community image, which is not pre-augmented, so the operator must also set `startOptimized: false` and Keycloak builds itself at every boot. The pinned Keycloak Operator's own default is already the validated version *and* already optimized, so omitting the version is both faster to start and correct. Pin it only to run a version the operator would not choose — or supply a pre-built optimized image through `keycloak.managed.overrides`, where `startOptimized` is not a protected path.
+Pinning `keycloak.managed.version` composes the stock community image, which is not pre-augmented, so the operator must also set `startOptimized: false` and Keycloak builds itself at every boot. The pinned Keycloak Operator's own default is already the validated version *and* already optimized, so omitting the version is both faster to start and correct. Pin it only to run a version the operator would not choose — or supply a pre-built optimized image through `keycloak.managed.overrides`, where `startOptimized` is not a protected path. With [MCP](#mcp-server) on, that image must itself be built with MCP's Keycloak features.
 :::
 
 **Major upgrades are guarded.** A fresh deploy, and patch or minor bumps, apply freely. A **major** bump of an already-running managed instance — PostgreSQL 17 to 18, RabbitMQ 3.x to 4.x, Keycloak 25 to 26 — is a one-way, data-affecting operation with upstream prerequisites, so the operator **blocks** it until you acknowledge it on that block:
@@ -601,18 +604,19 @@ The precedence is worth stating exactly, because the three scheduling fields dif
 
 `common` init containers and sidecars are **SCC-hardened** (OpenShift `restricted-v2`, fill-and-force) exactly like every other container, so a `common` container can never weaken pod security.
 
-`spec.additionalEnv` is the fleet-wide equivalent for plain environment variables: a list of non-sensitive `{name, value}` pairs applied to every component, merged *before* each component's own env so a component-specific variable of the same name wins. Runtime tuning is plain env, and which variable you set depends on the component's runtime. The JVM components are Core, the scheduler, `utils`, and the bundled provisioning service — set `JAVA_OPTS` on `spec.core.env`, `spec.scheduler.env`, `spec.utils.env`, or `spec.provisioning.deploy.env`. **`auth` is a .NET (ASP.NET Core) service, not a JVM one**, so `JAVA_OPTS` is inert there; tune it with the .NET runtime's own variables (`DOTNET_*`) on `spec.auth.env`. Either way you can also apply env fleet-wide through a Secret or ConfigMap referenced from `spec.common.additionalEnvFrom`.
+`spec.additionalEnv` is the fleet-wide equivalent for plain environment variables: a list of non-sensitive `{name, value}` pairs applied to every component, merged *before* each component's own env so a component-specific variable of the same name wins. Runtime tuning is plain env, and which variable you set depends on the component's runtime. The JVM components are Core, the scheduler, `utils`, the MCP server, and the bundled provisioning service — set `JAVA_OPTS` on `spec.core.env`, `spec.scheduler.env`, `spec.utils.env`, `spec.mcp.env`, or `spec.provisioning.deploy.env`. **`auth` is a .NET (ASP.NET Core) service, not a JVM one**, so `JAVA_OPTS` is inert there; tune it with the .NET runtime's own variables (`DOTNET_*`) on `spec.auth.env`. Either way you can also apply env fleet-wide through a Secret or ConfigMap referenced from `spec.common.additionalEnvFrom`.
 
 ### The public hostname and its precedence
 
-`common.hostName` is the single source of truth for the platform's external FQDN. The operator resolves the effective host as `edge.host` when set, otherwise `common.hostName` — so an explicit `edge.host` overrides `common.hostName` for that edge, and an edge without one falls back to it. The resolved host drives:
+`common.hostName` is the single source of truth for the platform's external FQDN. The operator resolves the effective host as `edge.host` when it is set on an **enabled** edge, otherwise `common.hostName` — so an explicit `edge.host` overrides `common.hostName` for that edge, an edge without one falls back to it, and the `edge.host` of a disabled edge is ignored. The resolved host drives:
 
 - the edge Ingress or HTTPRoute host and the TLS certificate SAN;
 - Keycloak's `KC_HOSTNAME` and the OIDC client's redirect, web-origin, and post-logout URIs for a managed Keycloak;
 - the browser-facing issuer, authorization, and logout URLs of Core's OIDC wiring;
-- the gateway's CORS origin default (`https://<host>`, falling back to the wildcard only when no host is known).
+- the gateway's CORS origin default (`https://<host>`, falling back to the wildcard only when no host is known);
+- the issuer and resource URLs of the [MCP server](#mcp-server), when it is on.
 
-Set `common.hostName` **even when you run your own ingress** (`edge.enabled: false`), so Keycloak, OIDC, and CORS still know the public address. When the edge *is* enabled, the CRD requires a host from one of the two fields — keep `edge.host` equal to `common.hostName`, or set only `common.hostName` and leave `edge.host` out.
+Set `common.hostName` **even when you run your own ingress** (`edge.enabled: false`), so Keycloak, OIDC, and CORS still know the public address. When the edge *is* enabled, the CRD requires a host from one of the two fields — keep `edge.host` equal to `common.hostName`, or set only `common.hostName` and leave `edge.host` out. A feature that needs a public host, such as MCP, accepts the same two sources: `common.hostName`, or `edge.host` on an enabled edge.
 
 :::note[Why the fe-administrator URLs do not use `hostName`]
 The fe-administrator runtime URLs are intentionally host-relative — `/api`, `/login`, `/logout`, served from the same origin behind the gateway — so they do not embed `hostName`. Set `spec.feAdministrator.url` only to change the *paths*, never the host.
@@ -620,7 +624,7 @@ The fe-administrator runtime URLs are intentionally host-relative — `/api`, `/
 
 ## Per-component overrides
 
-**Every** component — `core`, `auth`, `scheduler`, `authOpaPolicies`, `feAdministrator`, `utils`, `gateway` — embeds the same override surface, the same shape a standalone `Connector` accepts. Set only what you need; an override **layers** onto the operator's defaults. Env is appended last-wins; Secret and ConfigMap references, volumes, and init and sidecar containers are appended:
+**Every** component — `core`, `auth`, `scheduler`, `authOpaPolicies`, `feAdministrator`, `utils`, `mcp`, `gateway` — embeds the same override surface, the same shape a standalone `Connector` accepts. Set only what you need; an override **layers** onto the operator's defaults. Env is appended last-wins; Secret and ConfigMap references, volumes, and init and sidecar containers are appended:
 
 ```yaml
 spec:
@@ -655,12 +659,12 @@ The image fields are per-field: `digest` pins the image immutably and wins over 
 A user-supplied `securityContext` and user-supplied init or sidecar containers are still SCC-hardened on the fill-don't-replace model, so the `restricted-v2` guarantees can never be weakened from the custom resource.
 
 :::note[Component-specific extras]
-Beyond the shared surface, four components add fields of their own. `core` carries `clientCertHeader` (the client-certificate forwarding header, default `ssl-client-cert`), `instanceId`, and the `timeQualityMonitor` sidecar. `auth` adds `create` and `syncPolicy`. `feAdministrator` adds `url`. `gateway` adds `cors`, `logging`, and `trustedIps`; `utils` adds `enabled`. Provisioning is a platform-level concern at `spec.provisioning`, not on `core`. And `additionalPorts` is **not** a per-component field — it is the fleet-wide passthrough `spec.common.additionalPorts`.
+Beyond the shared surface, some components add fields of their own. `core` carries `clientCertHeader` (the client-certificate forwarding header, default `ssl-client-cert`), `instanceId`, and the `timeQualityMonitor` sidecar. `auth` adds `create` and `syncPolicy`. `feAdministrator` adds `url`. `gateway` adds `cors`, `logging`, and `trustedIps`; `utils` adds `enabled`; `mcp` adds `enabled`, `access`, `cimd`, and `delegation` (see [MCP server](#mcp-server)). Provisioning is a platform-level concern at `spec.provisioning`, not on `core`. And `additionalPorts` is **not** a per-component field — it is the fleet-wide passthrough `spec.common.additionalPorts`.
 :::
 
 ## High availability and scaling
 
-`spec.highAvailability.enabled: true` applies HA **defaults** to the **stateless** tier — `core`, `auth`, `scheduler`, `fe-administrator`, `auth-opa-policies`, `utils`, and the gateway:
+`spec.highAvailability.enabled: true` applies HA **defaults** to the **stateless** tier — `core`, `auth`, `scheduler`, `fe-administrator`, `auth-opa-policies`, `utils`, `mcp-server`, and the gateway:
 
 - a replica count of 2 for any component that sets neither `replicas` nor `autoscaling`;
 - a `PodDisruptionBudget` with `minAvailable: 1`;
@@ -839,6 +843,152 @@ The JWT signing key and the API key are **always** a referenced Secret — never
 
 A platform version bundle that predates the bundled service renders nothing for it and surfaces a non-fatal condition, so the same custom resource stays portable across versions.
 
+## MCP server
+
+The optional MCP server lets an MCP client — Claude Code, the hosted Claude apps, or Codex — work with ILM on behalf of the user who signs in. It is the platform's Model Context Protocol endpoint: every call it makes to ILM carries the signed-in user's own identity, so a user reaches only what their ILM permissions allow. It is **off** by default, and **read-only** unless you raise `access`. [`platform_managed_mcp.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/platform_managed_mcp.yaml) is the ready-to-edit sample, and [Migration from Helm](../migration-from-helm.md#per-component-overrides) maps the chart's MCP values onto the fields below.
+
+### Requirements
+
+MCP needs three things:
+
+- **A managed Keycloak, 26.8.1 or later.** MCP supports a managed Keycloak only (`keycloak.mode: managed`), because the operator provisions MCP's Keycloak objects through the Keycloak admin API. The Keycloak Operator 26.8.1 that [the installer](../installation.md#upstream-operator-prerequisites) deploys supplies the 26.8.1 server image by default, so leave `keycloak.managed.version` unset; the Helm chart runs the same release in `keycloak-optimized:26.8.1-0`. A version you do pin must be 26.8.1 or later.
+- **A public host:** `common.hostName`, or `edge.host` on an enabled edge ([the public hostname and its precedence](#the-public-hostname-and-its-precedence)). MCP builds its issuer URL, `https://<host>/kc/realms/<realm>`, and its resource URL, `https://<host>/mcp`, from it, so clients must reach that host over HTTPS.
+- **A platform version whose bundle carries the MCP server:** 2.21.0 or later, or `develop` ([Supported versions](../upgrading.md#supported-versions) explains how each resolves). On an older version the custom resource is accepted, but nothing is rendered for MCP and `MCPConfigured` reports `False` with reason `UnsupportedVersion`.
+
+Admission rejects `mcp.enabled: true` with one of these messages when a requirement it can see is not met. The platform version is checked later, when the operator reconciles:
+
+| Requirement | Admission message |
+|---|---|
+| Managed Keycloak | `mcp.enabled requires keycloak.mode=managed (the operator provisions MCP's Keycloak objects through the admin API)` |
+| A public host | `mcp.enabled needs a public host: set common.hostName, or edge.host on an enabled edge` |
+| A pinned Keycloak version | `mcp.enabled requires keycloak.managed.version 26.8.1 or later (the release both install paths run)` |
+
+:::warning[Admission cannot check an unpinned Keycloak]
+When `keycloak.managed.version` is unset, the managed Keycloak runs the server image of the installed Keycloak Operator, whose release admission cannot see. It must be 26.8.1 or later. Check the running server:
+
+```bash
+kubectl get statefulset ilm-keycloak -n ilm -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+The tag of the image is the server release. A server that predates MCP's features does not know them, so Keycloak does not start once MCP is on. If that server lacks `cimd` as well and CIMD is on, which is the default, turning MCP off does not bring it back: the operator keeps `cimd` on the `Keycloak` resource until it has removed `mcp-cimd` through the admin API, and that needs a running Keycloak. The recovery is to upgrade the Keycloak Operator to 26.8.1, as [the installer](../installation.md#upstream-operator-prerequisites) does. Keycloak then starts on the 26.8.1 server.
+:::
+
+### Turn it on
+
+Set `spec.mcp.enabled`:
+
+```yaml
+spec:
+  version: "2.21.0"
+  common:
+    hostName: ilm.example.com   # the public host; MCP is served at https://<host>/mcp
+  keycloak:
+    mode: managed
+    managed: { instances: 1 }   # version omitted: the Keycloak Operator's default is 26.8.1
+  mcp:
+    enabled: true
+```
+
+Until MCP 1.0.0 is published, set `mcp.image.tag: develop-latest`.
+
+Once the edge routes the host to the gateway, clients reach MCP at these URLs:
+
+| What | URL |
+|------|-----|
+| MCP endpoint | `https://<host>/mcp` |
+| OAuth protected-resource metadata, for client discovery | `https://<host>/.well-known/oauth-protected-resource/mcp` |
+
+The `mcp` block takes these fields, plus the shared [per-component overrides](#per-component-overrides):
+
+| Field | Default | What it does |
+|---|---|---|
+| `enabled` | `false` | Deploys the MCP server and keeps its Keycloak objects in place. |
+| `access` | `read-only` | The tools MCP offers. `read-only` offers only tools that read, `read-write` adds tools that create and change, and `full` adds tools that delete, revoke or destroy, and the tools that return protected material such as private keys and secret content. MCP's calls keep the signed-in user's own ILM permissions, so `access` only narrows what MCP offers. |
+| `cimd.enabled` | `true` (unset counts as `true`) | Sign-in with OAuth Client ID Metadata Documents. `false` leaves Keycloak's `cimd` feature and the `mcp-cimd` client policy out, and MCP clients then have to be registered in Keycloak by hand. Switching it changes the Keycloak features, so it restarts the managed Keycloak. See [Connect a client](#connect-a-client). |
+| `delegation.group` | empty: every user | A top-level Keycloak group. MCP then acts only for its members. See [Who MCP may act for](#who-mcp-may-act-for). |
+
+:::warning[Turning MCP on or off restarts Keycloak, Core, and the gateway]
+Either way the Keycloak features change, so the Keycloak Operator restarts the managed Keycloak — with one instance, that is a short sign-in outage. Core's provider registration script changes too, so Core restarts once, and the gateway's routes change, so the gateway rolls once.
+:::
+
+### What the operator adds
+
+**The workload.** A stateless `mcp-server` Deployment, with a ClusterIP Service and a ServiceAccount of the same name, listening on port 8080. It needs no database or broker and runs MCP's stateless protocol, so it belongs to the stateless tier that [`highAvailability`](#high-availability-and-scaling) covers. It runs one replica, with requests of 100m CPU and 256Mi memory and limits of 1 CPU and 768Mi until `mcp.resources` replaces them. Its probes use the actuator health groups, and the startup probe allows 300 seconds, so a slow JVM start is not cut short. It runs with a read-only root filesystem and an in-memory `/tmp`. **MCP has no metrics endpoint:** its actuator exposes only `health` and `info`, while a `ServiceMonitor` scrapes `/v1/metrics` by default, so leave `spec.mcp.metrics` unset.
+
+**The gateway route.** Kong gets an `mcp-server` service with one route, `mcp`, for `/mcp` and `/.well-known/oauth-protected-resource`. A route path matches by prefix, so the second one also serves `/.well-known/oauth-protected-resource/mcp`. The route forwards the path and the `Host` header unchanged, because MCP checks tokens against its public resource URL. It turns response buffering off, because MCP's streamable HTTP can answer with event streams. And it removes the client-certificate header (`ssl-client-cert`, or the name set in `core.clientCertHeader`) on this route alone, so MCP never receives a client certificate while Core still does.
+
+**The Keycloak features and objects.** The operator sets the features on the managed `Keycloak` custom resource, and keeps the objects in the platform's realm through the Keycloak admin API:
+
+| Kind | Name | What it is for |
+|---|---|---|
+| Keycloak feature (preview) | `token-exchange-delegation` | Lets MCP exchange the signed-in user's token for one that names MCP as the actor. Keycloak checks the actor against the token's `may_act` claim. |
+| Keycloak feature (preview) | `parameterized-scopes` | Provides the `delegation:client:<client>` scope that puts the `may_act` claim in the token. |
+| Keycloak feature (experimental) | `cimd` | Lets a client sign in with the URL of a client ID metadata document instead of a registration. Enabled unless `mcp.cimd.enabled` is `false`. |
+| Client scope | `mcp:access` | The scope clients request at sign-in. It is listed in the token's `scope` claim and on the consent screen, and its audience mappers add `https://<host>/mcp`, so MCP accepts the token, and `ilm-mcp`, so MCP can present it to Keycloak for the exchange. A realm default optional scope, so the clients Keycloak creates from metadata documents may request it. |
+| Client scope | `ilm-mcp-upstream` | The scope `ilm-mcp` requests in the exchange. It gives the exchanged token the `ilm` audience and the user's username and roles claims, through copies of the `ilm` client's `Username` and `Groups` mappers; a realm you import yourself must keep both on its `ilm` client. An optional scope of `ilm-mcp`. |
+| Client scope | `delegation:client` | Keycloak's parameterized scope for delegation: a client requests `delegation:client:ilm-mcp`, and the user's token gets the `may_act` claim the exchange checks. It always shows its consent screen. Keycloak adds it only to realms created after the two preview features were on, so the operator creates it in an older realm. A realm default optional scope. |
+| Client | `ilm-mcp` | The confidential client MCP exchanges tokens as. The operator assigns its service account no roles, turns its standard, implicit and direct-access flows and Full Scope Allowed off, and turns standard token exchange on, without refresh tokens. Keycloak generates its secret. |
+| Realm setting | Fine-grained admin permissions v2 | Switched on. Keycloak then creates the `admin-permissions` client, whose resource server holds the policy and permission below. |
+| Client profile | `mcp-pkce` | The `pkce-enforcer` executor, auto-configured. |
+| Client policy | `mcp-pkce` | Applies the `mcp-pkce` profile whenever a client requests `mcp:access` as an optional scope (condition `client-scopes`), so every MCP client must use PKCE. |
+| Client profile | `mcp-cimd` | With CIMD on: the `client-id-metadata-document` executor, trusting the domains `claude.ai`, `localhost`, and `127.0.0.1`, accepting a public client whose metadata lists grant types only confidential clients use, with a resource allow list (see [Changing the Keycloak setup](#changing-the-keycloak-setup)). |
+| Client policy | `mcp-cimd` | With CIMD on: applies the `mcp-cimd` profile to a client whose client ID is an `https` URL on `claude.ai` (condition `client-id-uri`). |
+| Admin permission policy | `ilm-mcp-delegating-client` | The fine-grained admin permissions' policy that matches the `ilm-mcp` client. |
+| Admin permission | `ilm-mcp-all-users-delegation` | Without `delegation.group`: lets `ilm-mcp` delegate (scope `delegate`) for every user (resource type Users, no resources). |
+| Admin permission | `ilm-mcp-selected-users-delegation` | With `delegation.group`: lets `ilm-mcp` delegate (scope `delegate-members`) for the members of the group (resource type Groups). |
+| Group | the `delegation.group` name | Created at the top level when missing. Its members are yours to manage. |
+
+The operator owns these names. It creates what is missing and corrects only the fields it sets. It deletes only its own delegation permission of the form you no longer configure and, once CIMD or MCP is turned off, its own `mcp-cimd` client policy and profile.
+
+**The client secret and the `MCPConfigured` condition.** Keycloak generates the `ilm-mcp` client's secret. The operator reads it through the admin API, with the credentials the Keycloak Operator generates in `<platform>-keycloak-initial-admin`, and relays it into the operator-owned Secret `<platform>-mcp-client` under the key `clientSecret`. MCP reads it as `ILM_MCP_SECURITY_CLIENT_SECRET` through a required `secretKeyRef`, so the MCP pod waits for the Secret, and a changed secret rolls the pod. The outcome is the **`MCPConfigured`** condition, an adjunct that never drives the phase to `Degraded` and exists only while `mcp.enabled` is `true`:
+
+- `True/Configured` — the objects are in place and the secret is relayed.
+- `False/WaitingForKeycloak` — the managed Keycloak or its admin credentials are not ready yet.
+- `False/MCPConfigFailed` — the admin API pass or the Secret write failed, or `ilm-mcp` needs a correction but carries secret-rotation state. In that case the operator leaves the client alone, and the message names the fields it did not correct.
+- `False/UnsupportedVersion` — the platform version has no MCP server. A `spec.version` change clears it, and so does turning MCP off.
+
+Messages name the failing step and at most an HTTP status code, or the reason a Secret write failed, never a credential.
+
+**The provider's allowed delegate.** ILM accepts a delegated token only from a delegate its OAuth2 provider lists. The check needs Core 2.21.0 or later; the 2.21.0 preview bundle still runs Core 2.20.0. While MCP is on, each Core start registers the internal provider with `allowedDelegates` set to `["ilm-mcp"]` and `delegateClaim` set to `client_id`, the field of the token's outermost `act` claim that names the delegate. The registration replaces the whole provider, so a delegate you add by hand does not survive, and turning MCP off clears the list.
+
+### Who MCP may act for
+
+MCP acts for a user by exchanging that user's token for one that names MCP as the actor, and Keycloak allows that exchange only for users MCP may delegate for. By default MCP may act for **every user** of the realm. Set `mcp.delegation.group` to limit it to the **members of one group**:
+
+| `delegation.group` | Permission the operator keeps | MCP may act for |
+|---|---|---|
+| empty (default) | `ilm-mcp-all-users-delegation` | every user of the realm |
+| a group name | `ilm-mcp-selected-users-delegation` | the members of that group |
+
+The group is a top-level group of the platform realm, named without a path: no `/`, at most 255 characters. The operator creates it when it is missing; adding members is up to you. Switching between the two forms replaces the permission of the other form, and the operator deletes the old one first, so a failure part-way leaves no user delegable rather than every user.
+
+A user outside the group still signs in. Keycloak drops the delegation scope, MCP answers 401, and Claude Code asks for a new sign-in. Users approve the delegation at every sign-in session.
+
+### In-cluster traffic and network isolation
+
+MCP calls Core and Keycloak over HTTP inside the cluster, as Core does for its own Keycloak calls: the Core API at `http://core:8080/api`, and Keycloak's key set and token endpoints (`/certs` and `/token` under `http://<platform>-keycloak-service:8080/kc/realms/<realm>/protocol/openid-connect`) through the managed Keycloak's Service. The operator therefore sets `ILM_MCP_SECURITY_ALLOW_HTTP_BACKCHANNEL` to `true`, the MCP server's switch for accepting those plain-HTTP URLs. The issuer and the resource URL stay HTTPS, built from the public host, because they are what clients and tokens carry.
+
+The operator renders no NetworkPolicy for MCP alone. MCP's pods fall under the platform-wide NetworkPolicies described in [Network policy](#network-policy): they admit ingress from the platform's namespace and the operator, so the gateway reaches MCP, and they allow all egress.
+
+### Connect a client
+
+A client is given the MCP URL, `https://<host>/mcp`, and finds the rest through the protected-resource metadata at the discovery path.
+
+- **Claude Code and the hosted Claude apps** sign in through their client ID metadata documents, so no client is registered in Keycloak beforehand. That is what `mcp.cimd.enabled`, on by default, provides: Keycloak's `cimd` feature and the `mcp-cimd` client policy.
+- **Codex** cannot use its metadata document yet: Keycloak 26.8.1 rejects it ([keycloak#51236](https://github.com/keycloak/keycloak/issues/51236)), and a fix is expected in an upcoming Keycloak version. Until then, register a public client with PKCE S256, consent required, and the loopback redirect. Then set Codex's `oauth.client_id` to that client, and `scopes = ["openid", "mcp:access", "delegation:client:ilm-mcp"]`. Run `codex mcp logout` after changing `scopes`.
+
+### Changing the Keycloak setup
+
+**Feature overrides.** `keycloak.managed.overrides` is a JSON merge patch (RFC 7396), and `spec.features` is not a protected path. A patch that sets `spec.features.enabled` therefore **replaces the whole list**, so it must repeat MCP's features — `token-exchange-delegation`, `parameterized-scopes`, and, unless you turned CIMD off, `cimd` — next to any feature you add. Turn CIMD off with `mcp.cimd.enabled: false`, never with a features override. The operator then removes its `mcp-cimd` client policy and profile before Keycloak loses the `cimd` feature. It follows only `spec.features.enabled`, and does not rely on how Keycloak handles a feature that `spec.features.disabled` and `spec.features.enabled` both name.
+
+**Pre-built images.** Keycloak features are build options. An image you supply pre-built through `keycloak.managed.overrides` and start with `startOptimized: true` (see [Managed engine versions](#managed-engine-versions)) must itself be built with MCP's features, because an optimized start does not rebuild Keycloak to add them.
+
+**Resource indicators.** The `mcp-cimd` client profile carries `cimd-resource-indicator-allow-list`, set to `https://<host>/mcp`. Keycloak enforces that list only with its experimental resource-indicators feature, which the operator does not enable, so it restricts nothing. The audiences of a token come from the `mcp:access` mappers either way.
+
+**Renaming the realm.** The operator manages MCP's realm objects, `mcp-cimd` included, in the platform's current realm. Renaming the realm leaves the old realm's objects in place. A stored `mcp-cimd` makes Keycloak fail every sign-in, token request, and client update in its realm once the `cimd` feature is gone, so remove it from the old realm if you keep using that realm.
+
+**Turning MCP off.** Setting `mcp.enabled: false` removes the workload, the gateway route, and the `<platform>-mcp-client` Secret, drops the Keycloak features, and clears `allowedDelegates`. The objects in the realm stay in place, except `mcp-cimd`, which the operator removes first.
+
 ## Running on OpenShift
 
 The operator runs on OpenShift unchanged — it neither detects nor special-cases it.
@@ -854,10 +1004,10 @@ The `restricted-v2` guarantees are enforced in code and asserted by a builder un
 ## Behavior notes
 
 - **Readiness is measured, not asserted.** `Available` and the `Running` phase reflect the measured ready replicas of the required workloads — Core and auth. A still-rolling-out workload keeps the platform `Progressing`. The check follows `workloadType`, so a component rendered as a StatefulSet is gated on its StatefulSet exactly as a Deployment-typed one is on its Deployment.
-- **De-rendered children are pruned.** Turning a feature off removes the objects it had rendered. Setting `edge.enabled: false`, or removing the `edge` block, deletes the Ingress, Gateway, and cert-manager objects the operator had created; disabling `utils` removes its Deployment and Service. The operator reconciles the full owned set each pass and collects what is no longer desired. Managed infrastructure is deliberately excluded from that prune.
-- **Read-only root filesystem, on every container.** Every workload runs with a read-only root: the nginx-based fe-administrator, the Kong gateway, OPA, the init containers, and the JVM (Core, scheduler, utils) and .NET (auth) main containers. Each has its sole writable path backed by an in-memory `/tmp` ephemeral volume, and auth additionally gets `TMPDIR=/tmp` so the .NET runtime's keyring and temp writes land there.
+- **De-rendered children are pruned.** Turning a feature off removes the objects it had rendered. Setting `edge.enabled: false`, or removing the `edge` block, deletes the Ingress, Gateway, and cert-manager objects the operator had created; disabling `utils` removes its Deployment and Service, and disabling `mcp` removes the MCP server's Deployment and Service, its gateway route, and the `<platform>-mcp-client` Secret. The operator reconciles the full owned set each pass and collects what is no longer desired. Managed infrastructure is deliberately excluded from that prune.
+- **Read-only root filesystem, on every container.** Every workload runs with a read-only root: the nginx-based fe-administrator, the Kong gateway, OPA, the init containers, and the JVM (Core, scheduler, utils, mcp-server) and .NET (auth) main containers. Each has its sole writable path backed by an in-memory `/tmp` ephemeral volume, and auth additionally gets `TMPDIR=/tmp` so the .NET runtime's keyring and temp writes land there.
 - **Optional certificate env vars are wired defensively.** Secret-backed env such as the administrator certificate, the provisioning API key, and the trusted-certificates bundle is injected through `secretKeyRef` with the reference marked optional, so Core **starts** rather than wedging on `CreateContainerConfigError` while a referenced Secret is briefly absent, then picks the value up on a later roll.
-- **Referenced Secrets are watched.** The operator watches the Secrets a platform references and re-reconciles on change. A change to the composed configuration rolls the affected workload through a `checksum/config` pod-template annotation — Core for its trusted-certificate bundle, relayed OIDC client Secret, and in-pod scripts; the gateway for its declarative Kong configuration.
+- **Referenced Secrets are watched.** The operator watches the Secrets a platform references and re-reconciles on change. A change to the composed configuration rolls the affected workload through a `checksum/config` pod-template annotation — Core for its trusted-certificate bundle, relayed OIDC client Secret, and in-pod scripts; the gateway for its declarative Kong configuration; the MCP server for its relayed client Secret.
 - **One platform per namespace.** A `Platform` is a per-namespace singleton, because the operator renders its children under clean, unscoped names. Only the oldest platform in a namespace reconciles; a second is degraded immediately with reason `AnotherPlatformExists`. To run several platforms, use separate namespaces.
 
 ## Where to look next

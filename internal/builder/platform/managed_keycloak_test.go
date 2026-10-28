@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 )
 
 // managedKCPlatform returns a Platform with a managed Keycloak (instances/version) and any
@@ -857,6 +858,65 @@ func TestResolveManagedKeycloakNoOwnerRef(t *testing.T) {
 	for _, o := range ResolveManagedKeycloak(p) {
 		u := o.(*unstructured.Unstructured)
 		assert.Empty(t, u.GetOwnerReferences(), "managed Keycloak objects carry no owner reference")
+	}
+}
+
+// --- MCP features ------------------------------------------------------------
+
+// kcEnabledFeatures returns spec.features.enabled of a rendered Keycloak CR, or nil when it carries
+// none. An unstructured object holds a list as []interface{}, so a list of any other type fails here.
+func kcEnabledFeatures(t *testing.T, kc *unstructured.Unstructured) []string {
+	t.Helper()
+	enabled, _, err := unstructured.NestedStringSlice(kc.Object, "spec", "features", "enabled")
+	require.NoError(t, err, "spec.features.enabled must be a list of strings")
+	return enabled
+}
+
+// TestBuildKeycloakEnablesMCPFeatures proves a platform that serves MCP gets the three Keycloak
+// features its delegated sign-in needs, in a fixed order. An unset spec.mcp.cimd.enabled counts as
+// on, and the features do not depend on whether the Keycloak version is pinned.
+func TestBuildKeycloakEnablesMCPFeatures(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+	}{
+		{"cimd unset", nil},
+		{"cimd on", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = ptr.To(true) }},
+		{"keycloak version pinned", func(p *otilmv1alpha1.Platform) { p.Spec.Keycloak.Managed.Version = "26.8.1" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := kcEnabledFeatures(t, buildKeycloak(mcpPlatform(tc.mutate)))
+			assert.Equal(t, []string{"token-exchange-delegation", "parameterized-scopes", "cimd"}, got)
+		})
+	}
+}
+
+// TestBuildKeycloakEnablesMCPFeaturesWithoutCIMD proves an explicit spec.mcp.cimd.enabled=false
+// leaves cimd out and keeps the two delegation features, in the same order.
+func TestBuildKeycloakEnablesMCPFeaturesWithoutCIMD(t *testing.T) {
+	p := mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = ptr.To(false) })
+	assert.Equal(t, []string{"token-exchange-delegation", "parameterized-scopes"}, kcEnabledFeatures(t, buildKeycloak(p)))
+}
+
+// TestBuildKeycloakWithoutMCPHasNoFeatures proves the Keycloak CR carries no spec.features unless the
+// platform serves MCP: not when MCP is never mentioned, not when it is off while CIMD defaults to on,
+// and not when it is on for a version whose bundle has no MCP server image.
+func TestBuildKeycloakWithoutMCPHasNoFeatures(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform *otilmv1alpha1.Platform
+	}{
+		{"mcp unset", managedKCPlatform(nil)},
+		{"mcp off", mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false })},
+		{"mcp on, bundle without the server", mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion220 })},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, found, err := unstructured.NestedFieldNoCopy(buildKeycloak(tc.platform).Object, "spec", "features")
+			require.NoError(t, err)
+			assert.False(t, found, "spec.features must be absent")
+		})
 	}
 }
 

@@ -8,6 +8,7 @@ package platform
 
 import (
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2" //nolint:revive // dot import is standard Ginkgo pattern
 	. "github.com/onsi/gomega"    //nolint:revive // dot import is standard Gomega pattern
@@ -17,6 +18,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 )
@@ -40,6 +43,16 @@ const (
 	testExternalIssuerGroup = "awspca.cert-manager.io"
 	// testIssuerKindRejection is the issuerRef kind/group rule's message.
 	testIssuerKindRejection = "issuerRef.kind must be Issuer or ClusterIssuer unless issuerRef.group names an external issuer"
+	// testMCP*Rejection are the messages of the three mcp rules on PlatformSpec.
+	testMCPKeycloakRejection = "mcp.enabled requires keycloak.mode=managed"
+	testMCPHostRejection     = "mcp.enabled needs a public host: set common.hostName, or edge.host on an enabled edge"
+	testMCPVersionRejection  = "mcp.enabled requires keycloak.managed.version 26.8.1 or later"
+	// testMCPEnumRejection is the fragment the apiserver includes when mcp.access is not one of
+	// its enumerated levels.
+	testMCPEnumRejection = `Unsupported value: "write"`
+	// testRuleEvaluationError is the fragment the apiserver includes when a CEL rule fails by
+	// erroring at runtime, such as on a field that is absent, rather than by evaluating to false.
+	testRuleEvaluationError = "evaluating rule"
 )
 
 // These specs exercise the field-level CEL (XValidation) on the Platform CRD at
@@ -955,6 +968,230 @@ var _ = Describe("Platform CEL validation", func() {
 			p := platformIn(ns)
 			p.Spec.Core.TimeQualityMonitor = &otilmv1alpha1.TimeQualityMonitorSpec{Enabled: false}
 			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+	})
+
+	// mcp.enabled depends on three facts that live in OTHER sections of the spec, so its rules sit
+	// on PlatformSpec: a managed Keycloak (the operator provisions MCP's Keycloak objects through
+	// the admin API), a public host (MCP's issuer and resource URLs are built from it) and, when
+	// the managed Keycloak is pinned, a version of 26.8.1 or later. mcpPlatform satisfies all
+	// three and each spec breaks exactly one, so a rejection is attributable to that rule.
+	Context("mcp", func() {
+		mcpPlatform := func(ns string) *otilmv1alpha1.Platform {
+			p := platformIn(ns)
+			p.Spec.Keycloak = managedKeycloak()
+			p.Spec.Common.HostName = testEdgeHost
+			p.Spec.MCP = otilmv1alpha1.MCPSpec{Enabled: true}
+			return p
+		}
+		// pinnedTo is mcpPlatform with the managed Keycloak pinned to version.
+		pinnedTo := func(ns, version string) *otilmv1alpha1.Platform {
+			p := mcpPlatform(ns)
+			p.Spec.Keycloak.Managed.Version = version
+			return p
+		}
+		// rejects asserts that the apiserver refuses obj with a message containing fragment, and that
+		// no rule failed by erroring: a rule that dereferences an absent field reports "evaluating
+		// rule" instead of passing or failing cleanly.
+		rejects := func(obj client.Object, fragment string) {
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring(fragment))
+			Expect(err.Error()).NotTo(ContainSubstring(testRuleEvaluationError))
+		}
+		// onTheWire returns p as the apiserver sees it once edit has changed it. The typed client
+		// always sends the common and mcp blocks and omits an empty string, so a field that must be
+		// absent or explicitly empty on the wire can only be set here.
+		onTheWire := func(p *otilmv1alpha1.Platform, edit func(obj map[string]interface{})) *unstructured.Unstructured {
+			obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(p)
+			Expect(err).NotTo(HaveOccurred())
+			edit(obj)
+			u := &unstructured.Unstructured{Object: obj}
+			u.SetGroupVersionKind(otilmv1alpha1.GroupVersion.WithKind("Platform"))
+			return u
+		}
+
+		It("rejects MCP with an external Keycloak", func() {
+			ns := freshNS("cel-mcp-extkc")
+			p := mcpPlatform(ns)
+			p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external", Realm: "ilm"}
+			rejects(p, testMCPKeycloakRejection)
+		})
+		It("rejects MCP with no keycloak block (external by default)", func() {
+			ns := freshNS("cel-mcp-nokc")
+			p := mcpPlatform(ns)
+			p.Spec.Keycloak = nil
+			rejects(p, testMCPKeycloakRejection)
+		})
+		It("rejects MCP with no public host", func() {
+			ns := freshNS("cel-mcp-nohost")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			rejects(p, testMCPHostRejection)
+		})
+		It("rejects MCP with no common block and no edge on the wire", func() {
+			ns := freshNS("cel-mcp-nocommon")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			rejects(onTheWire(p, func(obj map[string]interface{}) {
+				unstructured.RemoveNestedField(obj, "spec", "common")
+			}), testMCPHostRejection)
+		})
+		// The public host is the one the platform resolves: the host of an ENABLED edge, otherwise
+		// common.hostName. The host of a disabled edge is ignored by that resolution, so it must not
+		// satisfy the rule, whether enabled is false or never said.
+		It("rejects MCP when only a disabled edge names a host", func() {
+			ns := freshNS("cel-mcp-edgeoff")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Type: "ingress", Host: testEdgeHost}
+			rejects(onTheWire(p, func(obj map[string]interface{}) {
+				Expect(unstructured.SetNestedField(obj, false, "spec", "edge", "enabled")).To(Succeed())
+			}), testMCPHostRejection)
+		})
+		It("rejects MCP when only an edge that never says enabled names a host", func() {
+			ns := freshNS("cel-mcp-edgeunset")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Type: "ingress", Host: testEdgeHost} // enabled is omitted on the wire
+			rejects(p, testMCPHostRejection)
+		})
+		It("rejects MCP when an enabled edge names no host and there is no common.hostName", func() {
+			ns := freshNS("cel-mcp-edgenohost")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: true, Type: "ingress"} // the edge's own rule rejects it too
+			rejects(p, testMCPHostRejection)
+		})
+		It("accepts a public host that comes from an enabled edge (no common.hostName)", func() {
+			ns := freshNS("cel-mcp-edgehost")
+			p := mcpPlatform(ns)
+			p.Spec.Common.HostName = ""
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: true, Type: "ingress", Host: testEdgeHost}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts common.hostName behind a disabled edge (the platform's own ingress)", func() {
+			ns := freshNS("cel-mcp-ownedge")
+			p := mcpPlatform(ns) // common.hostName is set
+			p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: false}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+
+		// 26.8.0 and 26.6.3 are older 26.x releases, 25.0.1 an older major. 26.8 names no patch, so it
+		// cannot be shown to be 26.8.1 or later, and a Keycloak image build suffix does not lift a
+		// patch below 26.8.1. A tag is a bare version: a leading v is not one, and 270 is not 27.
+		for i, version := range []string{"26.8.0", "26.6.3", "25.0.1", "26.8", "26.8.0-0", "v26.8.1", "270.0.0"} {
+			It("rejects a managed Keycloak pinned to "+version, func() {
+				rejects(pinnedTo(freshNS(fmt.Sprintf("cel-mcp-oldkc-%d", i)), version), testMCPVersionRejection)
+			})
+		}
+		// 26.8.1 is the floor and 26.8.99 the top of its patch range. 26.9 names no patch but is past
+		// the floor, and 26.8.1-0 is the build-suffixed tag form Keycloak publishes.
+		for i, version := range []string{"", "26.8.1", "26.8.99", "26.8.1-0", "26.9", "26.10.0", "27.0.0"} {
+			name := "pinned to " + version
+			if version == "" {
+				name = "left unpinned"
+			}
+			It("accepts MCP with a managed Keycloak and a host, "+name, func() {
+				Expect(k8sClient.Create(ctx, pinnedTo(freshNS(fmt.Sprintf("cel-mcp-newkc-%d", i)), version))).To(Succeed())
+			})
+		}
+		It("accepts a managed Keycloak whose version is explicitly empty", func() {
+			ns := freshNS("cel-mcp-emptyversion")
+			u := onTheWire(mcpPlatform(ns), func(obj map[string]interface{}) {
+				Expect(unstructured.SetNestedField(obj, "", "spec", "keycloak", "managed", "version")).To(Succeed())
+			})
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		})
+
+		It("accepts MCP off with an external Keycloak and no host", func() {
+			ns := freshNS("cel-mcp-off")
+			p := platformIn(ns)
+			p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external", Realm: "ilm"}
+			p.Spec.MCP = otilmv1alpha1.MCPSpec{Enabled: false}
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts MCP off with a managed Keycloak pinned below 26.8.1", func() {
+			ns := freshNS("cel-mcp-off-oldkc")
+			p := pinnedTo(ns, "25.0.1")
+			p.Spec.MCP.Enabled = false
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts a platform with no mcp block at all", func() {
+			ns := freshNS("cel-mcp-absent")
+			u := onTheWire(platformIn(ns), func(obj map[string]interface{}) {
+				unstructured.RemoveNestedField(obj, "spec", "mcp")
+			})
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		})
+		// The version rule is a disjunction, and CEL lets one true operand decide it even when another cannot be
+		// evaluated. Its guard against an absent mcp block therefore matters only when every other operand is false,
+		// which a managed Keycloak pinned below 26.8.1 does: an absent or unpinned Keycloak would pass without it.
+		It("accepts a managed Keycloak pinned below 26.8.1 when there is no mcp block", func() {
+			ns := freshNS("cel-mcp-absent-oldkc")
+			p := platformIn(ns)
+			p.Spec.Keycloak = managedKeycloak()
+			p.Spec.Keycloak.Managed.Version = "26.6.3"
+			u := onTheWire(p, func(obj map[string]interface{}) {
+				unstructured.RemoveNestedField(obj, "spec", "mcp")
+			})
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		})
+
+		It("rejects access: write", func() {
+			ns := freshNS("cel-mcp-access-write")
+			p := mcpPlatform(ns)
+			p.Spec.MCP.Access = "write"
+			rejects(p, testMCPEnumRejection)
+		})
+		for i, level := range []string{"read-only", "read-write", "full"} {
+			It("accepts the "+level+" access level", func() {
+				ns := freshNS(fmt.Sprintf("cel-mcp-access-%d", i))
+				p := mcpPlatform(ns)
+				p.Spec.MCP.Access = level
+				Expect(k8sClient.Create(ctx, p)).To(Succeed())
+			})
+		}
+		It("rejects a delegation group written as a path", func() {
+			ns := freshNS("cel-mcp-grouppath")
+			p := mcpPlatform(ns)
+			p.Spec.MCP.Delegation.Group = "/ilm/mcp-users"
+			rejects(p, testPatternRejection)
+		})
+		It("rejects a delegation group name longer than 255 characters", func() {
+			ns := freshNS("cel-mcp-grouplong")
+			p := mcpPlatform(ns)
+			p.Spec.MCP.Delegation.Group = strings.Repeat("g", 256)
+			rejects(p, testPatternRejection)
+		})
+		It("accepts a delegation group name of 255 characters", func() {
+			ns := freshNS("cel-mcp-groupmax")
+			p := mcpPlatform(ns)
+			p.Spec.MCP.Delegation.Group = strings.Repeat("g", 255)
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("accepts an explicitly empty delegation group", func() {
+			ns := freshNS("cel-mcp-groupempty")
+			u := onTheWire(mcpPlatform(ns), func(obj map[string]interface{}) {
+				Expect(unstructured.SetNestedField(obj, "", "spec", "mcp", "delegation", "group")).To(Succeed())
+			})
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+		})
+		It("accepts a delegation group name and CIMD switched off", func() {
+			ns := freshNS("cel-mcp-group")
+			p := mcpPlatform(ns)
+			p.Spec.MCP.CIMD.Enabled = ptr(false)
+			p.Spec.MCP.Delegation.Group = "mcp users"
+			Expect(k8sClient.Create(ctx, p)).To(Succeed())
+		})
+		It("defaults MCP to off, read-only and CIMD on", func() {
+			ns := freshNS("cel-mcp-defaults")
+			Expect(k8sClient.Create(ctx, platformIn(ns))).To(Succeed())
+			got := &otilmv1alpha1.Platform{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ilm"}, got)).To(Succeed())
+			Expect(got.Spec.MCP.Enabled).To(BeFalse())
+			Expect(got.Spec.MCP.Access).To(Equal("read-only"))
+			Expect(got.Spec.MCP.CIMD.Enabled).To(HaveValue(BeTrue()))
 		})
 	})
 })

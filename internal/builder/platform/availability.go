@@ -37,6 +37,7 @@ var statelessComponents = map[string]bool{
 	"fe-administrator":  true,
 	"auth-opa-policies": true,
 	"utils":             true,
+	mcpServerComponent:  true,
 	gatewayName:         true,
 }
 
@@ -122,8 +123,8 @@ type componentAvailability struct {
 // PodDisruptionBudget and/or a HorizontalPodAutoscaler per component — across the platform.
 // For each component it folds in the HA-profile defaults (override-safe) onto the
 // component's CR ComponentSpec, then appends a PDB when one is configured (explicitly or by
-// the HA default) and an HPA when autoscaling is set. utils is included only when
-// it is enabled (same gate as its workload). Both kinds are core, always-served APIs
+// the HA default) and an HPA when autoscaling is set. utils and mcp-server are included only when
+// they render (same gate as their workloads). Both kinds are core, always-served APIs
 // (policy/v1, autoscaling/v2), so neither needs capability gating.
 //
 // These are operator-owned children: the reconciler stamps the Platform owner reference +
@@ -140,6 +141,9 @@ func platformAvailabilityObjects(p *otilmv1alpha1.Platform) []client.Object {
 	}
 	if p.Spec.Utils.Enabled {
 		candidates = append(candidates, componentAvailability{ResolveUtils(p), p.Spec.Utils.ComponentSpec})
+	}
+	if MCPEnabled(p) {
+		candidates = append(candidates, componentAvailability{ResolveMCP(p), p.Spec.MCP.ComponentSpec})
 	}
 
 	var objs []client.Object

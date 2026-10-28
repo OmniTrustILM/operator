@@ -339,11 +339,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// KeycloakReady signal it gates on is already set above by gateKeycloak.
 	oidcRequeue := r.reconcileOIDCProvider(ctx, &platform, desired)
 
+	// MCP's Keycloak objects and the relayed ilm-mcp client secret (spec.mcp.enabled only). The
+	// same ORDERING rule applies: the relayed <platform>-mcp-client Secret is an owned child that
+	// only this step adds to the desired set, so it must run before the prune.
+	mcpRequeue := r.reconcileMCPKeycloak(ctx, &platform, desired)
+
 	// Prune de-rendered children, register the password admin, measure readiness, persist
 	// status, and pick the soonest applicable requeue. A prune/readiness/status failure routes
 	// by transience; the adjunct requeue flags collected across this pass decide the cadence.
 	return r.finalizeReconcile(ctx, &platform, desired, mig, mgd, finalizeRequeueInputs{
-		edge: requeue, oidc: oidcRequeue, workloadSwitch: switching,
+		edge: requeue, oidc: oidcRequeue, mcp: mcpRequeue, workloadSwitch: switching,
 	})
 }
 
@@ -408,6 +413,8 @@ type finalizeRequeueInputs struct {
 	edge bool
 	// oidc is reconcileOIDCProvider's requeue flag.
 	oidc bool
+	// mcp is reconcileMCPKeycloak's requeue flag.
+	mcp bool
 	// workloadSwitch is composeAndApplyBase's "a superseded workload is still terminating" flag.
 	workloadSwitch bool
 }
@@ -491,6 +498,7 @@ func (r *Reconciler) finalizeReconcile(ctx context.Context, platform *otilmv1alp
 		workloadSwitch: in.workloadSwitch,
 		adminUser:      adminUserRequeue,
 		oidc:           in.oidc,
+		mcp:            in.mcp,
 		database:       mgd.dbRequeue,
 		messaging:      mgd.mqRequeue,
 		keycloak:       mgd.kcRequeue,
@@ -506,6 +514,7 @@ type requeueSignals struct {
 	workloadSwitch bool
 	adminUser      bool
 	oidc           bool
+	mcp            bool
 	database       bool
 	messaging      bool
 	keycloak       bool
@@ -514,9 +523,9 @@ type requeueSignals struct {
 }
 
 // nextRequeueResult picks the soonest applicable requeue for a successfully reconciled
-// Platform: an in-flight messaging migration first, then admin-user, OIDC, managed database,
-// managed messaging, managed Keycloak, still-progressing required Deployments, and an edge /
-// admin-cert dependency. No applicable signal means a steady state (no requeue).
+// Platform: an in-flight messaging migration first, then admin-user, OIDC, MCP, managed
+// database, managed messaging, managed Keycloak, still-progressing required Deployments, and an
+// edge / admin-cert dependency. No applicable signal means a steady state (no requeue).
 //
 // The migration comes FIRST because it is the only signal whose cadence drives a sequence
 // forward rather than re-checking a dependency: its phases advance on nothing but the next
@@ -541,6 +550,10 @@ func nextRequeueResult(s requeueSignals) ctrl.Result {
 	case s.oidc:
 		// Keycloak/Core-not-ready or a transient OIDC-wiring failure: retry soon (same
 		// adjunct timescale as admin registration).
+		return ctrl.Result{RequeueAfter: adminRegisterRequeueAfter}
+	case s.mcp:
+		// Keycloak not ready, or a failed or incomplete MCP pass: retry on the same adjunct
+		// timescale as the OIDC wiring.
 		return ctrl.Result{RequeueAfter: adminRegisterRequeueAfter}
 	case s.database:
 		// A managed database is applied but not yet Ready (CNPG still bootstrapping or its
@@ -795,11 +808,13 @@ func (r *Reconciler) composeBaseSecrets(ctx context.Context, platform *otilmv1al
 
 // coreRollChecksums carries the per-pass config-checksum inputs composeAndApplyBase computes
 // once — Core's combined checksum (trusted-certs + relayed OIDC client Secret + in-pod scripts),
-// the gateway's kong.yml checksum, and whether Core's checksum is currently FROZEN behind its
-// first migration — so applyBaseObject can stamp every rendered object without recomputing them.
+// the gateway's kong.yml checksum, the MCP server's relayed client Secret checksum, and whether
+// Core's checksum is currently FROZEN behind its first migration — so applyBaseObject can stamp
+// every rendered object without recomputing them.
 type coreRollChecksums struct {
 	core       string
 	gateway    string
+	mcp        string
 	frozen     string
 	coreExists bool
 	coreReady  bool
@@ -848,14 +863,16 @@ func (r *Reconciler) applyBaseObject(ctx context.Context, platform *otilmv1alpha
 	}
 	// Stamp the per-component config checksums onto their pod templates so a change in config
 	// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
-	// relayed OIDC client Secret + in-pod scripts ConfigMap) and the gateway (kong.yml). Each
-	// stamp is a no-op for non-matching objects / an empty checksum.
+	// relayed OIDC client Secret + in-pod scripts ConfigMap), the gateway (kong.yml) and the MCP
+	// server (relayed MCP client Secret). Each stamp is a no-op for non-matching objects / an
+	// empty checksum.
 	coreStamp := sums.core
 	if isCoreWorkload(obj) && sums.coreExists && !sums.coreReady && sums.frozen != "" {
 		coreStamp = sums.frozen // freeze during the first migration; unfreeze once Core is Ready
 	}
 	platformbuilder.StampConfigChecksum(obj, coreStamp)
 	platformbuilder.StampGatewayConfigChecksum(obj, sums.gateway)
+	platformbuilder.StampMCPConfigChecksum(obj, sums.mcp)
 	if aerr := r.apply(ctx, platform, obj, desired); aerr != nil {
 		// An SSA apply can fail transiently (a Conflict from a competing field manager, an
 		// API timeout) — requeue with backoff WITHOUT degrading; only a deterministic apply
@@ -924,8 +941,8 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 	// deploys Core once with all config up front — this makes the operator match that.
 	coreExists, coreReady, coreFrozenChecksum := r.coreWorkloadStatus(ctx, platform)
 	sums := coreRollChecksums{
-		core: coreChecksum, gateway: gatewayChecksum, frozen: coreFrozenChecksum,
-		coreExists: coreExists, coreReady: coreReady,
+		core: coreChecksum, gateway: gatewayChecksum, mcp: r.mcpClientChecksum(ctx, platform),
+		frozen: coreFrozenChecksum, coreExists: coreExists, coreReady: coreReady,
 	}
 	for _, obj := range platformbuilder.RenderPlatformBase(platform, r.OperatorNamespace) {
 		objSwitching, objHandled, objRes, objErr := r.applyBaseObject(ctx, platform, desired, mig, sums, obj)
@@ -1558,9 +1575,29 @@ func (r *Reconciler) oidcClientChecksum(ctx context.Context, p *otilmv1alpha1.Pl
 	if !platformbuilder.KeycloakManaged(p) {
 		return ""
 	}
+	return r.relayedSecretChecksum(ctx, p.Namespace, platformbuilder.OIDCClientSecretName(p))
+}
+
+// mcpClientChecksum returns a SHA-256 checksum of the operator-owned MCP client Secret
+// (<platform>-mcp-client) while the platform renders the MCP server, or "" when it does not or the
+// Secret does not exist yet. Stamped on the MCP Deployment, it rolls the server once
+// reconcileMCPKeycloak relays a different client secret: the server reads it from an environment
+// variable, which a running container never re-reads. The value is hashed, never logged or placed
+// in status.
+func (r *Reconciler) mcpClientChecksum(ctx context.Context, p *otilmv1alpha1.Platform) string {
+	if !platformbuilder.MCPEnabled(p) {
+		return ""
+	}
+	return r.relayedSecretChecksum(ctx, p.Namespace, platformbuilder.MCPClientSecretName(p))
+}
+
+// relayedSecretChecksum returns a SHA-256 checksum of a relayed client Secret's data, or "" when
+// the Secret cannot be read: absent, or a transient read error. No stamp means no spurious roll,
+// and the next reconcile self-heals.
+func (r *Reconciler) relayedSecretChecksum(ctx context.Context, namespace, name string) string {
 	var sec corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.OIDCClientSecretName(p)}, &sec); err != nil {
-		return "" // absent or transient read error: no stamp, no spurious roll
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sec); err != nil {
+		return ""
 	}
 	return checksum.ComputeSecretChecksum(&sec)
 }

@@ -1,9 +1,10 @@
 name: E2E Managed
 
-# GATED managed e2e tier. The managed Ginkgo specs (CNPG/RabbitMQ/Keycloak + the full ILM
-# platform + the version matrix) install the REAL upstream operators and bring up real stateful
-# infra, so a single run takes ~45-60min. To keep PRs cheap, this expensive validation is NOT run
-# on every PR by the default Test workflow (which runs only the fast `make test-e2e` tier).
+# GATED managed e2e tier. The managed Ginkgo specs (CNPG/RabbitMQ/Keycloak + the optional MCP
+# server + the full ILM platform + the version matrix) install the REAL upstream operators and
+# bring up real stateful infra, so a single run takes ~45-60min. To keep PRs cheap, this
+# expensive validation is NOT run on every PR by the default Test workflow (which runs only the
+# fast `make test-e2e` tier).
 # Instead it runs:
 #   - nightly on a schedule (catch drift against the real operators),
 #   - on manual workflow_dispatch (run it on demand), and
@@ -20,7 +21,11 @@ name: E2E Managed
 #   - NO broad directory globs over internal/** (internal/builder/platform/**,
 #     internal/controller/platform/**, internal/builder/common/** made this ~1h tier fire on
 #     nearly every operator PR); list individual files or a narrow prefix glob instead;
-#   - when adding a path, name the managed spec that would catch its regression.
+#   - when adding a path, name the managed spec that would catch its regression. The MCP files
+#     (mcp.go of the builder, mcp.go and mcp_objects.go of the registration package, mcp_keycloak.go
+#     of the controller) are caught by managed-mcp: Keycloak must switch on the features they ask
+#     for, accept the realm objects they write, and the MCP server must start on the environment
+#     they render.
 # The nightly schedule is the BACKSTOP for anything these filters miss: a managed-visible change
 # that lands through an unlisted path is caught within 24h rather than never.
 on:
@@ -39,13 +44,17 @@ on:
       - 'internal/builder/platform/db_connection.go'
       - 'internal/builder/platform/messaging_connection.go'
       - 'internal/builder/platform/oidc_core.go'
+      - 'internal/builder/platform/mcp.go'
       - 'internal/builder/platform/provisioning.go'
       - 'internal/builder/platform/resolve.go'
+      - 'internal/registration/mcp.go'
+      - 'internal/registration/mcp_objects.go'
       - 'internal/registration/oidc.go'
       - 'go.mod'
       - 'internal/controller/platform/gate_*.go'
       - 'internal/controller/platform/controller.go'
       - 'internal/controller/platform/version.go'
+      - 'internal/controller/platform/mcp_keycloak.go'
       - 'internal/controller/platform/oidc_provider.go'
       - 'internal/controller/platform/admin_keycloak_user.go'
       - 'test/e2e/**'
@@ -63,13 +72,17 @@ on:
       - 'internal/builder/platform/db_connection.go'
       - 'internal/builder/platform/messaging_connection.go'
       - 'internal/builder/platform/oidc_core.go'
+      - 'internal/builder/platform/mcp.go'
       - 'internal/builder/platform/provisioning.go'
       - 'internal/builder/platform/resolve.go'
+      - 'internal/registration/mcp.go'
+      - 'internal/registration/mcp_objects.go'
       - 'internal/registration/oidc.go'
       - 'go.mod'
       - 'internal/controller/platform/gate_*.go'
       - 'internal/controller/platform/controller.go'
       - 'internal/controller/platform/version.go'
+      - 'internal/controller/platform/mcp_keycloak.go'
       - 'internal/controller/platform/oidc_provider.go'
       - 'internal/controller/platform/admin_keycloak_user.go'
       - 'test/e2e/**'
@@ -153,6 +166,7 @@ jobs:
             managed-postgres,
             managed-rabbitmq,
             managed-keycloak,
+            managed-mcp,
             full,
             matrix-upgrade,
             matrix-preview,

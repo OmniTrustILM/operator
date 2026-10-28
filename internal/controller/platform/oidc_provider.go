@@ -67,7 +67,7 @@ const oidcClientID = platformbuilder.OIDCClientID
 // SECURITY: the Keycloak admin credentials, the fetched client secret, the access token, and
 // any response body NEVER reach logs, events, status, or conditions. The fetched secret is
 // written ONLY into the operator-owned Secret's data. Condition messages are generic (a step
-// name + at most an HTTP status code).
+// name + at most an HTTP status code, or the fixed reason a Secret write failed).
 func (r *Reconciler) reconcileOIDCProvider(ctx context.Context, p *otilmv1alpha1.Platform, desired desiredSet) bool {
 	// Only managed Keycloak needs OIDC wiring. External Keycloak configures OIDC providers in
 	// the application database; drop any stale condition from a previous managed generation.
@@ -132,8 +132,9 @@ func (r *Reconciler) reconcileOIDCProvider(ctx context.Context, p *otilmv1alpha1
 	// Relay the fetched secret into the operator-owned OIDC client Secret Core reads in-pod.
 	// A write failure is non-fatal (transient SSA/update conflict): requeue to retry.
 	if err := r.reconcileOIDCClientSecret(ctx, p, clientSecret, desired); err != nil {
-		r.setOIDCConfigured(p, metav1.ConditionFalse, reasonOIDCConfigFailed, "OIDC client secret relay failed")
-		log.FromContext(ctx).Info("OIDC client-secret relay not yet complete; will retry", "reason", reasonOIDCConfigFailed)
+		r.setOIDCConfigured(p, metav1.ConditionFalse, reasonOIDCConfigFailed, fmt.Sprintf("OIDC client secret relay failed (%s)", err))
+		log.FromContext(ctx).Info("OIDC client-secret relay not yet complete; will retry",
+			"reason", reasonOIDCConfigFailed, "error", err.Error())
 		return true
 	}
 
@@ -145,21 +146,39 @@ func (r *Reconciler) reconcileOIDCProvider(ctx context.Context, p *otilmv1alpha1
 // reconcileOIDCClientSecret writes the Keycloak-generated "ilm" client secret into the
 // operator-owned, owner-referenced OIDC client Secret (<platform>-oidc-client, key
 // clientSecret) that Core sources $INTERNAL_OAUTH_SECRET from via secretKeyRef. This Secret
-// is the only sanctioned place that fetched credential lives. It is owner-referenced (GC'd with the
-// Platform) and recorded in the desired set so the post-apply prune keeps it.
-//
-// SECURITY (critical): the fetched client secret is written ONLY to this Secret's stringData
-// and is NEVER logged or placed into the Platform status, conditions, or events. The returned
-// error carries no secret material.
+// is the only sanctioned place that fetched credential lives.
 func (r *Reconciler) reconcileOIDCClientSecret(ctx context.Context, p *otilmv1alpha1.Platform, clientSecret string, desired desiredSet) error {
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Name: platformbuilder.OIDCClientSecretName(p), Namespace: p.Namespace,
-	}}
+	return r.relayClientSecret(ctx, p, relayedSecret{
+		name: platformbuilder.OIDCClientSecretName(p), key: platformbuilder.OIDCClientSecretKey, component: coreDeploymentName,
+	}, clientSecret, desired)
+}
+
+// relayedSecret names an operator-owned Secret that relays a Keycloak-generated client secret to the
+// component reading it by secretKeyRef.
+type relayedSecret struct {
+	name string
+	// key is the Secret data key the workload reads by secretKeyRef.
+	key string
+	// component is the component label: the workload that reads the Secret.
+	component string
+}
+
+// relayClientSecret writes a Keycloak-generated client secret into the Secret target names. The
+// Secret is owner-referenced (GC'd with the Platform), labelled for the prune's selector, and
+// recorded in the desired set so the post-apply prune keeps it.
+//
+// SECURITY (critical): the client secret is written ONLY to this Secret's stringData and is NEVER
+// logged or placed into the Platform status, conditions, or events. The returned error carries no
+// secret material, and its text is the reason the write failed alone (see relayFailureReason): the
+// cause's own text can quote an admission webhook's denial or the controller that owns the Secret,
+// so the cause stays reachable through Unwrap and is never published.
+func (r *Reconciler) relayClientSecret(ctx context.Context, p *otilmv1alpha1.Platform, target relayedSecret, clientSecret string, desired desiredSet) error {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: target.name, Namespace: p.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
 		secret.Labels = map[string]string{
-			common.NameLabel:      platformbuilder.OIDCClientSecretName(p),
+			common.NameLabel:      target.name,
 			common.InstanceLabel:  p.Name,
-			common.ComponentLabel: "core",
+			common.ComponentLabel: target.component,
 			common.PartOfLabel:    common.PartOfValue,
 			common.ManagedByLabel: common.ManagedByValue,
 		}
@@ -167,14 +186,26 @@ func (r *Reconciler) reconcileOIDCClientSecret(ctx context.Context, p *otilmv1al
 		// StringData holds the only copy of the relayed secret; clear any prior Data so the
 		// write is idempotent (CreateOrUpdate preserves existing Data otherwise).
 		secret.Data = nil
-		secret.StringData = map[string]string{platformbuilder.OIDCClientSecretKey: clientSecret}
+		secret.StringData = map[string]string{target.key: clientSecret}
 		return controllerutil.SetControllerReference(p, secret, r.Scheme)
 	})
 	if err != nil {
-		return err // err carries no secret material
+		return safeErrorf(err, "%s", relayFailureReason(err))
 	}
 	desired.add(r, secret)
 	return nil
+}
+
+// relayFailureReason names why writing a relayed Secret failed, in a fixed vocabulary that carries none
+// of the error's text: the API server's status reason, or that another controller owns the Secret.
+// controllerutil's AlreadyOwnedError is no API status, so apiFailureReason alone would report it as
+// Unknown.
+func relayFailureReason(err error) string {
+	var owned *controllerutil.AlreadyOwnedError
+	if errors.As(err, &owned) {
+		return "owned by another controller"
+	}
+	return apiFailureReason(err)
 }
 
 // readKeycloakAdminCreds reads the Keycloak Operator-generated initial-admin Secret
