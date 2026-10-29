@@ -722,8 +722,9 @@ const (
 		"Secret that spec.mcp.identity.clientSecretRef names, and the operator never creates that Secret. The " +
 		"conversion takes the name from mcpServer.security.clientSecretRef only"
 	// mcpOwnKeycloakNote is the reason for an issuer, key-set or token endpoint with the managed identity,
-	// where MCP signs in through the platform's own Keycloak. It says the operator derives them, so the line
-	// cannot be read as if the conversion kept another provider.
+	// where MCP signs in through the platform's own Keycloak, and for an external global.mcp.identity.mode that
+	// an issuer on that Keycloak overrides. It says the operator derives them, so the line cannot be read as if
+	// the conversion kept another provider.
 	mcpOwnKeycloakNote = "not converted: MCP signs in through the platform's own Keycloak, whose issuer and " +
 		"endpoints the operator derives"
 	// mcpSecurityNote is the reason for every other mcpServer.security value with the managed identity.
@@ -735,8 +736,8 @@ const (
 	// mcpNoFieldNote is the reason for every other mcpServer.security value with an external identity.
 	mcpNoFieldNote = "not converted: the Platform has no field for it"
 	// mcpOffNote is the reason for every mcpServer.security value of an identity provider that the values name
-	// while MCP is off. The Platform checks an identity block whether or not MCP is on, so it is mapped only for
-	// MCP that is on.
+	// while MCP is off, and for an external global.mcp.identity.mode. The Platform checks an identity block whether
+	// or not MCP is on, so it is mapped only for MCP that is on.
 	mcpOffNote = "not converted: MCP is off (global.mcp.enabled is not true), so its identity provider settings " +
 		"are left out. Turn MCP on and convert again"
 	// mcpNetworkPolicyNote is the reason for mcpServer.networkPolicy.
@@ -753,6 +754,11 @@ const (
 	mcpGroupExternalNote = "not converted: a delegation group applies to the managed identity only, because the " +
 		"operator creates it in the platform's Keycloak. With an external identity, limit who MCP acts for at " +
 		"the identity provider"
+	// mcpModeNote is the reason for a global.mcp.identity.mode that is neither managed nor external. It never names
+	// the value the values hold, as no report names a value.
+	mcpModeNote = "not converted: the allowed values are managed and external. The conversion takes MCP's identity " +
+		"from mcpServer.security.issuer instead: an issuer that is not the platform's own Keycloak makes it external, " +
+		"and without one it stays managed"
 	// mcpIdentityMissingNote is the note for a setting the Platform requires with an external identity and the
 	// values lack. It names the Platform field to set, the values path that was empty and what the field holds.
 	mcpIdentityMissingNote = "spec.mcp.identity.%s: no %s found in values, and an external identity requires it. " +
@@ -781,12 +787,13 @@ const (
 type mcpIdentityKind int
 
 const (
-	// managedIdentity leaves MCP on the platform's own Keycloak: the values name no issuer, or the one of that
-	// Keycloak. No identity block is emitted.
+	// managedIdentity leaves MCP on the platform's own Keycloak: the mode is managed, or the values name no mode and
+	// no issuer, or the issuer is the one of that Keycloak. No identity block is emitted.
 	managedIdentity mcpIdentityKind = iota
-	// externalIdentity maps the values onto spec.mcp.identity: they name another issuer and turn MCP on.
+	// externalIdentity maps the values onto spec.mcp.identity: the mode is external, or the values name no mode and
+	// another issuer, and they turn MCP on.
 	externalIdentity
-	// deferredIdentity names another issuer while MCP is off. No identity block is emitted, and the values are
+	// deferredIdentity is an external identity while MCP is off. No identity block is emitted, and the values are
 	// reported.
 	deferredIdentity
 )
@@ -823,9 +830,9 @@ var mcpSecurityEnv = map[string]string{
 // mapMCP maps the umbrella's MCP values onto spec.mcp. The settings live under global.mcp. The
 // component's own values live under mcpServer: mapComponents has already filled its image,
 // replicas, resources and env through the component table, so what is read here is the access
-// level, the identity provider (mcpServer.security) and the resources the chart keeps under image.
-// The component table reads a top-level resources key, which the chart does not have, so the
-// chart's key wins when both are set.
+// level, the identity (the mode under global.mcp and the provider in mcpServer.security) and the
+// resources the chart keeps under image. The component table reads a top-level resources key, which
+// the chart does not have, so the chart's key wins when both are set.
 //
 // global.mcp.cimd.enabled is copied only when the values set it. The chart defaults it to true and
 // the Platform counts an unset value as true, so an absent value stays absent instead of becoming
@@ -845,7 +852,9 @@ func (r *Result) mapMCP(values vals, spec *otilmv1alpha1.PlatformSpec) {
 
 	enabled, _ := boolOf(mcp["enabled"])
 	spec.MCP.Enabled = enabled
-	kind := r.mapMCPIdentity(mapOf(server["security"]), enabled, spec)
+	mode := r.mcpIdentityMode(mapOf(mcp["identity"]))
+	kind := r.mapMCPIdentity(mapOf(server["security"]), mode, enabled, spec)
+	r.flagUnmappedMCPMode(mode, kind)
 	if cimd, ok := boolOf(mapOf(mcp["cimd"])["enabled"]); ok {
 		spec.MCP.CIMD.Enabled = ptrTo(cimd)
 	}
@@ -859,20 +868,59 @@ func (r *Result) mapMCP(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	r.flagUnmappedMCPServerKeys(server, kind)
 }
 
-// mapMCPIdentity maps mcpServer.security onto spec.mcp.identity and reports what it did. A set issuer
-// names an identity provider the platform does not manage, unless it is the platform's own Keycloak
-// (ownKeycloakIssuer), which stays on the managed identity with no identity block. Without an issuer there
-// is nothing to name the provider, so endpoints alone do not make an external identity. With MCP off the
-// provider is not mapped either (deferredIdentity).
+// mcpIdentityMode returns the mode in the identity block (global.mcp.identity.mode), managed or external, or "" when
+// the values name none: no key, or a null, which Helm reads as no value. Any other value is not a mode, and that
+// includes an empty string, map or list. It is reported with the allowed values and counts as none, so the issuer
+// decides, as it does with no mode.
+func (r *Result) mcpIdentityMode(identity vals) string {
+	value := identity["mode"]
+	if value == nil {
+		return ""
+	}
+	if mode := str(value); mode == modeManaged || mode == modeExternal {
+		return mode
+	}
+	r.flagMCPMode(mcpModeNote)
+	return ""
+}
+
+// flagMCPMode reports global.mcp.identity.mode with the reason the conversion does not use it.
+func (r *Result) flagMCPMode(reason string) {
+	r.unmapped = append(r.unmapped, "global.mcp.identity.mode ("+reason+")")
+}
+
+// flagUnmappedMCPMode reports an external mode when the Platform does not get the external identity it names, and
+// says why: an issuer on the platform's own Keycloak, which keeps the managed identity whether MCP is on or off, or,
+// with any other issuer, MCP being off.
+func (r *Result) flagUnmappedMCPMode(mode string, kind mcpIdentityKind) {
+	if mode != modeExternal {
+		return
+	}
+	switch kind {
+	case managedIdentity:
+		r.flagMCPMode(mcpOwnKeycloakNote)
+	case deferredIdentity:
+		r.flagMCPMode(mcpOffNote)
+	}
+}
+
+// mapMCPIdentity maps mcpServer.security onto spec.mcp.identity and reports what it did. The mode says which
+// identity the values describe: external takes the provider from mcpServer.security whether or not it names an
+// issuer, managed leaves MCP on the platform's own Keycloak whatever the issuer says, and with no mode a set issuer
+// names an identity provider the platform does not manage. An issuer on the platform's own Keycloak
+// (ownKeycloakIssuer) stays on the managed identity with no identity block, even with the mode external. With no
+// mode and no issuer there is nothing to name the provider, so endpoints alone do not make an external identity.
+// With MCP off the provider is not mapped either (deferredIdentity).
 //
 // With an external identity the Platform requires an issuer, a key-set and a token endpoint, a client, a
 // client secret reference and an exchange mode. An exchange mode the values leave unset is filled with
 // the MCP server's own default. Any other of them the values lack stays empty and is reported with the
-// Platform field to set: the converter never invents an endpoint, a client or a Secret name.
-func (r *Result) mapMCPIdentity(security vals, enabled bool, spec *otilmv1alpha1.PlatformSpec) mcpIdentityKind {
+// Platform field to set: the converter never invents an issuer, an endpoint, a client or a Secret name.
+func (r *Result) mapMCPIdentity(security vals, mode string, enabled bool, spec *otilmv1alpha1.PlatformSpec) mcpIdentityKind {
 	issuer := str(security["issuer"])
+	external := mode == modeExternal || (mode == "" && issuer != "")
 	switch {
-	case issuer == "" || ownKeycloakIssuer(spec, issuer):
+	case !external || ownKeycloakIssuer(spec, issuer):
 		return managedIdentity
 	case !enabled:
 		return deferredIdentity
@@ -897,6 +945,7 @@ func (r *Result) mapMCPIdentity(security vals, enabled bool, spec *otilmv1alpha1
 		r.customization = append(r.customization, mcpExchangeModeNote)
 	}
 	for _, required := range []struct{ field, valuesPath, value, what string }{
+		{"issuer", "mcpServer.security.issuer", identity.Issuer, "the identity provider's issuer, an https URL"},
 		{"jwkSetUri", "mcpServer.security.jwkSetUri", identity.JWKSetURI, "the identity provider's key-set endpoint"},
 		{"tokenUri", "mcpServer.security.tokenUri", identity.TokenURI, "the identity provider's token endpoint"},
 		{"clientId", "mcpServer.security.clientId", identity.ClientID, "the ID of MCP's client at the identity provider"},
