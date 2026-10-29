@@ -179,7 +179,6 @@ func mcpEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 		access = mcpDefaultAccess
 	}
 	idp := mcpIdentity(p)
-	apiURL := fmt.Sprintf("http://%s:%d%s", gatewayCoreHost, gatewayUpstreamPort, gatewayCoreAPIPath)
 
 	env := []common.EnvPair{
 		{Name: "SPRING_PROFILES_ACTIVE", Value: "http"},
@@ -188,7 +187,7 @@ func mcpEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 		{Name: "PORT", Value: strconv.Itoa(mcpPort)},
 		{Name: "MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED", Value: "true"},
 		{Name: "ILM_AUTH_METHOD", Value: "oauth-delegation"},
-		{Name: "ILM_API_URL", Value: apiURL},
+		{Name: "ILM_API_URL", Value: fmt.Sprintf("http://%s:%d%s", gatewayCoreHost, gatewayUpstreamPort, gatewayCoreAPIPath)},
 		{Name: "ILM_MCP_ACCESS", Value: access},
 		{Name: "ILM_MCP_TOOLSETS", Value: "all"},
 		{Name: "ILM_MCP_SECURITY_ENABLED", Value: "true"},
@@ -214,7 +213,10 @@ func mcpEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 		common.EnvPair{Name: "ILM_MCP_SECURITY_ALLOWED_ORIGINS", Value: ""},
 		common.EnvPair{Name: "ILM_MCP_SECURITY_JWS_ALGORITHMS", Value: "RS256"},
 	)
-	return append(env, outboundProxyEnv(p, w, plainHTTPHosts(apiURL, idp.JWKSetURI, idp.TokenURI)...)...)
+	// The Core API is always plain http to Core's Service, so that host bypasses the proxy; the key set
+	// and the token endpoint add theirs when they are plain http as well.
+	noProxyHosts := append([]string{gatewayCoreHost}, plainHTTPHosts(idp.JWKSetURI, idp.TokenURI)...)
+	return append(env, outboundProxyEnv(p, w, noProxyHosts...)...)
 }
 
 // plainHTTPHosts returns the host of each of the URLs that is an http URL, without its port. An https
