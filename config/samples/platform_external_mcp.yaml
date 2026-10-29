@@ -38,10 +38,10 @@
 #     --from-literal=username=ilm --from-literal=password=<broker-password>          # keys: username, password
 #   kubectl create secret generic mcp-idp-client -n ilm \
 #     --from-literal=client-secret=<mcp-client-secret>                               # key: client-secret
-# The last one holds MCP's client secret at the identity provider. Do not name it
-# <platform>-mcp-client (ilm-mcp-client here): the operator owns that name for the managed
-# identity. Until the Secret exists, MCPConfigured is False/MissingSecret and the mcp-server pod
-# waits for it.
+# The last one holds MCP's client secret at the identity provider. Admission rejects the name
+# <platform>-mcp-client (ilm-mcp-client here), which the operator owns for the managed identity.
+# Until the Secret exists, MCPConfigured is False/MissingSecret and the mcp-server pod waits
+# for it.
 #
 # WHAT THE OPERATOR ADDS FOR MCP
 #   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp and

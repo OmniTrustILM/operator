@@ -62,6 +62,14 @@ const (
 	testMCPOwnKeycloakRejection      = "identity.mode external needs a provider the platform does not manage; use identity.mode managed for the platform's Keycloak"
 	testMCPSecretNameRejection       = "clientSecretRef must be a Secret name: lowercase letters, digits, '-' and '.', each part starting and ending with a letter or digit"
 	testMCPSecretKeyRejection        = "clientSecretKey must be a Secret key: letters, digits, '-', '_' and '.', never '.' alone or starting with '..'"
+	// testMCPOwnedSecretRejection is the message of the rule on Platform itself that keeps an external
+	// identity off <platform>-mcp-client, the Secret the operator owns for the managed identity. The specs
+	// create a platform named ilm, whose Secret is testMCPOwnedSecretName. testMCPOtherPlatform is another
+	// platform's name, and testMCPOtherSecretName its Secret.
+	testMCPOwnedSecretRejection = "identity.clientSecretRef must not name <platform>-mcp-client, the Secret the operator owns for the managed identity"
+	testMCPOwnedSecretName      = "ilm-mcp-client"
+	testMCPOtherPlatform        = "other"
+	testMCPOtherSecretName      = testMCPOtherPlatform + "-mcp-client"
 	// testMCPUnsupportedRejection, testMCPTooLongRejection and testMCPTooManyRejection are the fragments
 	// the apiserver includes when a value is not in its enum, a string outgrows its length or a list
 	// outgrows its item count.
@@ -1568,6 +1576,23 @@ var _ = Describe("Platform CEL validation", func() {
 					p.Spec.MCP.Identity.Issuer = testHTTPSScheme + testMCPIdentityEdgeHost + ".idp.test/kc/realms/corp"
 				}},
 
+				// The operator relays <platform>-mcp-client for the managed identity and prunes it once the
+				// platform leaves that identity, so an external identity may not read it. Only that exact name
+				// is the operator's: a longer one, and the Secret of another platform, are not.
+				{name: "an external identity that reads the Secret the operator owns for the managed identity",
+					edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretRef = testMCPOwnedSecretName }),
+					reject: testMCPOwnedSecretRejection},
+				{name: "an external identity that reads the Secret the operator owns, on a platform that is not named ilm",
+					edit: func(p *otilmv1alpha1.Platform) {
+						p.Name = testMCPOtherPlatform
+						p.Spec.MCP.Identity.ClientSecretRef = testMCPOtherSecretName
+					},
+					reject: testMCPOwnedSecretRejection},
+				{name: "an external identity that reads a Secret whose name only begins with the operator's",
+					edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretRef = testMCPOwnedSecretName + "-x" })},
+				{name: "an external identity that reads the Secret the operator owns for another platform",
+					edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretRef = testMCPOtherSecretName })},
+
 				// Schema bounds beyond the lengths: the enums and the one list.
 				{name: "an unknown identity mode", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.Mode = "other" }),
 					reject: testMCPUnsupportedRejection},
@@ -1682,6 +1707,36 @@ var _ = Describe("Platform CEL validation", func() {
 				Expect(err).To(HaveOccurred())
 				Expect(err.Error()).To(ContainSubstring(testMCPIdentityManagedRejection))
 				Expect(err.Error()).NotTo(ContainSubstring(testMCPOwnKeycloakRejection))
+			})
+
+			// The switch from the managed identity is where the Secret would be lost: the operator has relayed
+			// <platform>-mcp-client for that identity, and an external one that read it would find it pruned.
+			// Admission refuses the switch on update as on create. A merge patch carries no resourceVersion,
+			// so the reconciler's own writes never turn the refusal into a conflict.
+			It("rejects switching a managed identity to an external one that reads the Secret the operator owns", func() {
+				ns := freshNS("cel-mcp-id-switch")
+				Expect(k8sClient.Create(ctx, mcpPlatform(ns))).To(Succeed())
+				managedPlatform := &otilmv1alpha1.Platform{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ilm"}, managedPlatform)).To(Succeed())
+				switchTo := func(secretRef string) error {
+					p := managedPlatform.DeepCopy()
+					p.Spec.MCP.Identity = externalPlatform(ns).Spec.MCP.Identity
+					p.Spec.MCP.Identity.ClientSecretRef = secretRef
+					return k8sClient.Patch(ctx, p, client.MergeFrom(managedPlatform))
+				}
+
+				err := switchTo(testMCPOwnedSecretName)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(testMCPOwnedSecretRejection))
+				Expect(switchTo(testMCPIdentitySecretRef)).To(Succeed())
+			})
+			// That rule sits on the Platform itself, where spec is optional, so it must not fail by erroring on a
+			// Platform that has none.
+			It("accepts a Platform that has no spec", func() {
+				u := onTheWire(externalPlatform(freshNS("cel-mcp-id-nospec")), func(obj map[string]interface{}) {
+					unstructured.RemoveNestedField(obj, "spec")
+				})
+				Expect(k8sClient.Create(ctx, u, client.DryRunAll)).To(Succeed())
 			})
 
 			// The typed client omits an empty string and always sends the common and mcp blocks, so a setting

@@ -1036,6 +1036,7 @@ Admission rejects a block that does not fit, with these messages:
 | An `issuer` that is not an https URL, or has userinfo, a query or a fragment | `issuer must be an https URL without userinfo, query or fragment` |
 | A `jwkSetUri` or `tokenUri` that is not an https URL or an in-cluster http URL, or has userinfo, a fragment or whitespace | `jwkSetUri and tokenUri may use http only for a Kubernetes Service host (.svc), and take no userinfo, fragment or whitespace` |
 | A `clientSecretRef` that is not a Secret name | `clientSecretRef must be a Secret name: lowercase letters, digits, '-' and '.', each part starting and ending with a letter or digit` |
+| A `clientSecretRef` that names `<platform>-mcp-client`, the Secret the operator owns for the managed identity | `identity.clientSecretRef must not name <platform>-mcp-client, the Secret the operator owns for the managed identity` |
 | A `clientSecretKey` that is not a Secret key | `clientSecretKey must be a Secret key: letters, digits, '-', '_' and '.', never '.' alone or starting with '..'` |
 | `delegation.group` | `mcp.delegation.group is used only with identity.mode managed` |
 | An `issuer` under `https://<host>/kc/`, where the platform's managed Keycloak is served, whatever the case of the host and with or without the port `443` | `identity.mode external needs a provider the platform does not manage; use identity.mode managed for the platform's Keycloak` |
@@ -1044,7 +1045,7 @@ Admission rejects a block that does not fit, with these messages:
 
 **Settings the Platform has no field for.** Set them in `spec.mcp.env`, which overrides what the operator renders: `ILM_MCP_SECURITY_ALLOWED_ORIGINS`, the browser origins allowed to call MCP (rendered empty, so none), and `ILM_MCP_SECURITY_JWS_ALGORITHMS`, the signature algorithms MCP accepts (rendered as `RS256`).
 
-**The client secret.** Create the Secret in the Platform's namespace, with the secret under `client-secret` or the key you name in `clientSecretKey`. The operator never writes it, and a change to it rolls the MCP pod. Until it exists, `MCPConfigured` reports `False/MissingSecret`. Do not name it `<platform>-mcp-client`: the operator owns that name with the managed identity, and its prune removes the relayed Secret when a platform switches to an external identity.
+**The client secret.** Create the Secret in the Platform's namespace, with the secret under `client-secret` or the key you name in `clientSecretKey`. The operator never writes it, and a change to it rolls the MCP pod. Until it exists, `MCPConfigured` reports `False/MissingSecret`. Admission rejects the name `<platform>-mcp-client`, which the operator owns for the managed identity.
 
 **Switching.** Moving a platform from the managed identity to an external one removes the `mcp-cimd` client policy and profile from the realm, drops the Keycloak features, clears `allowedDelegates`, and lets the prune remove `<platform>-mcp-client`. Like turning MCP off, it restarts the managed Keycloak, because MCP's features leave its `Keycloak` resource, and Core, because its registration script no longer lists the delegate. MCP's other Keycloak objects stay in the realm, as they do when you turn MCP off. To switch back, set `mode: managed` and remove the other identity settings, which the managed identity rejects.
 
