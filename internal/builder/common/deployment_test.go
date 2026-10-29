@@ -388,11 +388,11 @@ func TestBuildDeploymentFieldRefEnv(t *testing.T) {
 	assert.Empty(t, fr.Value, "fieldRef must not inline a value")
 }
 
-// TestBuildContainerEnvLeavesEachNameOnce asserts that a name rendered by more than one source is left
-// once, as its last entry and in that entry's place, and that every other entry keeps its order. The
-// operator applies Deployments server-side, and the apiserver refuses an applied container env that
-// names a variable twice; the last entry is the one the kubelet would have used.
-func TestBuildContainerEnvLeavesEachNameOnce(t *testing.T) {
+// TestBuildContainerEnvUniqueEnvNames asserts what UniqueEnvNames switches. Set, a name rendered by more
+// than one source is left once, as its last entry and in that entry's place, and every other entry keeps
+// its order: a server-side apply refuses a container env that names a variable twice, and the last entry
+// is the one the kubelet would have used. Unset, every entry stays, in the order of its source.
+func TestBuildContainerEnvUniqueEnvNames(t *testing.T) {
 	const podNamespace = "metadata.namespace"
 	inline := func(name, value string) corev1.EnvVar { return corev1.EnvVar{Name: name, Value: value} }
 	secretRef := func(name, secret string) corev1.EnvVar {
@@ -460,9 +460,27 @@ func TestBuildContainerEnvLeavesEachNameOnce(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.c.UniqueEnvNames = true
 			assert.Equal(t, tt.want, buildContainerEnv(tt.c))
 		})
 	}
+
+	// A workload applied with CreateOrUpdate accepts a duplicate name, and Kubernetes expands a $(VAR)
+	// reference in list order: B reads the first A here, which dropping that entry would break.
+	t.Run("without UniqueEnvNames every entry stays, in the order of its source", func(t *testing.T) {
+		c := Component{
+			Env:          []EnvPair{{Name: "A", Value: "1"}, {Name: "B", Value: "$(A)"}, {Name: "A", Value: "2"}},
+			SecretEnv:    []SecretEnvRef{{EnvVar: "A", SecretName: "s", SecretKey: "k"}},
+			ConfigMapEnv: []ConfigMapEnvRef{{EnvVar: "A", ConfigMapName: "c", ConfigMapKey: "k"}},
+			ExtraEnv:     []corev1.EnvVar{secretRef("A", "x")},
+			FieldRefEnv:  []FieldRefEnv{{EnvVar: "A", FieldPath: podNamespace}},
+		}
+		want := []corev1.EnvVar{
+			inline("A", "1"), inline("B", "$(A)"), inline("A", "2"),
+			secretRef("A", "s"), configMapRef("A", "c"), secretRef("A", "x"), fieldRef("A"),
+		}
+		assert.Equal(t, want, buildContainerEnv(c))
+	})
 }
 
 // TestBuildDeploymentLifecycleCommandArgsAdditionalPorts asserts that Lifecycle,

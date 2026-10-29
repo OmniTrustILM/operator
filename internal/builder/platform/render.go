@@ -154,6 +154,8 @@ func ResolvePlatformServiceMonitors(p *otilmv1alpha1.Platform) []client.Object {
 // brief outage across the switch. The switch is REFUSED outright while a messaging migration is
 // recorded — the fence and the switch move the same workloads and cannot see each other.
 func buildWorkload(c common.Component) client.Object {
+	// The controller applies every workload server-side, which rejects a duplicate env name.
+	c.UniqueEnvNames = true
 	if c.WorkloadType == otilmv1alpha1.WorkloadKindStatefulSet {
 		return common.BuildStatefulSet(c)
 	}

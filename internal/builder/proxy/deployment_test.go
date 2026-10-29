@@ -125,6 +125,29 @@ func TestBuildDeploymentChecksumAndPodMeta(t *testing.T) {
 	assert.Equal(t, ChildResourceName(px), tpl.Spec.ServiceAccountName)
 }
 
+// TestBuildDeploymentKeepsDuplicateEnvNames asserts that every user env entry renders, in order, when
+// two of them share a name. The Proxy controller applies its Deployment with CreateOrUpdate, which
+// accepts a duplicate name, and Kubernetes expands $(VAR) references in list order: B reads "one"
+// here, where dropping the first A would leave B before any A and give it the literal "$(A)".
+func TestBuildDeploymentKeepsDuplicateEnvNames(t *testing.T) {
+	px := newProxy()
+	px.Spec.Env = []otilmv1alpha1.EnvVar{
+		{Name: "A", Value: "one"},
+		{Name: "B", Value: "$(A)"},
+		{Name: "A", Value: "two"},
+	}
+	want := []corev1.EnvVar{
+		{Name: "A", Value: "one"},
+		{Name: "B", Value: "$(A)"},
+		{Name: "A", Value: "two"},
+	}
+
+	env := BuildDeployment(px, "x").Spec.Template.Spec.Containers[0].Env
+
+	require.Len(t, env, len(want)+2, "the user entries, then the two token references")
+	assert.Equal(t, want, env[:len(want)])
+}
+
 func TestBuildDeploymentReservedEnvCannotBeOverridden(t *testing.T) {
 	px := newProxy()
 	px.Spec.Env = []otilmv1alpha1.EnvVar{

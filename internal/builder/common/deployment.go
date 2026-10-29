@@ -118,11 +118,8 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 }
 
 // buildContainerEnv builds the main container's env in order: inline, secretKeyRef,
-// configMapKeyRef, ExtraEnv, then fieldRef. A name that more than one source renders is left
-// once, as its LAST entry: the operator applies Deployments server-side, and the apiserver
-// refuses an applied container env that names a variable twice. The last entry is the one
-// Kubernetes would have used for a duplicate, so that order IS the precedence, and it encodes
-// two rules:
+// configMapKeyRef, ExtraEnv, then fieldRef. Kubernetes resolves a duplicate env name to the
+// LAST entry in the list, so that order IS the precedence, and it encodes two rules:
 //
 //   - ExtraEnv wins over the operator's own Env/SecretEnv/ConfigMapEnv. It is the passthrough
 //     slot for user-supplied keyed Secret/ConfigMap refs, and overriding an operator default
@@ -135,6 +132,9 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 //     otherwise hand every replica one shared id, silently, and duplicate serials are not a
 //     failure the platform can detect afterwards. A user who genuinely wants to supply the id
 //     sets spec.core.instanceId, which is validated against multi-replica core.
+//
+// With Component.UniqueEnvNames only the last entry of each name is rendered, in its own place,
+// as a server-side apply rejects a duplicate. Without it every entry stays, in order.
 //
 // An env entry whose NAME is empty is omitted. A version's wiring profile leaves an
 // env-var name empty to OMIT that variable for that platform version (data-driven
@@ -192,7 +192,10 @@ func buildContainerEnv(c Component) []corev1.EnvVar {
 			},
 		})
 	}
-	return keepLastOfEachName(env)
+	if c.UniqueEnvNames {
+		return keepLastOfEachName(env)
+	}
+	return env
 }
 
 // keepLastOfEachName drops every entry that a later entry of the same name overrides. The entries
