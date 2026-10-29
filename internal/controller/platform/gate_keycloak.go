@@ -268,12 +268,13 @@ var keycloakFeaturesPath = []string{"spec", "features", "enabled"}
 // sign-in, token request and admin client update in the realm with HTTP 500; removing mcp-cimd
 // while the feature is still on avoids that.
 //
-// So when the live CR enables cimd and the rendered one does not (CIMD switched off, or MCP turned
-// off), the guard first removes mcp-cimd through the admin API. Until that succeeds it puts cimd
-// back on the rendered CR and returns hold=true, so the gate applies the CR with cimd and requeues:
-// a Keycloak that is not Ready, missing admin credentials and a failed call all hold. Readiness
-// comes from the live CR the guard has just read, not from KeycloakReady: before the apply that
-// condition is the previous pass's verdict, and a missing realm-import ConfigMap also turns it
+// So when the live CR enables cimd and the rendered one does not (CIMD switched off, MCP turned
+// off, or MCP switched to an external identity, which prepares nothing in Keycloak and so renders no
+// MCP features), the guard first removes mcp-cimd through the admin API. Until that succeeds it puts
+// cimd back on the rendered CR and returns hold=true, so the gate applies the CR with cimd and
+// requeues: a Keycloak that is not Ready, missing admin credentials and a failed call all hold.
+// Readiness comes from the live CR the guard has just read, not from KeycloakReady: before the apply
+// that condition is the previous pass's verdict, and a missing realm-import ConfigMap also turns it
 // False.
 //
 // An error means the gate must apply nothing: the live CR could not be read, so whether cimd is

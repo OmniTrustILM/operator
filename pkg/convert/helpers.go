@@ -8,6 +8,8 @@ package convert
 
 import (
 	"math"
+	"strings"
+	"unicode"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -115,6 +117,18 @@ func isEmpty(v interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// commentText returns s for a comment line of the output. Every line break and other control character
+// becomes a space, so text taken from the values, such as a key, cannot end the comment and start a line of
+// its own. The line and paragraph separators count as line breaks: a YAML parser ends a comment at them.
+func commentText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.In(r, unicode.Cc, unicode.Zl, unicode.Zp) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // ptrTo returns a pointer to v, for setting optional pointer CR fields.

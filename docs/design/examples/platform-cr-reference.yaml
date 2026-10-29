@@ -49,10 +49,11 @@ spec:
   # [IMPLEMENTED] platform-wide
   deletionPolicy: Retain               # Retain (default) | Delete
 
-  # [IMPLEMENTED] common — the ONE place for everything that applies to EVERY component:
-  # shared image defaults, the canonical public hostName, outbound proxy, log level, the
-  # trusted-CA bundle, and the fleet-wide pod-template passthrough (init/sidecar containers,
-  # volumes, ports, envFrom). Each component's own block overrides/augments what is set here.
+  # [IMPLEMENTED] common — the ONE place for what is shared across components: shared image
+  # defaults, the canonical public hostName, log level and the fleet-wide pod-template
+  # passthrough (init/sidecar containers, volumes, ports, envFrom), which apply to EVERY
+  # component, plus the outbound proxy and the trusted-CA bundle, which only some components
+  # read. Each component's own block overrides/augments what is set here.
   # No secret VALUES live here — references only. (This consolidates what used to be the
   # root image/proxy/logging/trustedCertificates scalars + the old `global` passthrough.)
   common:
@@ -79,8 +80,17 @@ spec:
       command: []                      # overrides the image ENTRYPOINT (rarely needed)
       args: []                         # overrides the image CMD
     logging: { level: INFO, format: ecs }   # format: text | ecs | logstash (2.20.0+); omit for Core's default
-    # trustedCertificates.caKey is the optional in-Secret key override (default "ca.crt").
+    # trustedCertificates is read by Core and the MCP server (TRUSTED_CERTIFICATES) and mounted by
+    # auth at /etc/ssl/certs; no other component reads it. caKey is the optional in-Secret key
+    # override (default "ca.crt").
     trustedCertificates: { secretRef: ilm-trusted-ca, caKey: ca.crt }
+    # proxy is read by Core and the MCP server only: http/https/noProxy become HTTP_PROXY,
+    # HTTPS_PROXY and NO_PROXY when set (enabled sets Core's PROXY_ENABLED). noProxy is read as
+    # Java's http.nonProxyHosts: whole host names, "," or "|" between them, and a "*" at the start
+    # or end of an entry is a wildcard, so "*.svc", never ".svc". List the in-cluster hosts Core
+    # calls by a bare name (auth, scheduler, a managed Keycloak's Service), e.g.
+    # "auth,scheduler,*.svc,*.cluster.local,localhost". While a proxy URL is set, the operator adds
+    # MCP's own plain-http hosts to MCP's NO_PROXY.
     proxy: { enabled: false, http: "", https: "", noProxy: "" }
     # fleet-wide pod-template passthrough applied to EVERY component, merged BEFORE each
     # component's own override (a per-component override layers on top). Use it for
@@ -262,13 +272,33 @@ spec:
   # [IMPLEMENTED] optional MCP server (plus the per-component override surface inline) — lets an
   # MCP client such as Claude Code work with ILM on behalf of the signed-in user. OFF and read-only
   # by default; it renders only for a platform version whose bundle carries the MCP server image
-  # (2.21.0 and later). Enabling it needs a managed Keycloak and a public host, which
-  # admission checks.
+  # (2.21.0 and later). Enabling it needs a public host and either a managed Keycloak (the default
+  # identity, which the operator prepares for MCP) or identity.mode external (a provider you run),
+  # which admission checks.
   mcp:
     enabled: false                     # default false
     access: read-only                  # read-only (default) | read-write | full — the tools MCP offers
-    cimd: { enabled: true }            # default true: clients sign in with a client ID metadata document (Keycloak's cimd feature)
-    delegation: { group: "" }          # empty (default): MCP may act for every realm user; a name: only for that Keycloak group's members (no "/")
+    # identity — the provider MCP signs its users in through. With mode external the provider must
+    # support RFC 8693 token exchange, and ILM needs an OAuth2 provider for the issuer (with
+    # exchangeMode delegation it must list clientId in allowedDelegates, delegateClaim client_id,
+    # Core 2.21 or later). The operator writes nothing to the provider.
+    identity:
+      mode: managed                    # managed (default): the platform's own Keycloak | external
+      # The rest is for mode external. issuer through exchangeMode are required with it, and mode managed rejects
+      # them all.
+      issuer: ""                       # https URL, no userinfo, query or fragment: exactly the issuer in the provider's tokens
+      jwkSetUri: ""                    # the provider's signing keys: https, or http only for a <service>.<namespace>.svc host
+      tokenUri: ""                     # the provider's token endpoint: the same URL rule
+      clientId: ""                     # the client registered for MCP at the provider
+      clientSecretRef: ""              # name of a Secret in the Platform's namespace holding that client's secret (never <platform>-mcp-client)
+      exchangeMode: standard           # standard | delegation: delegation also names MCP as the actor in act.client_id
+      clientSecretKey: client-secret   # optional: the key in that Secret (default client-secret)
+      exchangeScope: ""                # optional: scopes MCP asks for in the exchange, space-separated (empty: the provider's defaults)
+      requiredScope: ""                # optional: the scope a user's token must carry (empty: mcp:access)
+      authorizationScopes: []          # optional: scopes besides requiredScope that MCP advertises to its clients
+      apiAudience: ""                  # optional: the audience of the exchanged token (empty: ilm)
+    cimd: { enabled: true }            # default true: clients sign in with a client ID metadata document (Keycloak's cimd feature); managed identity only
+    delegation: { group: "" }          # empty (default): MCP may act for every realm user; a name: only for that Keycloak group's members (no "/"); managed identity only
 
   # [IMPLEMENTED] ILM Core. Carries the shared per-component override surface (see the note
   # below) PLUS the Core-only wiring field clientCertHeader. (Provisioning is a platform-

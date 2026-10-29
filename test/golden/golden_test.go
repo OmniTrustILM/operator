@@ -16,10 +16,10 @@ SPDX-License-Identifier: Apache-2.0
 // pairing a variant name with the Platform CR that enables its feature set. The variant
 // set covers the breadth the project ships: the minimal smoke, the three cert-managed /
 // BYO edge modes (internal CA chain, ACME / letsEncrypt, bring-your-own TLS Secret), the
-// Gateway API edge, the utils on/off toggle, the MCP server on a managed Keycloak, external
-// messaging, the gateway cors / request-logging / management-UI options, and the managed
-// CloudNativePG database with the default-on pooler and with the pooler opted out
-// (direct-connection wiring).
+// Gateway API edge, the utils on/off toggle, the MCP server on a managed Keycloak and with an
+// external identity provider, external messaging, the gateway cors / request-logging /
+// management-UI options, and the managed CloudNativePG database with the default-on pooler and
+// with the pooler opted out (direct-connection wiring).
 //
 // RenderPlatform does not return the managed Keycloak objects, which the controller applies
 // through its own gate. TestGoldenManagedKeycloakResolved snapshots them for one variant in the
@@ -168,6 +168,7 @@ func variants() []variant {
 		edgeGatewayAPIVariant(),
 		utilsOnVariant(),
 		mcpOnVariant(),
+		mcpExternalVariant(),
 		managedKeycloakVariant(),
 		externalMessagingVariant(),
 		gatewayOptionsVariant(),
@@ -263,6 +264,28 @@ func mcpOnVariant() variant {
 	}
 	spec.MCP = otilmv1alpha1.MCPSpec{Enabled: true}
 	return variant{name: "mcp-on", platform: platformFor(spec)}
+}
+
+// mcpExternalVariant: mcp-on's platform with MCP signing its users in through an identity provider the
+// platform does not manage, while the managed Keycloak keeps serving ILM's own sign-in, and with the
+// outbound proxy set. Its diff against mcp-on's golden is the whole rendered delta: MCP's identity
+// variables and client secret reference, the proxy variables Core and MCP both get, and the MCP
+// delegate that Core's internal provider no longer lists.
+func mcpExternalVariant() variant {
+	p := mcpOnVariant().platform
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{
+		HTTP: "http://proxy.example.com:3128", HTTPS: "http://proxy.example.com:3128", NoProxy: "localhost,core,*.svc",
+	}
+	p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{
+		Mode:            "external",
+		Issuer:          "https://idp.example.com/realms/corp",
+		JWKSetURI:       "http://kc.idp.svc:8080/realms/corp/protocol/openid-connect/certs",
+		TokenURI:        "http://kc.idp.svc:8080/realms/corp/protocol/openid-connect/token",
+		ClientID:        "corp-mcp",
+		ClientSecretRef: "mcp-idp-client",
+		ExchangeMode:    "delegation",
+	}
+	return variant{name: "mcp-external", platform: p}
 }
 
 // managedKeycloakVariant: a managed Keycloak behind a public host, MCP left off, on the released

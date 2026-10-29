@@ -24,7 +24,7 @@ The fields on `spec` itself; [How configuration is organized](./platform.md#how-
 | `provisioning` | `external` | Remote-proxy provisioning wiring; `deploy` renders the bundled service. |
 | `auth` | — | Auth overrides, plus `create.createUnknownUsers`/`createUnknownRoles` (both `false`; `registerAdmin.password` turns `createUnknownUsers` on) and `syncPolicy` (`create-only`). |
 | `scheduler` / `authOpaPolicies` / `feAdministrator` / `utils` / `gateway` | — | Component overrides. `utils.enabled` is opt-in; `gateway` adds `cors`, `logging.request`, and `trustedIps`; `feAdministrator` adds `url`. |
-| `mcp` | off | The optional MCP server, for platform versions whose bundle carries its image (2.21.0 and later), plus the shared component overrides. `enabled` (default `false`) turns it on, and `access` sets the tools it offers: `read-only` (default), `read-write`, or `full`. `cimd.enabled` (default `true`) lets clients sign in with a client ID metadata document, and `delegation.group` limits whom MCP may act for to the members of one Keycloak group instead of every user. See [MCP server](./platform.md#mcp-server) for what admission requires. |
+| `mcp` | off | The optional MCP server, for platform versions whose bundle carries its image (2.21.0 and later), plus the shared component overrides. `enabled` (default `false`) turns it on, and `access` sets the tools it offers: `read-only` (default), `read-write`, or `full`. `identity.mode` selects the provider MCP signs its users in through: `managed` (default) is the platform's own Keycloak, and `external` is a provider you run, which takes `issuer`, `jwkSetUri`, `tokenUri`, `clientId`, `clientSecretRef`, `exchangeMode`, and the optional `clientSecretKey`, `exchangeScope`, `requiredScope`, `authorizationScopes`, and `apiAudience`. With the managed identity, `cimd.enabled` (default `true`) lets clients sign in with a client ID metadata document, and `delegation.group` limits whom MCP may act for to the members of one Keycloak group instead of every user; an external identity ignores the first and rejects the second. See [MCP server](./platform.md#mcp-server) for what admission requires. |
 | `edge` | none | The external HTTPS edge — Ingress or Gateway API, plus TLS. |
 | `registerAdmin` | off | First-administrator bootstrap, by certificate and/or password. Both methods are walked through in [Read back the generated credentials](./platform.md#read-back-the-generated-credentials). |
 | `deletionPolicy` | `Retain` | Managed-infrastructure deletion behavior; `Delete` reclaims it. |
@@ -33,16 +33,16 @@ The gateway's three knobs are worth spelling out, since they are easy to miss: `
 
 ## `spec.common.*`
 
-Fleet-wide configuration, applied to every component. [Cross-component configuration](./platform.md#cross-component-configuration-speccommon) explains the placement rule and the precedence between `common` and a component's own block.
+Fleet-wide configuration, applied to every component except `proxy` and `trustedCertificates`, which only the components named in their rows read. [Cross-component configuration](./platform.md#cross-component-configuration-speccommon) explains the placement rule and the precedence between `common` and a component's own block.
 
 | Field | Purpose |
 |---|---|
 | `image` | The shared image — registry, repository, name, tag, digest, pullPolicy (default `IfNotPresent`), pullSecrets, command, args — for all components. |
 | `hostName` | The canonical public FQDN: the edge host, Keycloak's `KC_HOSTNAME`, the OIDC URIs, and the CORS origin. |
-| `proxy` | The outbound HTTP(S) proxy for all components: `enabled` sets `PROXY_ENABLED`, and `http`, `https`, and `noProxy` are injected only when non-empty. |
+| `proxy` | The outbound HTTP(S) proxy of Core and the MCP server: `enabled` sets Core's `PROXY_ENABLED`, and `http`, `https`, and `noProxy` are injected into both as `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` only when non-empty. Both read `NO_PROXY` as Java's `http.nonProxyHosts`: write `*.svc`, because `.svc` matches nothing, and list the in-cluster hosts Core calls by a bare name, such as `auth` and `scheduler`. While a proxy URL is set, the operator adds the hosts of MCP's own plain-http URLs to MCP's `NO_PROXY`. |
 | `logging.level` | The platform log level (default `INFO`). |
 | `logging.format` | Core's console log format: `text`, or one JSON object per line with `ecs` or `logstash`. Unset leaves Core's default (`text`). Renders on 2.20.0 and later only. |
-| `trustedCertificates` | The CA bundle, by `secretRef` plus an optional `caKey`. |
+| `trustedCertificates` | The CA bundle of Core and the MCP server (`TRUSTED_CERTIFICATES`) and of auth (a volume at `/etc/ssl/certs`), by `secretRef` plus an optional `caKey`. |
 | `initContainers` / `sidecars` / `volumes` / `volumeMounts` / `additionalPorts` | Fleet-wide pod-template passthrough, SCC-hardened. |
 | `additionalEnvFrom` | Whole-Secret and whole-ConfigMap `envFrom` — names only, never values. |
 | `nodeSelector` / `affinity` / `tolerations` | Fleet-wide scheduling for all stateless components. A component's own merges (`nodeSelector`), appends (`tolerations`), or replaces (`affinity`, which also beats the HA default). Managed infrastructure is scheduled through each block's `overrides`. |

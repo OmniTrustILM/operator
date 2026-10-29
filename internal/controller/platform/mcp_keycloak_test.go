@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -68,10 +69,43 @@ func featuresOverride(features ...string) *runtime.RawExtension {
 	return &runtime.RawExtension{Raw: raw}
 }
 
-// cimdOff and mcpOff are the two spec changes that take the cimd feature off the Keycloak CR.
+// cimdOff, mcpOff and externalIdentity are spec changes that take the cimd feature off the
+// Keycloak CR: the last moves MCP to an identity provider the platform does not manage, with the
+// settings that mode requires.
 func cimdOff(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = ptr(false) }
 
 func mcpOff(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }
+
+func externalIdentity(p *otilmv1alpha1.Platform) {
+	p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{
+		Mode: "external", Issuer: testMCPIdPIssuer, JWKSetURI: testMCPIdPJWKS, TokenURI: testMCPIdPToken,
+		ClientID: "corp-mcp", ClientSecretRef: testMCPIdPSecret, ExchangeMode: "delegation",
+	}
+}
+
+// mcpExternalPlatform is mcpKeycloakPlatform with MCP signing in through an external identity
+// provider. mutate, when set, runs last.
+func mcpExternalPlatform(mutate func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform {
+	return mcpKeycloakPlatform(func(p *otilmv1alpha1.Platform) {
+		externalIdentity(p)
+		if mutate != nil {
+			mutate(p)
+		}
+	})
+}
+
+// idpClientSecret is the Secret an external identity's client secret is read from: the one the spec
+// references, holding data.
+func idpClientSecret(p *otilmv1alpha1.Platform, data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: p.Spec.MCP.Identity.ClientSecretRef, Namespace: p.Namespace},
+		Data:       data,
+	}
+}
+
+func idpSecretData(key string) map[string][]byte {
+	return map[string][]byte{key: []byte(testMCPIdPSecretValue)}
+}
 
 func mcpConfiguredCondition(p *otilmv1alpha1.Platform) *metav1.Condition {
 	return meta.FindStatusCondition(p.Status.Conditions, conditionMCPConfigured)
@@ -210,7 +244,7 @@ func TestReconcileMCPKeycloakWaitsForKeycloak(t *testing.T) {
 		adminSecret bool
 		wantMessage string
 	}{
-		{name: "Keycloak is not ready", adminSecret: true, wantMessage: "waiting for the managed Keycloak to become ready"},
+		{name: testKeycloakNotReady, adminSecret: true, wantMessage: "waiting for the managed Keycloak to become ready"},
 		{name: "the admin credentials are missing", ready: true, wantMessage: "waiting for the Keycloak admin credentials"},
 	}
 	for _, tt := range tests {
@@ -455,15 +489,172 @@ func TestReconcileMCPKeycloakRemovesTheConditionWhenOff(t *testing.T) {
 	assert.Nil(t, secret, "the prune reclaims the MCP client Secret")
 }
 
-// TestMCPChecksumRollsTheDeployment: a pass stamps the relayed MCP client Secret's checksum on the
-// mcp-server Deployment, so relaying a different secret rolls it, while Core and the gateway ignore
-// that Secret. Before the Secret exists, or with MCP off, there is nothing to stamp.
-func TestMCPChecksumRollsTheDeployment(t *testing.T) {
+// TestReconcileMCPExternalNeverCallsTheRegistrar: with an external identity the operator writes
+// nothing to Keycloak, in whatever state Keycloak is. The step makes no realm pass and no mcp-cimd
+// removal, does not wait for Keycloak, and keeps no MCP client Secret desired, so the prune reclaims
+// the one that managed mode relayed. The Secret the spec references is not the operator's and stays.
+func TestReconcileMCPExternalNeverCallsTheRegistrar(t *testing.T) {
+	tests := []struct {
+		name  string
+		ready bool
+	}{
+		{name: "Keycloak is Ready and its admin credentials exist", ready: true},
+		{name: testKeycloakNotReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			p := mcpExternalPlatform(nil)
+			if tt.ready {
+				withKeycloakReady(p)
+			}
+			reg := &localOIDCFake{mcpSecret: testMCPClientSecretValue}
+			referenced := idpClientSecret(p, idpSecretData(testMCPIdPSecretKey))
+			r := newOIDCPruneReconciler(t, reg, p, keycloakAdminSecret(p), ownedMCPSecret(p), referenced)
+			desired := newDesiredSet()
+
+			assert.False(t, r.reconcileMCPKeycloak(ctx, p, desired), "nothing to wait for")
+
+			assert.Empty(t, reg.mcpCallList(), "no realm pass")
+			assert.Zero(t, reg.removeCIMDCount(), "no mcp-cimd removal")
+			cond := mcpConfiguredCondition(p)
+			require.NotNil(t, cond)
+			assert.Equal(t, reasonMCPExternal, cond.Reason, "an external identity does not wait for Keycloak")
+			assert.False(t, desired.has(mcpClientSecretKey(r, p)), "the relayed Secret is not desired")
+
+			require.NoError(t, r.pruneOrphans(ctx, p, desired))
+			relayed, _ := readMCPClientSecret(t, r, p)
+			assert.Nil(t, relayed, "the prune reclaims the Secret managed mode relayed")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(referenced), &corev1.Secret{}),
+				"the prune leaves the Secret the spec references")
+		})
+	}
+}
+
+// TestReconcileMCPExternalReportsTheSecret: MCPConfigured follows the Secret the MCP Deployment reads
+// its client secret from. It is True with reason External while the Secret holds a value under the
+// key, and False with reason MissingSecret, naming the Secret and the key, when the Secret does not
+// exist or has no value there. The step needs no requeue, the platform stays out of Degraded, and
+// neither the status nor the log carries the secret or a provider URL.
+func TestReconcileMCPExternalReportsTheSecret(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*otilmv1alpha1.Platform)
+		data       map[string][]byte
+		want       metav1.ConditionStatus
+		wantReason string
+	}{
+		{
+			name: "the Secret holds the client secret under the default key", data: idpSecretData(testMCPIdPSecretKey),
+			want: metav1.ConditionTrue, wantReason: reasonMCPExternal,
+		},
+		{
+			name: "the Secret holds it under the key the spec names", data: idpSecretData(testMCPIdPCustomKey),
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.ClientSecretKey = testMCPIdPCustomKey },
+			want:   metav1.ConditionTrue, wantReason: reasonMCPExternal,
+		},
+		{name: "the Secret does not exist", want: metav1.ConditionFalse, wantReason: reasonMCPMissingSecret},
+		{
+			name: "the Secret has no such key", data: idpSecretData("another-key"),
+			want: metav1.ConditionFalse, wantReason: reasonMCPMissingSecret,
+		},
+		{
+			name: "the Secret holds the default key, but the spec names another", data: idpSecretData(testMCPIdPSecretKey),
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.ClientSecretKey = testMCPIdPCustomKey },
+			want:   metav1.ConditionFalse, wantReason: reasonMCPMissingSecret,
+		},
+		{
+			name: "the key holds an empty value", data: map[string][]byte{testMCPIdPSecretKey: {}},
+			want: metav1.ConditionFalse, wantReason: reasonMCPMissingSecret,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := withKeycloakReady(mcpExternalPlatform(tt.mutate))
+			seed := []client.Object{p, keycloakAdminSecret(p)}
+			if tt.data != nil {
+				seed = append(seed, idpClientSecret(p, tt.data))
+			}
+			reg := &localOIDCFake{mcpSecret: testMCPClientSecretValue}
+			r := newOIDCReconciler(t, reg, seed...)
+			ctx, logged := loggingContext()
+			name, key := platformbuilder.MCPClientSecret(p)
+
+			assert.False(t, r.reconcileMCPKeycloak(ctx, p, newDesiredSet()), "the Secret watch re-runs the step, so it never requeues")
+
+			cond := mcpConfiguredCondition(p)
+			require.NotNil(t, cond)
+			assert.Equal(t, tt.want, cond.Status)
+			assert.Equal(t, tt.wantReason, cond.Reason)
+			assert.Equal(t, p.Generation, cond.ObservedGeneration)
+			if tt.want == metav1.ConditionTrue {
+				assert.Equal(t, fmt.Sprintf("MCP signs in through an external identity provider and its client secret is in Secret %q", name), cond.Message)
+			} else {
+				assert.Equal(t, fmt.Sprintf("Secret %q does not exist or has no value under key %q", name, key), cond.Message)
+			}
+			assert.Nil(t, meta.FindStatusCondition(p.Status.Conditions, conditionDegraded), "MCPConfigured is an adjunct: it never degrades the platform")
+			assert.Empty(t, reg.mcpCallList(), "the operator writes nothing to Keycloak")
+			assertNoLeak(t, p, logged.String(), testMCPIdPSecretValue, testMCPIdPIssuer, testMCPIdPJWKS, testMCPIdPToken, "://")
+		})
+	}
+}
+
+// TestReconcileMCPExternalFollowsTheSecretWithoutAGenerationChange: the step has no same-generation
+// short-circuit, so the condition tracks the Secret as it is created, emptied and created again while
+// the spec does not change. The Secret watch is what re-runs the step.
+func TestReconcileMCPExternalFollowsTheSecretWithoutAGenerationChange(t *testing.T) {
 	ctx := context.Background()
-	p := mcpKeycloakPlatform(nil)
+	p := mcpExternalPlatform(nil)
+	r := newOIDCReconciler(t, &localOIDCFake{}, p)
+	reason := func() string {
+		t.Helper()
+		require.False(t, r.reconcileMCPKeycloak(ctx, p, newDesiredSet()))
+		cond := mcpConfiguredCondition(p)
+		require.NotNil(t, cond)
+		return cond.Reason
+	}
+
+	assert.Equal(t, reasonMCPMissingSecret, reason(), "no Secret yet")
+
+	secret := idpClientSecret(p, idpSecretData(testMCPIdPSecretKey))
+	require.NoError(t, r.Create(ctx, secret))
+	assert.Equal(t, reasonMCPExternal, reason(), "the Secret is created")
+
+	secret.Data = nil
+	require.NoError(t, r.Update(ctx, secret))
+	assert.Equal(t, reasonMCPMissingSecret, reason(), "the client secret is removed")
+
+	secret.Data = idpSecretData(testMCPIdPSecretKey)
+	require.NoError(t, r.Update(ctx, secret))
+	assert.Equal(t, reasonMCPExternal, reason(), "the client secret is back")
+}
+
+// TestReconcileMCPExternalReportsUnsupportedVersion: an external identity on a platform version whose
+// bundle has no MCP server reports UnsupportedVersion like the managed one, whatever the Secret holds.
+func TestReconcileMCPExternalReportsUnsupportedVersion(t *testing.T) {
+	p := withKeycloakReady(mcpExternalPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = platformVersion220 }))
+	reg := &localOIDCFake{mcpSecret: testMCPClientSecretValue}
+	r := newOIDCReconciler(t, reg, p, idpClientSecret(p, idpSecretData(testMCPIdPSecretKey)))
+
+	assert.False(t, r.reconcileMCPKeycloak(context.Background(), p, newDesiredSet()))
+
+	cond := mcpConfiguredCondition(p)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, reasonMCPUnsupportedVersion, cond.Reason)
+	assert.Equal(t, "MCP needs platform version 2.21.0 or later", cond.Message)
+	assert.Empty(t, reg.mcpCallList())
+}
+
+// newMCPStampRecorder builds a Reconciler over a fake client that holds p and seed and records the
+// server-side applies it is asked for instead of performing them. It returns the Reconciler with a
+// function that runs one apply pass and reports the checksum/config stamp on the Deployments of the
+// MCP server, Core and the gateway.
+func newMCPStampRecorder(t *testing.T, p *otilmv1alpha1.Platform, seed ...client.Object) (*Reconciler, func() map[string]string) {
+	t.Helper()
 	s := oidcPruneScheme(t)
 	applied := map[string]*appsv1.Deployment{}
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(p).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(append([]client.Object{p}, seed...)...).WithInterceptorFuncs(interceptor.Funcs{
 		// Record the Deployments a pass applies; the apply itself does not matter here.
 		Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
 			if dep, ok := obj.(*appsv1.Deployment); ok {
@@ -473,11 +664,11 @@ func TestMCPChecksumRollsTheDeployment(t *testing.T) {
 		},
 	}).Build()
 	r := &Reconciler{Client: c, Scheme: s}
-	mig := migrationRender{version: platformVersion221, bundle: bundleFor(t, platformVersion221)}
-	stamps := func() map[string]string {
+	mig := migrationRender{version: p.Spec.Version, bundle: bundleFor(t, p.Spec.Version)}
+	return r, func() map[string]string {
 		t.Helper()
 		clear(applied)
-		_, handled, _, err := r.composeAndApplyBase(ctx, p, mig, newDesiredSet(), false)
+		_, handled, _, err := r.composeAndApplyBase(context.Background(), p, mig, newDesiredSet(), false)
 		require.NoError(t, err)
 		require.False(t, handled)
 		got := map[string]string{}
@@ -487,17 +678,26 @@ func TestMCPChecksumRollsTheDeployment(t *testing.T) {
 		}
 		return got
 	}
+}
+
+// TestMCPChecksumRollsTheDeployment: a pass stamps the relayed MCP client Secret's checksum on the
+// mcp-server Deployment, so relaying a different secret rolls it, while Core and the gateway ignore
+// that Secret. Before the Secret exists, or with MCP off, there is nothing to stamp.
+func TestMCPChecksumRollsTheDeployment(t *testing.T) {
+	ctx := context.Background()
+	p := mcpKeycloakPlatform(nil)
+	r, stamps := newMCPStampRecorder(t, p)
 
 	before := stamps()
 	assert.Empty(t, before[mcpServerWorkloadName], "nothing to stamp before the Secret exists")
 
 	secret := ownedMCPSecret(p)
-	require.NoError(t, c.Create(ctx, secret))
+	require.NoError(t, r.Create(ctx, secret))
 	first := stamps()
 	assert.Equal(t, checksum.ComputeSecretChecksum(secret), first[mcpServerWorkloadName])
 
 	secret.Data = map[string][]byte{platformbuilder.MCPClientSecretKey: []byte("a-rotated-mcp-client-secret")}
-	require.NoError(t, c.Update(ctx, secret))
+	require.NoError(t, r.Update(ctx, secret))
 	second := stamps()
 	assert.NotEqual(t, first[mcpServerWorkloadName], second[mcpServerWorkloadName], "a new secret rolls the MCP server")
 
@@ -506,7 +706,126 @@ func TestMCPChecksumRollsTheDeployment(t *testing.T) {
 		assert.Equal(t, before[name], second[name], "%s ignores the MCP client Secret", name)
 	}
 
-	assert.Empty(t, r.mcpClientChecksum(ctx, mcpKeycloakPlatform(mcpOff)), "MCP off: nothing to stamp")
+	assert.Empty(t, r.mcpConfigChecksum(ctx, mcpKeycloakPlatform(mcpOff), checksumTrustedInput),
+		"MCP off: nothing to stamp, a composed bundle included")
+}
+
+// TestMCPExternalChecksumFollowsTheReferencedSecret: with an external identity a pass stamps the
+// checksum of the Secret the spec references on the mcp-server Deployment, so a client secret that
+// changes there rolls the server. The relayed <platform>-mcp-client Secret that managed mode follows
+// plays no part, and Core and the gateway ignore the referenced Secret. Before it exists there is
+// nothing to stamp.
+func TestMCPExternalChecksumFollowsTheReferencedSecret(t *testing.T) {
+	ctx := context.Background()
+	p := mcpExternalPlatform(nil)
+	r, stamps := newMCPStampRecorder(t, p)
+
+	before := stamps()
+	assert.Empty(t, before[mcpServerWorkloadName], "nothing to stamp before the Secret exists")
+
+	secret := idpClientSecret(p, idpSecretData(testMCPIdPSecretKey))
+	require.NoError(t, r.Create(ctx, secret))
+	first := stamps()
+	assert.Equal(t, checksum.ComputeSecretChecksum(secret), first[mcpServerWorkloadName])
+
+	secret.Data = map[string][]byte{testMCPIdPSecretKey: []byte("a-rotated-idp-client-secret")}
+	require.NoError(t, r.Update(ctx, secret))
+	second := stamps()
+	assert.NotEqual(t, first[mcpServerWorkloadName], second[mcpServerWorkloadName], "a new client secret rolls the MCP server")
+
+	require.NoError(t, r.Create(ctx, ownedMCPSecret(p)))
+	assert.Equal(t, second, stamps(), "the Secret managed mode relays is not followed")
+
+	for _, name := range []string{coreDeploymentName, gatewayWorkloadName} {
+		assert.Equal(t, before[name], first[name], "%s ignores the referenced Secret", name)
+		assert.Equal(t, before[name], second[name], "%s ignores the referenced Secret", name)
+	}
+}
+
+// mcpIdentityModes are the ways MCP signs in, each with the Secret its client secret is read from.
+var mcpIdentityModes = []struct {
+	name         string
+	mutate       func(*otilmv1alpha1.Platform)
+	clientSecret func(*otilmv1alpha1.Platform) *corev1.Secret
+}{
+	{name: "managed identity", clientSecret: ownedMCPSecret},
+	{
+		name: "external identity", mutate: externalIdentity,
+		clientSecret: func(p *otilmv1alpha1.Platform) *corev1.Secret {
+			return idpClientSecret(p, idpSecretData(testMCPIdPSecretKey))
+		},
+	},
+}
+
+// trustedCertsPlatform is mcpKeycloakPlatform in the given identity mode with the user's
+// trusted-certificates Secret referenced, and, when compose is set, an admin certificate the operator
+// generates, which makes the operator compose that Secret and its own admin CA into one bundle.
+func trustedCertsPlatform(mutate func(*otilmv1alpha1.Platform), compose bool) *otilmv1alpha1.Platform {
+	return mcpKeycloakPlatform(func(p *otilmv1alpha1.Platform) {
+		if mutate != nil {
+			mutate(p)
+		}
+		p.Spec.Common.TrustedCertificates.SecretRef = userTrustSecretRef
+		if compose {
+			p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{
+				Enabled:     true,
+				Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: ptr(true), Source: "generated"},
+			}
+		}
+	})
+}
+
+// userTrustSecret is the user's trusted-certificates Secret, holding one CA.
+func userTrustSecret(p *otilmv1alpha1.Platform) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: userTrustSecretRef, Namespace: p.Namespace},
+		Data:       map[string][]byte{caCrtKey: []byte(userCAValue)},
+	}
+}
+
+// TestMCPChecksumFollowsTheComposedTrustBundle: in both identity modes the checksum on the mcp-server
+// Deployment follows the trusted-certificates bundle the operator composes, as Core's does, so a
+// bundle that changes rolls the server, which reads it from an environment variable.
+func TestMCPChecksumFollowsTheComposedTrustBundle(t *testing.T) {
+	for _, mode := range mcpIdentityModes {
+		t.Run(mode.name, func(t *testing.T) {
+			ctx := context.Background()
+			p := trustedCertsPlatform(mode.mutate, true)
+			clientSecret, trust := mode.clientSecret(p), userTrustSecret(p)
+			r, stamps := newMCPStampRecorder(t, p, clientSecret, trust)
+
+			first := stamps()[mcpServerWorkloadName]
+			assert.NotEmpty(t, first)
+			assert.NotEqual(t, checksum.ComputeSecretChecksum(clientSecret), first, "the composed bundle is part of the checksum")
+			assert.Equal(t, first, stamps()[mcpServerWorkloadName], "the checksum is stable while nothing changes")
+
+			trust.Data[caCrtKey] = []byte("A-ROTATED-CA")
+			require.NoError(t, r.Update(ctx, trust))
+			assert.NotEqual(t, first, stamps()[mcpServerWorkloadName], "a changed bundle rolls the MCP server")
+		})
+	}
+}
+
+// TestMCPChecksumIgnoresAUserTrustSecretTheOperatorDoesNotCompose: without an admin CA to fold in, the
+// operator references the user's trusted-certificates Secret as it is, so, as for Core, its content is
+// not part of the checksum: the checksum stays the client Secret's own, which an operator upgrade
+// must not change.
+func TestMCPChecksumIgnoresAUserTrustSecretTheOperatorDoesNotCompose(t *testing.T) {
+	for _, mode := range mcpIdentityModes {
+		t.Run(mode.name, func(t *testing.T) {
+			ctx := context.Background()
+			p := trustedCertsPlatform(mode.mutate, false)
+			clientSecret, trust := mode.clientSecret(p), userTrustSecret(p)
+			r, stamps := newMCPStampRecorder(t, p, clientSecret, trust)
+
+			first := stamps()[mcpServerWorkloadName]
+			assert.Equal(t, checksum.ComputeSecretChecksum(clientSecret), first)
+
+			trust.Data[caCrtKey] = []byte("A-ROTATED-CA")
+			require.NoError(t, r.Update(ctx, trust))
+			assert.Equal(t, first, stamps()[mcpServerWorkloadName], "the user's Secret is not followed")
+		})
+	}
 }
 
 // TestNextRequeueResultRetriesMCPOnTheAdjunctCadence: MCP's Keycloak step retries on the cadence of
@@ -595,7 +914,7 @@ func TestKeycloakGateKeepsCIMDUntilThePolicyIsRemoved(t *testing.T) {
 			name: "MCP turned off and the removal fails", mutate: mcpOff, ready: true, adminSecret: true,
 			removeErr: removalFails, wantCalls: 1, wantFeatures: []string{platformbuilder.KeycloakFeatureCIMD},
 		},
-		{name: "Keycloak is not ready", mutate: cimdOff, adminSecret: true, wantFeatures: mcpFeatures},
+		{name: testKeycloakNotReady, mutate: cimdOff, adminSecret: true, wantFeatures: mcpFeatures},
 		{name: "the admin credentials are missing", mutate: cimdOff, ready: true, wantFeatures: mcpFeatures},
 	}
 	for _, tt := range tests {
@@ -792,6 +1111,50 @@ func TestReconcileMCPKeycloakFollowsAnOverrideThatDropsCIMD(t *testing.T) {
 			require.Len(t, calls, 1)
 			assert.False(t, calls[0].spec.CIMD, "the rendered Keycloak CR drops cimd, so the step keeps CIMD off")
 			assert.False(t, realm.stored, "the realm keeps no mcp-cimd")
+			assert.Zero(t, realm.stores, "nothing stores mcp-cimd again")
+		})
+	}
+}
+
+// TestMCPExternalSwitchRemovesCIMDFirst: MCP moves from the managed identity to an external one on a
+// managed Keycloak whose live CR still enables cimd. The rendered CR then carries none of MCP's
+// features. In Reconcile's order the gate first removes mcp-cimd through the admin API, and applies the
+// CR without features once that succeeds, or keeps cimd while the removal fails. Either way the MCP
+// step makes no realm pass, so nothing stores mcp-cimd again, and MCP's other Keycloak objects stay.
+func TestMCPExternalSwitchRemovesCIMDFirst(t *testing.T) {
+	tests := []struct {
+		name         string
+		removeErr    error
+		wantRequeue  bool
+		wantFeatures []string
+		wantStored   bool
+	}{
+		{name: "the gate removes mcp-cimd and drops the features"},
+		{
+			name: "the removal fails, so the gate keeps cimd for now", removeErr: removalFails, wantRequeue: true,
+			wantFeatures: []string{platformbuilder.KeycloakFeatureCIMD}, wantStored: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			p := mcpExternalPlatform(nil)
+			realm := &cimdRealm{
+				localOIDCFake: &localOIDCFake{mcpSecret: testMCPClientSecretValue, removeCIMDErr: tt.removeErr},
+				stored:        true,
+			}
+			r, applied := newCIMDGateReconciler(t, realm, nil, p, liveKeycloak(p, true, mcpFeatures...), keycloakAdminSecret(p))
+			desired := newDesiredSet()
+
+			_, requeue, err := r.gateKeycloak(ctx, p, guardTestBundle(), desired, true)
+			require.NoError(t, err)
+			r.reconcileMCPKeycloak(ctx, p, desired)
+
+			assert.Equal(t, tt.wantRequeue, requeue)
+			assert.Equal(t, 1, realm.removeCIMDCount(), "the gate removes mcp-cimd before cimd goes")
+			assert.Equal(t, tt.wantFeatures, enabledFeatures(t, applied()))
+			assert.Empty(t, realm.mcpCallList(), "the MCP step makes no realm pass")
+			assert.Equal(t, tt.wantStored, realm.stored)
 			assert.Zero(t, realm.stores, "nothing stores mcp-cimd again")
 		})
 	}

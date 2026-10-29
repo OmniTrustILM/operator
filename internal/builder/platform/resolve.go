@@ -346,17 +346,52 @@ func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 		env = append(env, common.EnvPair{Name: w.LogFormatEnv, Value: f})
 	}
 
+	return append(env, outboundProxyEnv(p, w)...)
+}
+
+// outboundProxyEnv returns the outbound proxy variables of spec.common.proxy, shared by Core and the
+// MCP server: HTTP_PROXY, HTTPS_PROXY and NO_PROXY, each only when its value is set. PROXY_ENABLED is
+// not among them: only Core reads it, and coreEnv adds it. While HTTP_PROXY or HTTPS_PROXY is set,
+// NO_PROXY also lists noProxyHosts, the hosts of plain-http URLs that only the calling component
+// uses, which the spec's noProxy, written for Core, does not name.
+func outboundProxyEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile, noProxyHosts ...string) []common.EnvPair {
+	var env []common.EnvPair
+	proxy := p.Spec.Common.Proxy
 	// Proxy URLs are only injected when set.
-	if p.Spec.Common.Proxy.HTTP != "" {
-		env = append(env, common.EnvPair{Name: w.HTTPProxyEnv, Value: p.Spec.Common.Proxy.HTTP})
+	if proxy.HTTP != "" {
+		env = append(env, common.EnvPair{Name: w.HTTPProxyEnv, Value: proxy.HTTP})
 	}
-	if p.Spec.Common.Proxy.HTTPS != "" {
-		env = append(env, common.EnvPair{Name: w.HTTPSProxyEnv, Value: p.Spec.Common.Proxy.HTTPS})
+	if proxy.HTTPS != "" {
+		env = append(env, common.EnvPair{Name: w.HTTPSProxyEnv, Value: proxy.HTTPS})
 	}
-	if p.Spec.Common.Proxy.NoProxy != "" {
-		env = append(env, common.EnvPair{Name: w.NoProxyEnv, Value: p.Spec.Common.Proxy.NoProxy})
+	noProxy := proxy.NoProxy
+	if proxy.HTTP != "" || proxy.HTTPS != "" {
+		noProxy = addNoProxyHosts(noProxy, noProxyHosts)
+	}
+	if noProxy != "" {
+		env = append(env, common.EnvPair{Name: w.NoProxyEnv, Value: noProxy})
 	}
 	return env
+}
+
+// addNoProxyHosts returns noProxy followed by each host it does not list yet, comma-separated as Core
+// reads it. The entries already there stay first and as written. Entries are separated by "," or "|".
+func addNoProxyHosts(noProxy string, hosts []string) string {
+	listed := map[string]bool{}
+	for _, entry := range strings.FieldsFunc(noProxy, func(r rune) bool { return r == ',' || r == '|' }) {
+		listed[strings.TrimSpace(entry)] = true
+	}
+	for _, host := range hosts {
+		if listed[host] {
+			continue
+		}
+		listed[host] = true
+		if noProxy != "" {
+			noProxy += ","
+		}
+		noProxy += host
+	}
+	return noProxy
 }
 
 // coreSecretEnv lists Core's secret-backed env vars, all sourced via secretKeyRef
@@ -366,23 +401,7 @@ func coreEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.EnvPair {
 // bootstrap is enabled) admin-certificate on top.
 func coreSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.SecretEnvRef {
 	refs := sharedCredSecretEnv(p, w)
-	// TRUSTED_CERTIFICATES is sourced from the effective trusted-certs Secret: the
-	// caller's SecretRef verbatim, or — when the admin bootstrap requires Core to also
-	// trust a generated admin CA — the operator-composed trusted-certificates Secret
-	// (see TrustedCertsSecretName / reconcileTrustedCerts). The value is never inlined.
-	//
-	// Optional=true: the trusted-cert Secret can legitimately lag behind Core (the
-	// operator-composed bundle, or a cert-manager CA Secret being minted), so an
-	// optional secretKeyRef lets Core START rather than wedge with
-	// CreateContainerConfigError. When the Secret later appears, the trusted-certs
-	// checksum annotation already wired on Core's pod template (reconcileTrustedCerts +
-	// StampConfigChecksum) changes the pod-template hash and rolls Core to pick it up.
-	if ref := TrustedCertsSecretName(p); ref != "" {
-		refs = append(refs, common.SecretEnvRef{
-			EnvVar: w.TrustedCertificates.Env, SecretName: ref, SecretKey: TrustedCertsSecretKey(p),
-			Optional: true,
-		})
-	}
+	refs = append(refs, trustedCertsSecretEnv(p, w)...)
 	if ref := provisioningAPIKeySecretRef(p); ref != "" {
 		refs = append(refs, common.SecretEnvRef{
 			EnvVar: w.ProvisioningAPIKey.Env, SecretName: ref, SecretKey: ProvisioningAPIKeyKey(p),
@@ -407,6 +426,31 @@ func coreSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.Secr
 		})
 	}
 	return refs
+}
+
+// trustedCertsSecretEnv returns the optional TRUSTED_CERTIFICATES reference shared by Core and the MCP
+// server, or nil when no trusted-certificates Secret applies.
+func trustedCertsSecretEnv(p *otilmv1alpha1.Platform, w bom.WiringProfile) []common.SecretEnvRef {
+	// TRUSTED_CERTIFICATES is sourced from the effective trusted-certs Secret: the
+	// caller's SecretRef verbatim, or — when the admin bootstrap requires Core to also
+	// trust a generated admin CA — the operator-composed trusted-certificates Secret
+	// (see TrustedCertsSecretName / reconcileTrustedCerts). The value is never inlined.
+	//
+	// Optional=true: the trusted-cert Secret can legitimately lag behind the pod (the
+	// operator-composed bundle, or a cert-manager CA Secret being minted), so an
+	// optional secretKeyRef lets it START rather than wedge with
+	// CreateContainerConfigError. For Core, when the Secret later appears, the
+	// trusted-certs checksum annotation already wired on Core's pod template
+	// (reconcileTrustedCerts + StampConfigChecksum) changes the pod-template hash and
+	// rolls Core to pick it up.
+	ref := TrustedCertsSecretName(p)
+	if ref == "" {
+		return nil
+	}
+	return []common.SecretEnvRef{{
+		EnvVar: w.TrustedCertificates.Env, SecretName: ref, SecretKey: TrustedCertsSecretKey(p),
+		Optional: true,
+	}}
 }
 
 // coreProbes returns Core's readiness and startup probes against the HTTP service

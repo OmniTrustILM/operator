@@ -29,7 +29,7 @@
 #
 # SECRETS YOU MUST CREATE FIRST (same namespace as the Platform):
 #   kubectl create secret generic ilm-trusted-ca -n ilm \
-#     --from-file=ca.crt=path/to/ca-bundle.pem               # CA bundle trusted by all components
+#     --from-file=ca.crt=path/to/ca-bundle.pem               # CA bundle trusted by Core and auth
 #   # No DB/messaging Secrets — the upstream operators generate those (managed mode).
 #   # The edge TLS Secret and the generated admin cert Secret are created BY cert-manager.
 apiVersion: otilm.com/v1alpha1

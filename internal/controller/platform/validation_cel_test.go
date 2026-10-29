@@ -50,6 +50,42 @@ const (
 	// testMCPEnumRejection is the fragment the apiserver includes when mcp.access is not one of
 	// its enumerated levels.
 	testMCPEnumRejection = `Unsupported value: "write"`
+	// testMCPIdentity*Rejection are the messages of the mcp.identity rules: the settings external mode
+	// requires, the settings only external mode takes, the URL shapes, the delegation group only managed
+	// mode takes, the platform's own Keycloak, which only managed mode serves, and the name and key of
+	// the client Secret, which the MCP Deployment's secretKeyRef takes only in Kubernetes' own form.
+	testMCPIdentityRequiredRejection = "identity.mode external requires issuer, jwkSetUri, tokenUri, clientId, clientSecretRef and exchangeMode"
+	testMCPIdentityManagedRejection  = "identity settings other than mode are used only with identity.mode external"
+	testMCPIssuerRejection           = "issuer must be an https URL without userinfo, query or fragment"
+	testMCPBackchannelRejection      = "jwkSetUri and tokenUri may use http only for a Kubernetes Service host (.svc), and take no userinfo, fragment or whitespace"
+	testMCPGroupRejection            = "mcp.delegation.group is used only with identity.mode managed"
+	testMCPOwnKeycloakRejection      = "identity.mode external needs a provider the platform does not manage; use identity.mode managed for the platform's Keycloak"
+	testMCPSecretNameRejection       = "clientSecretRef must be a Secret name: lowercase letters, digits, '-' and '.', each part starting and ending with a letter or digit"
+	testMCPSecretKeyRejection        = "clientSecretKey must be a Secret key: letters, digits, '-', '_' and '.', never '.' alone or starting with '..'"
+	// testMCPUnsupportedRejection, testMCPTooLongRejection and testMCPTooManyRejection are the fragments
+	// the apiserver includes when a value is not in its enum, a string outgrows its length or a list
+	// outgrows its item count.
+	testMCPUnsupportedRejection = "Unsupported value"
+	testMCPTooLongRejection     = "Too long"
+	testMCPTooManyRejection     = "Too many"
+	// testMCPIdentity* are the settings of a valid external identity: a provider whose public issuer is on
+	// another host than the platform's, and whose key-set and token endpoints MCP reaches over plain http
+	// at an in-cluster Service. testMCPIdentityEdgeHost is an edge host other than the platform's.
+	testMCPIdentityIssuer    = "https://idp.example.com/realms/corp"
+	testMCPIdentityInCluster = "http://kc.idp.svc:8080/realms/corp"
+	testMCPIdentityCertsPath = "/protocol/openid-connect/certs"
+	testMCPIdentityTokenPath = "/protocol/openid-connect/token"
+	testMCPIdentityClientID  = "ilm-mcp"
+	testMCPIdentitySecretRef = "mcp-idp-client"
+	testMCPIdentityEdgeHost  = "edge.example.com"
+	// testHTTPSScheme starts the issuer URLs the specs build, and testMCPOwnRealmPath is a realm under
+	// the path the platform serves its managed Keycloak from. It is not the platform's own realm, ilm:
+	// every realm under that path is the platform's.
+	testHTTPSScheme     = "https://"
+	testMCPOwnRealmPath = "/kc/realms/ILM"
+	// testMCPOldKeycloakVersion is a pinned managed Keycloak version below the 26.8.1 floor that the
+	// managed identity needs.
+	testMCPOldKeycloakVersion = "26.6.3"
 	// testRuleEvaluationError is the fragment the apiserver includes when a CEL rule fails by
 	// erroring at runtime, such as on a field that is absent, rather than by evaluating to false.
 	testRuleEvaluationError = "evaluating rule"
@@ -973,8 +1009,9 @@ var _ = Describe("Platform CEL validation", func() {
 
 	// mcp.enabled depends on three facts that live in OTHER sections of the spec, so its rules sit
 	// on PlatformSpec: a managed Keycloak (the operator provisions MCP's Keycloak objects through
-	// the admin API), a public host (MCP's issuer and resource URLs are built from it) and, when
-	// the managed Keycloak is pinned, a version of 26.8.1 or later. mcpPlatform satisfies all
+	// the admin API), a public host (MCP's resource URL is built from it) and, when the managed
+	// Keycloak is pinned, a version of 26.8.1 or later. The Keycloak and its version matter only
+	// while spec.mcp.identity is managed, which an absent identity is. mcpPlatform satisfies all
 	// three and each spec breaks exactly one, so a rejection is attributable to that rule.
 	Context("mcp", func() {
 		mcpPlatform := func(ns string) *otilmv1alpha1.Platform {
@@ -1080,7 +1117,7 @@ var _ = Describe("Platform CEL validation", func() {
 		// 26.8.0 and 26.6.3 are older 26.x releases, 25.0.1 an older major. 26.8 names no patch, so it
 		// cannot be shown to be 26.8.1 or later, and a Keycloak image build suffix does not lift a
 		// patch below 26.8.1. A tag is a bare version: a leading v is not one, and 270 is not 27.
-		for i, version := range []string{"26.8.0", "26.6.3", "25.0.1", "26.8", "26.8.0-0", "v26.8.1", "270.0.0"} {
+		for i, version := range []string{"26.8.0", testMCPOldKeycloakVersion, "25.0.1", "26.8", "26.8.0-0", "v26.8.1", "270.0.0"} {
 			It("rejects a managed Keycloak pinned to "+version, func() {
 				rejects(pinnedTo(freshNS(fmt.Sprintf("cel-mcp-oldkc-%d", i)), version), testMCPVersionRejection)
 			})
@@ -1131,7 +1168,7 @@ var _ = Describe("Platform CEL validation", func() {
 			ns := freshNS("cel-mcp-absent-oldkc")
 			p := platformIn(ns)
 			p.Spec.Keycloak = managedKeycloak()
-			p.Spec.Keycloak.Managed.Version = "26.6.3"
+			p.Spec.Keycloak.Managed.Version = testMCPOldKeycloakVersion
 			u := onTheWire(p, func(obj map[string]interface{}) {
 				unstructured.RemoveNestedField(obj, "spec", "mcp")
 			})
@@ -1192,6 +1229,547 @@ var _ = Describe("Platform CEL validation", func() {
 			Expect(got.Spec.MCP.Enabled).To(BeFalse())
 			Expect(got.Spec.MCP.Access).To(Equal("read-only"))
 			Expect(got.Spec.MCP.CIMD.Enabled).To(HaveValue(BeTrue()))
+		})
+
+		// spec.mcp.identity selects where MCP signs its users in. Its rules read the identity block and
+		// the delegation group, Keycloak and host around it. Each case starts from externalPlatform, an
+		// external identity that satisfies every rule on mcpPlatform's managed Keycloak and host, and
+		// edits it. reject is the message the apiserver must answer with, and is empty for a Platform it
+		// must admit; rejects also fails a rule that errors on an absent field instead of failing cleanly.
+		Context("identity", func() {
+			type identityCase struct {
+				name   string
+				edit   func(p *otilmv1alpha1.Platform)
+				reject string
+			}
+			// urlSetting is a URL setting and the message of the rule that owns it.
+			type urlSetting struct {
+				name   string
+				set    func(id *otilmv1alpha1.MCPIdentitySpec, url string)
+				reject string
+			}
+			// lengthCase is a string setting and its declared length. url marks a setting that holds a URL.
+			type lengthCase struct {
+				name  string
+				set   func(id *otilmv1alpha1.MCPIdentitySpec, value string)
+				limit int
+				url   bool
+			}
+			// valueCase is a value of a setting, and the case that names it.
+			type valueCase struct{ name, value string }
+			externalPlatform := func(ns string) *otilmv1alpha1.Platform {
+				p := mcpPlatform(ns)
+				p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{
+					Mode:            "external",
+					Issuer:          testMCPIdentityIssuer,
+					JWKSetURI:       testMCPIdentityInCluster + testMCPIdentityCertsPath,
+					TokenURI:        testMCPIdentityInCluster + testMCPIdentityTokenPath,
+					ClientID:        testMCPIdentityClientID,
+					ClientSecretRef: testMCPIdentitySecretRef,
+					ExchangeMode:    "delegation",
+				}
+				return p
+			}
+			// onIdentity edits the identity block of an external identity.
+			onIdentity := func(edit func(id *otilmv1alpha1.MCPIdentitySpec)) func(p *otilmv1alpha1.Platform) {
+				return func(p *otilmv1alpha1.Platform) { edit(p.Spec.MCP.Identity) }
+			}
+			// managed replaces the identity with managed mode, edited by edit.
+			managed := func(edit func(id *otilmv1alpha1.MCPIdentitySpec)) func(p *otilmv1alpha1.Platform) {
+				return func(p *otilmv1alpha1.Platform) {
+					p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{Mode: "managed"}
+					edit(p.Spec.MCP.Identity)
+				}
+			}
+			// modeOnly is the edit of a managed identity that sets nothing besides its mode.
+			modeOnly := func(*otilmv1alpha1.MCPIdentitySpec) {
+				// The identity block holds the mode managed sets and nothing else.
+			}
+			// externalKeycloak makes the platform's Keycloak one the operator does not provision.
+			externalKeycloak := func(p *otilmv1alpha1.Platform) {
+				p.Spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "external", Realm: "ilm"}
+			}
+			// edgeOn is an edge that names host, enabled or not.
+			edgeOn := func(host string, enabled bool) func(p *otilmv1alpha1.Platform) {
+				return func(p *otilmv1alpha1.Platform) {
+					p.Spec.Edge = &otilmv1alpha1.EdgeSpec{Enabled: enabled, Type: "ingress", Host: host}
+				}
+			}
+			// issuerUnder points the issuer under host's /kc/ path, where the platform serves its managed
+			// Keycloak, after the edits have changed the Platform. The realm is not the Platform's ilm:
+			// every realm under that path is the platform's.
+			issuerUnder := func(host string, edits ...func(p *otilmv1alpha1.Platform)) func(p *otilmv1alpha1.Platform) {
+				return func(p *otilmv1alpha1.Platform) {
+					for _, edit := range edits {
+						edit(p)
+					}
+					p.Spec.MCP.Identity.Issuer = testHTTPSScheme + host + testMCPOwnRealmPath
+				}
+			}
+			// longURL is an https URL of n characters.
+			longURL := func(n int) string {
+				prefix := testMCPIdentityIssuer + "/"
+				return prefix + strings.Repeat("a", n-len(prefix))
+			}
+
+			// The settings external mode requires, and those that only external mode takes.
+			required := []struct {
+				name  string
+				clear func(id *otilmv1alpha1.MCPIdentitySpec)
+			}{
+				{"issuer", func(id *otilmv1alpha1.MCPIdentitySpec) { id.Issuer = "" }},
+				{"jwkSetUri", func(id *otilmv1alpha1.MCPIdentitySpec) { id.JWKSetURI = "" }},
+				{"tokenUri", func(id *otilmv1alpha1.MCPIdentitySpec) { id.TokenURI = "" }},
+				{"clientId", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientID = "" }},
+				{"clientSecretRef", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretRef = "" }},
+				{"exchangeMode", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ExchangeMode = "" }},
+			}
+			externalOnly := []struct {
+				name string
+				set  func(id *otilmv1alpha1.MCPIdentitySpec)
+			}{
+				{"issuer", func(id *otilmv1alpha1.MCPIdentitySpec) { id.Issuer = testMCPIdentityIssuer }},
+				{"jwkSetUri", func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.JWKSetURI = testMCPIdentityIssuer + testMCPIdentityCertsPath
+				}},
+				{"tokenUri", func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.TokenURI = testMCPIdentityIssuer + testMCPIdentityTokenPath
+				}},
+				{"clientId", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientID = testMCPIdentityClientID }},
+				{"clientSecretRef", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretRef = testMCPIdentitySecretRef }},
+				{"clientSecretKey", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ClientSecretKey = "client-secret" }},
+				{"exchangeMode", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ExchangeMode = "standard" }},
+				{"exchangeScope", func(id *otilmv1alpha1.MCPIdentitySpec) { id.ExchangeScope = "openid ilm-mcp-upstream" }},
+				{"requiredScope", func(id *otilmv1alpha1.MCPIdentitySpec) { id.RequiredScope = "mcp:access" }},
+				{"authorizationScopes", func(id *otilmv1alpha1.MCPIdentitySpec) { id.AuthorizationScopes = []string{"openid"} }},
+				{"apiAudience", func(id *otilmv1alpha1.MCPIdentitySpec) { id.APIAudience = "ilm" }},
+			}
+			issuer := urlSetting{"issuer", func(id *otilmv1alpha1.MCPIdentitySpec, url string) { id.Issuer = url }, testMCPIssuerRejection}
+			backchannel := []urlSetting{
+				{"jwkSetUri", func(id *otilmv1alpha1.MCPIdentitySpec, url string) { id.JWKSetURI = url }, testMCPBackchannelRejection},
+				{"tokenUri", func(id *otilmv1alpha1.MCPIdentitySpec, url string) { id.TokenURI = url }, testMCPBackchannelRejection},
+			}
+			// Every URL setting refuses these.
+			malformed := []struct{ why, url string }{
+				{"userinfo", "https://u@idp.example.com/x"},
+				{"a fragment", "https://idp.example.com/x#f"},
+				{"a scheme other than http and https", "ftp://idp.example.com/x"},
+				{"no scheme", "idp.example.com/x"},
+				{"no host", "https:///x"},
+				{"a space in the host", "https://idp example.com/x"},
+				{"a space in the path", "https://idp.example.com/a b"},
+			}
+			// A key-set or token URL may use http only for a Service host, <service>.<namespace>.svc
+			// optionally followed by the cluster domain. The issuer may not use http at all.
+			plainHTTP := []struct{ why, url string }{
+				{"a public host", "http://idp.example.com/certs"},
+				{"a host that is no Service", "http://kc.idp:8080/certs"},
+				{"userinfo on a Service host", "http://u@kc.idp.svc:8080/certs"},
+				{"a fragment on a Service host", "http://kc.idp.svc:8080/certs#f"},
+				{"a svc label under a public domain", "http://a.svc.example.com/certs"},
+				{"a Service name with no namespace", "http://a.svc/certs"},
+				{"svc as the Service name, with no namespace", "http://svc.svc/c"},
+			}
+			// The Service hosts a key-set or token URL may use over http.
+			serviceHosts := []struct{ why, url string }{
+				{"a Service host with no port or path", "http://kc.idp.svc"},
+				{"a Service host with the default cluster domain", "http://kc.idp.svc.cluster.local:8080/t"},
+				{"a Service host with a custom cluster domain", "http://kc.idp.svc.k8s.corp.example.com/c"},
+				{"a pod of a headless Service", "http://pod-0.kc.idp.svc.cluster.local/c"},
+			}
+			// The client Secret is read through the MCP Deployment's secretKeyRef. Kubernetes refuses that
+			// reference unless the name is a DNS-1123 subdomain and the key is made of letters, digits, '-',
+			// '_' and '.', and is neither '.' nor starts with '..'. The Deployment's apply then fails and
+			// degrades the whole platform, so admission refuses what Kubernetes would.
+			badSecretNames := []valueCase{
+				{"a clientSecretRef with an uppercase letter and an underscore", "MCP_Client"},
+				{"an uppercase clientSecretRef", "Mcp-Idp-Client"},
+				{"a clientSecretRef with a slash", "a/b"},
+				{"a clientSecretRef with a space", "mcp idp client"},
+				{"a clientSecretRef that starts with a hyphen", "-mcp-idp-client"},
+				{"a clientSecretRef that ends with a hyphen", "mcp-idp-client-"},
+				{"a clientSecretRef that starts with a dot", ".mcp-idp-client"},
+				{"a clientSecretRef that ends with a dot", "mcp-idp-client."},
+				{"a clientSecretRef with an empty part", "mcp..idp-client"},
+				{"a clientSecretRef with a part that starts with a hyphen", "mcp.-idp-client"},
+				{"a clientSecretRef with a part that ends with a hyphen", "mcp-.idp-client"},
+			}
+			goodSecretNames := []valueCase{
+				{"a clientSecretRef of lowercase words joined by hyphens", "mcp-idp-client"},
+				{"a clientSecretRef of dotted parts", "idp.client-1"},
+				{"a clientSecretRef of one character", "a"},
+				{"a clientSecretRef that starts with a digit", "1mcp"},
+			}
+			badSecretKeys := []valueCase{
+				{"a clientSecretKey with a space", "client secret"},
+				{"a clientSecretKey with a slash", "a/b"},
+				{"a clientSecretKey with a colon", "client:secret"},
+				{"a clientSecretKey of one dot", "."},
+				{"a clientSecretKey of two dots", ".."},
+				{"a clientSecretKey that starts with two dots", "..data"},
+			}
+			goodSecretKeys := []valueCase{
+				{"a clientSecretKey with a hyphen", "client-secret"},
+				{"a clientSecretKey with an underscore", "client_secret"},
+				{"a clientSecretKey with uppercase letters and a dot", "CLIENT.secret"},
+				{"a clientSecretKey that starts with one dot", ".secret"},
+				{"a clientSecretKey with two dots inside", "a..b"},
+			}
+			// secretCases is a case for each value of a client Secret setting that admission refuses with
+			// message, and for each that it takes.
+			secretCases := func(set func(id *otilmv1alpha1.MCPIdentitySpec, value string), message string, refused, taken []valueCase) []identityCase {
+				var out []identityCase
+				add := func(v valueCase, reject string) {
+					out = append(out, identityCase{
+						name:   v.name,
+						edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { set(id, v.value) }),
+						reject: reject,
+					})
+				}
+				for _, v := range refused {
+					add(v, message)
+				}
+				for _, v := range taken {
+					add(v, "")
+				}
+				return out
+			}
+			// Every string setting stops at its declared length, which the longest value fills.
+			lengths := []lengthCase{
+				{"issuer", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.Issuer = v }, 2048, true},
+				{"jwkSetUri", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.JWKSetURI = v }, 2048, true},
+				{"tokenUri", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.TokenURI = v }, 2048, true},
+				{"clientId", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ClientID = v }, 255, false},
+				{"clientSecretRef", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ClientSecretRef = v }, 253, false},
+				{"clientSecretKey", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ClientSecretKey = v }, 253, false},
+				{"exchangeScope", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ExchangeScope = v }, 1024, false},
+				{"requiredScope", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.RequiredScope = v }, 255, false},
+				{"apiAudience", func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.APIAudience = v }, 255, false},
+			}
+			valueOf := func(l lengthCase, n int) string {
+				if l.url {
+					return longURL(n)
+				}
+				return strings.Repeat("a", n)
+			}
+			// scopes is n authorization scopes of size characters.
+			scopes := func(n, size int) []string {
+				out := make([]string, n)
+				for i := range out {
+					out[i] = strings.Repeat("a", size)
+				}
+				return out
+			}
+
+			cases := []identityCase{
+				// External identity is admitted whatever the Keycloak is, and whatever its version: the
+				// operator provisions nothing at the provider.
+				{name: "external identity on a managed Keycloak, with in-cluster http key-set and token URLs"},
+				{name: "external identity on an external Keycloak, with https URLs", edit: func(p *otilmv1alpha1.Platform) {
+					externalKeycloak(p)
+					p.Spec.MCP.Identity.JWKSetURI = testMCPIdentityIssuer + testMCPIdentityCertsPath
+					p.Spec.MCP.Identity.TokenURI = testMCPIdentityIssuer + testMCPIdentityTokenPath
+				}},
+				{name: "external identity with no keycloak block", edit: func(p *otilmv1alpha1.Platform) { p.Spec.Keycloak = nil }},
+				{name: "external identity on a managed Keycloak pinned below 26.8.1", edit: func(p *otilmv1alpha1.Platform) {
+					p.Spec.Keycloak.Managed.Version = testMCPOldKeycloakVersion
+				}},
+				{name: "external identity with every setting", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					for _, s := range externalOnly {
+						s.set(id)
+					}
+				})},
+				{name: "external identity with the standard exchange mode", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.ExchangeMode = "standard"
+				})},
+				{name: "external identity without a public host", edit: func(p *otilmv1alpha1.Platform) { p.Spec.Common.HostName = "" },
+					reject: testMCPHostRejection},
+
+				// Managed identity, stated or implied, needs a managed Keycloak, at 26.8.1 or later when pinned.
+				{name: "managed identity stated alone", edit: managed(modeOnly)},
+				{name: "managed identity on an external Keycloak", edit: func(p *otilmv1alpha1.Platform) {
+					managed(modeOnly)(p)
+					externalKeycloak(p)
+				}, reject: testMCPKeycloakRejection},
+				{name: "an identity block that names no mode, on an external Keycloak", edit: func(p *otilmv1alpha1.Platform) {
+					p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{}
+					externalKeycloak(p)
+				}, reject: testMCPKeycloakRejection},
+				{name: "managed identity on a managed Keycloak pinned below 26.8.1", edit: func(p *otilmv1alpha1.Platform) {
+					managed(modeOnly)(p)
+					p.Spec.Keycloak.Managed.Version = testMCPOldKeycloakVersion
+				}, reject: testMCPVersionRejection},
+
+				// The delegation group belongs to managed mode: the operator creates it in Keycloak.
+				{name: "external identity with a delegation group", edit: func(p *otilmv1alpha1.Platform) {
+					p.Spec.MCP.Delegation.Group = testMCPDelegationGroup
+				}, reject: testMCPGroupRejection},
+				{name: "managed identity with a delegation group", edit: func(p *otilmv1alpha1.Platform) {
+					managed(modeOnly)(p)
+					p.Spec.MCP.Delegation.Group = testMCPDelegationGroup
+				}},
+				{name: "an identity block that names no mode, with a delegation group", edit: func(p *otilmv1alpha1.Platform) {
+					p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{}
+					p.Spec.MCP.Delegation.Group = testMCPDelegationGroup
+				}},
+
+				// The platform's own Keycloak is not a provider the platform does not manage. It is served
+				// under /kc/ on the platform's host: the host of an enabled edge that names one, otherwise
+				// common.hostName.
+				{name: "an issuer under the platform's Keycloak path, on common.hostName",
+					edit: issuerUnder(testEdgeHost), reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, on the host of an enabled edge",
+					edit: issuerUnder(testMCPIdentityEdgeHost, edgeOn(testMCPIdentityEdgeHost, true)), reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, on the host of an enabled edge with no common.hostName",
+					edit: issuerUnder(testMCPIdentityEdgeHost, edgeOn(testMCPIdentityEdgeHost, true),
+						func(p *otilmv1alpha1.Platform) { p.Spec.Common.HostName = "" }),
+					reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, on common.hostName behind an enabled edge that names no host",
+					edit: issuerUnder(testEdgeHost, edgeOn("", true)), reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, on common.hostName behind a disabled edge",
+					edit: issuerUnder(testEdgeHost, edgeOn(testMCPIdentityEdgeHost, false)), reject: testMCPOwnKeycloakRejection},
+				// A host is the same in any case, and https has the port 443 whether the URL spells it or not.
+				{name: "an issuer under the platform's Keycloak path, with common.hostName in another case",
+					edit: issuerUnder(strings.ToUpper(testEdgeHost)), reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, with the port 443 spelled out",
+					edit: issuerUnder(testEdgeHost + ":443"), reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer in lower case under the Keycloak path of a common.hostName in capitals",
+					edit:   issuerUnder(testEdgeHost, func(p *otilmv1alpha1.Platform) { p.Spec.Common.HostName = strings.ToUpper(testEdgeHost) }),
+					reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path, on the host of an enabled edge in another case and with the port 443",
+					edit:   issuerUnder(strings.ToUpper(testMCPIdentityEdgeHost)+":443", edgeOn(testMCPIdentityEdgeHost, true)),
+					reject: testMCPOwnKeycloakRejection},
+				{name: "an issuer under the platform's Keycloak path on another port of common.hostName",
+					edit: issuerUnder(testEdgeHost + ":8443")},
+				{name: "an issuer under the platform's Keycloak path on a port that only starts with 443",
+					edit: issuerUnder(testEdgeHost + ":4430")},
+				{name: "an issuer under common.hostName's Keycloak path while an enabled edge names another host",
+					edit: issuerUnder(testEdgeHost, edgeOn(testMCPIdentityEdgeHost, true))},
+				{name: "an issuer under a disabled edge's host",
+					edit: issuerUnder(testMCPIdentityEdgeHost, edgeOn(testMCPIdentityEdgeHost, false))},
+				{name: "an issuer under the Keycloak path of the platform's host, on an external Keycloak",
+					edit: issuerUnder(testEdgeHost, externalKeycloak)},
+				{name: "an issuer under the Keycloak path of the platform's host, with no keycloak block",
+					edit: issuerUnder(testEdgeHost, func(p *otilmv1alpha1.Platform) { p.Spec.Keycloak = nil })},
+				{name: "an issuer under the platform's Keycloak path while MCP is off",
+					edit: issuerUnder(testEdgeHost, func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false })},
+				{name: "an issuer on common.hostName outside its Keycloak path", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.Issuer = testHTTPSScheme + testEdgeHost + "/realms/corp"
+				})},
+				{name: "an issuer on a host that only begins with common.hostName", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.Issuer = testHTTPSScheme + testEdgeHost + ".idp.test/kc/realms/corp"
+				})},
+				{name: "an issuer on the host of an enabled edge outside its Keycloak path", edit: func(p *otilmv1alpha1.Platform) {
+					edgeOn(testMCPIdentityEdgeHost, true)(p)
+					p.Spec.MCP.Identity.Issuer = testHTTPSScheme + testMCPIdentityEdgeHost + "/realms/corp"
+				}},
+				{name: "an issuer on a host that only begins with the host of an enabled edge", edit: func(p *otilmv1alpha1.Platform) {
+					edgeOn(testMCPIdentityEdgeHost, true)(p)
+					p.Spec.MCP.Identity.Issuer = testHTTPSScheme + testMCPIdentityEdgeHost + ".idp.test/kc/realms/corp"
+				}},
+
+				// Schema bounds beyond the lengths: the enums and the one list.
+				{name: "an unknown identity mode", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.Mode = "other" }),
+					reject: testMCPUnsupportedRejection},
+				{name: "an unknown exchange mode", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { id.ExchangeMode = "other" }),
+					reject: testMCPUnsupportedRejection},
+				{name: "33 authorization scopes", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.AuthorizationScopes = scopes(33, 1)
+				}), reject: testMCPTooManyRejection},
+				{name: "an authorization scope of 256 characters", edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.AuthorizationScopes = scopes(1, 256)
+				}), reject: testMCPTooLongRejection},
+				{name: "32 authorization scopes of 255 characters and every other setting at its longest",
+					edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) {
+						id.AuthorizationScopes = scopes(32, 255)
+						for _, l := range lengths {
+							l.set(id, valueOf(l, l.limit))
+						}
+					})},
+			}
+			for _, s := range required {
+				cases = append(cases, identityCase{
+					name:   "external identity without " + s.name,
+					edit:   onIdentity(s.clear),
+					reject: testMCPIdentityRequiredRejection,
+				})
+			}
+			for _, s := range externalOnly {
+				cases = append(cases, identityCase{
+					name:   "managed identity with " + s.name,
+					edit:   managed(s.set),
+					reject: testMCPIdentityManagedRejection,
+				})
+			}
+			for _, u := range append([]urlSetting{issuer}, backchannel...) {
+				for _, m := range malformed {
+					cases = append(cases, identityCase{
+						name:   u.name + " with " + m.why,
+						edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { u.set(id, m.url) }),
+						reject: u.reject,
+					})
+				}
+			}
+			for _, url := range []string{"http://idp.example.com/x", "http://kc.idp.svc:8080/x"} {
+				cases = append(cases, identityCase{
+					name:   "an issuer over http, " + url,
+					edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { issuer.set(id, url) }),
+					reject: issuer.reject,
+				})
+			}
+			// An issuer is the identifier the provider puts in its tokens, so it carries no query either.
+			for _, q := range []struct{ why, url string }{
+				{"a query", "https://idp.example.com/realms/x?x=1"},
+				{"a query and no path", "https://idp.example.com?x=1"},
+				{"a fragment and no path", "https://idp.example.com#f"},
+			} {
+				cases = append(cases, identityCase{
+					name:   "an issuer with " + q.why,
+					edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { issuer.set(id, q.url) }),
+					reject: issuer.reject,
+				})
+			}
+			for _, u := range backchannel {
+				for _, h := range plainHTTP {
+					cases = append(cases, identityCase{
+						name:   u.name + " over http to " + h.why,
+						edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { u.set(id, h.url) }),
+						reject: u.reject,
+					})
+				}
+				for _, h := range serviceHosts {
+					cases = append(cases, identityCase{
+						name: u.name + " over http to " + h.why,
+						edit: onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { u.set(id, h.url) }),
+					})
+				}
+			}
+			for _, l := range lengths {
+				cases = append(cases, identityCase{
+					name:   l.name + " of one character more than its limit",
+					edit:   onIdentity(func(id *otilmv1alpha1.MCPIdentitySpec) { l.set(id, valueOf(l, l.limit+1)) }),
+					reject: testMCPTooLongRejection,
+				})
+			}
+			cases = append(cases, secretCases(func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ClientSecretRef = v },
+				testMCPSecretNameRejection, badSecretNames, goodSecretNames)...)
+			cases = append(cases, secretCases(func(id *otilmv1alpha1.MCPIdentitySpec, v string) { id.ClientSecretKey = v },
+				testMCPSecretKeyRejection, badSecretKeys, goodSecretKeys)...)
+
+			for i, tc := range cases {
+				title := "accepts " + tc.name
+				if tc.reject != "" {
+					title = "rejects " + tc.name
+				}
+				It(title, func() {
+					p := externalPlatform(freshNS(fmt.Sprintf("cel-mcp-id-%d", i)))
+					if tc.edit != nil {
+						tc.edit(p)
+					}
+					if tc.reject == "" {
+						Expect(k8sClient.Create(ctx, p)).To(Succeed())
+						return
+					}
+					rejects(p, tc.reject)
+				})
+			}
+			It("rejects managed identity with an issuer under the platform's Keycloak path without naming that Keycloak", func() {
+				p := externalPlatform(freshNS("cel-mcp-id-managedissuer"))
+				managed(func(id *otilmv1alpha1.MCPIdentitySpec) {
+					id.Issuer = testHTTPSScheme + testEdgeHost + testMCPOwnRealmPath
+				})(p)
+				err := k8sClient.Create(ctx, p)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring(testMCPIdentityManagedRejection))
+				Expect(err.Error()).NotTo(ContainSubstring(testMCPOwnKeycloakRejection))
+			})
+
+			// The typed client omits an empty string and always sends the common and mcp blocks, so a setting
+			// that is present and empty, or a block that is absent, can only be sent unstructured. A setting
+			// that is present and empty counts as unset, as an empty delegation group does.
+			It("accepts managed identity whose settings are all explicitly empty", func() {
+				ns := freshNS("cel-mcp-id-empty")
+				p := mcpPlatform(ns)
+				p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{Mode: "managed"}
+				u := onTheWire(p, func(obj map[string]interface{}) {
+					for _, name := range []string{
+						"issuer", "jwkSetUri", "tokenUri", "clientId", "clientSecretRef", "clientSecretKey",
+						"exchangeScope", "requiredScope", "apiAudience",
+					} {
+						Expect(unstructured.SetNestedField(obj, "", "spec", "mcp", "identity", name)).To(Succeed())
+					}
+					Expect(unstructured.SetNestedStringSlice(obj, []string{}, "spec", "mcp", "identity", "authorizationScopes")).To(Succeed())
+				})
+				Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			})
+			// exchangeMode has no such case: its enum refuses an empty string outright.
+			for i, name := range []string{"issuer", "jwkSetUri", "tokenUri", "clientId", "clientSecretRef"} {
+				It("rejects external identity whose "+name+" is explicitly empty", func() {
+					ns := freshNS(fmt.Sprintf("cel-mcp-id-empty-%d", i))
+					u := onTheWire(externalPlatform(ns), func(obj map[string]interface{}) {
+						Expect(unstructured.SetNestedField(obj, "", "spec", "mcp", "identity", name)).To(Succeed())
+					})
+					rejects(u, testMCPIdentityRequiredRejection)
+				})
+			}
+			// clientSecretKey is optional with external identity, where an empty value takes its default.
+			It("accepts external identity whose clientSecretKey is explicitly empty", func() {
+				ns := freshNS("cel-mcp-id-emptykey")
+				u := onTheWire(externalPlatform(ns), func(obj map[string]interface{}) {
+					Expect(unstructured.SetNestedField(obj, "", "spec", "mcp", "identity", "clientSecretKey")).To(Succeed())
+				})
+				Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			})
+			It("accepts external identity whose delegation group is explicitly empty", func() {
+				ns := freshNS("cel-mcp-id-emptygroup")
+				u := onTheWire(externalPlatform(ns), func(obj map[string]interface{}) {
+					Expect(unstructured.SetNestedField(obj, "", "spec", "mcp", "delegation", "group")).To(Succeed())
+				})
+				Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			})
+			It("accepts external identity with no delegation block on the wire", func() {
+				ns := freshNS("cel-mcp-id-nodelegation")
+				u := onTheWire(externalPlatform(ns), func(obj map[string]interface{}) {
+					unstructured.RemoveNestedField(obj, "spec", "mcp", "delegation")
+				})
+				Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			})
+			It("rejects external identity with no common block and no edge on the wire", func() {
+				ns := freshNS("cel-mcp-id-nocommon")
+				p := externalPlatform(ns)
+				p.Spec.Common.HostName = ""
+				rejects(onTheWire(p, func(obj map[string]interface{}) {
+					unstructured.RemoveNestedField(obj, "spec", "common")
+				}), testMCPHostRejection)
+			})
+			// An enabled edge whose host is present but empty names no host, so the platform's host is
+			// common.hostName and an issuer under its Keycloak path is the platform's own.
+			It("rejects an issuer under common.hostName's Keycloak path behind an enabled edge whose host is explicitly empty", func() {
+				ns := freshNS("cel-mcp-id-emptyedgehost")
+				p := externalPlatform(ns)
+				edgeOn(testMCPIdentityEdgeHost, true)(p)
+				p.Spec.MCP.Identity.Issuer = testHTTPSScheme + testEdgeHost + testMCPOwnRealmPath
+				rejects(onTheWire(p, func(obj map[string]interface{}) {
+					Expect(unstructured.SetNestedField(obj, "", "spec", "edge", "host")).To(Succeed())
+				}), testMCPOwnKeycloakRejection)
+			})
+
+			It("stores no identity block for a Platform that sets none", func() {
+				ns := freshNS("cel-mcp-id-none")
+				Expect(k8sClient.Create(ctx, mcpPlatform(ns))).To(Succeed())
+				got := &otilmv1alpha1.Platform{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ilm"}, got)).To(Succeed())
+				Expect(got.Spec.MCP.Identity).To(BeNil())
+			})
+			It("defaults an empty identity block to managed mode and nothing more", func() {
+				ns := freshNS("cel-mcp-id-default")
+				p := mcpPlatform(ns)
+				p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{}
+				Expect(k8sClient.Create(ctx, p)).To(Succeed())
+				got := &otilmv1alpha1.Platform{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "ilm"}, got)).To(Succeed())
+				Expect(got.Spec.MCP.Identity).To(Equal(&otilmv1alpha1.MCPIdentitySpec{Mode: "managed"}))
+			})
 		})
 	})
 })

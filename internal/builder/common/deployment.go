@@ -118,8 +118,11 @@ func buildPodTemplateSpec(c Component) corev1.PodTemplateSpec {
 }
 
 // buildContainerEnv builds the main container's env in order: inline, secretKeyRef,
-// configMapKeyRef, ExtraEnv, then fieldRef. Kubernetes resolves a duplicate env name to the
-// LAST entry in the list, so that order IS the precedence, and it encodes two rules:
+// configMapKeyRef, ExtraEnv, then fieldRef. A name that more than one source renders is left
+// once, as its LAST entry: the operator applies Deployments server-side, and the apiserver
+// refuses an applied container env that names a variable twice. The last entry is the one
+// Kubernetes would have used for a duplicate, so that order IS the precedence, and it encodes
+// two rules:
 //
 //   - ExtraEnv wins over the operator's own Env/SecretEnv/ConfigMapEnv. It is the passthrough
 //     slot for user-supplied keyed Secret/ConfigMap refs, and overriding an operator default
@@ -189,7 +192,23 @@ func buildContainerEnv(c Component) []corev1.EnvVar {
 			},
 		})
 	}
-	return env
+	return keepLastOfEachName(env)
+}
+
+// keepLastOfEachName drops every entry that a later entry of the same name overrides. The entries
+// left keep their order, each where it stands.
+func keepLastOfEachName(env []corev1.EnvVar) []corev1.EnvVar {
+	last := make(map[string]int, len(env))
+	for i, e := range env {
+		last[e.Name] = i
+	}
+	kept := env[:0]
+	for i, e := range env {
+		if last[e.Name] == i {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // buildContainerPorts builds the main container's ports: the primary port first (named

@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package platform
 
 import (
+	"cmp"
+	"maps"
+	"slices"
 	"testing"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -40,6 +43,29 @@ func mcpPlatform(mutate func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform {
 	return p
 }
 
+func mcpIdentityPlatform(identity *otilmv1alpha1.MCPIdentitySpec) *otilmv1alpha1.Platform {
+	return mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity = identity })
+}
+
+// mcpExternalPlatform returns mcpPlatform with MCP signing in through an external identity provider,
+// set to the settings the mode requires and nothing else. mutate, when set, runs last.
+func mcpExternalPlatform(mutate func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform {
+	return mcpPlatform(func(p *otilmv1alpha1.Platform) {
+		p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{
+			Mode:            testMCPIdentityExternal,
+			Issuer:          testMCPIdPIssuer,
+			JWKSetURI:       testMCPIdPJWKS,
+			TokenURI:        testMCPIdPToken,
+			ClientID:        testMCPIdPClientID,
+			ClientSecretRef: testMCPIdPClientSecret,
+			ExchangeMode:    testMCPExchangeDelegation,
+		}
+		if mutate != nil {
+			mutate(p)
+		}
+	})
+}
+
 // TestResolveMCPRendersTheDelegationContract pins every environment variable the MCP server gets,
 // by name and value. Together they are the contract between the MCP image, Keycloak and Core for
 // MCP acting on behalf of the signed-in user.
@@ -58,7 +84,7 @@ func TestResolveMCPRendersTheDelegationContract(t *testing.T) {
 		{"ILM_MCP_TOOLSETS", "all"},
 		{"ILM_MCP_SECURITY_ENABLED", "true"},
 		{testMCPIssuerEnv, "https://ilm.example.com/kc/realms/ilm"},
-		{testMCPResourceEnv, "https://ilm.example.com/mcp"},
+		{testMCPResourceEnv, testMCPResourceURL},
 		{testMCPJWKSEnv, "http://ilm-keycloak-service:8080/kc/realms/ilm/protocol/openid-connect/certs"},
 		{testMCPTokenEnv, "http://ilm-keycloak-service:8080/kc/realms/ilm/protocol/openid-connect/token"},
 		{"ILM_MCP_SECURITY_ALLOWED_ORIGINS", ""},
@@ -74,14 +100,16 @@ func TestResolveMCPRendersTheDelegationContract(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := envValue(c.Env, tc.name)
-			require.Truef(t, ok, "%s must be set", tc.name)
+			require.Truef(t, ok, testMustBeSet, tc.name)
 			assert.Equal(t, tc.want, got)
 		})
 	}
+	// With no spec.common.proxy, MCP gets none of Core's proxy variables: the contract is all of it.
 	assert.Len(t, c.Env, len(tests), "every inline variable is in the contract, and none is outside it")
 
 	// The client secret is a reference to the operator-owned Secret, never an inline value, and a
-	// required one: the pod waits for the Secret instead of starting without its credential.
+	// required one: the pod waits for the Secret instead of starting without its credential. With no
+	// spec.common.trustedCertificates, it is the only Secret MCP references.
 	_, inline := envValue(c.Env, testMCPClientSecretEnv)
 	assert.False(t, inline, "the client secret must not be an inline value")
 	assert.Equal(t, []common.SecretEnvRef{{
@@ -122,7 +150,7 @@ func TestResolveMCPFollowsTheHostRealmAndPlatformName(t *testing.T) {
 			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.Keycloak.Realm = "custom" },
 			want: map[string]string{
 				testMCPIssuerEnv:   "https://ilm.example.com/kc/realms/custom",
-				testMCPResourceEnv: "https://ilm.example.com/mcp",
+				testMCPResourceEnv: testMCPResourceURL,
 				testMCPJWKSEnv:     "http://ilm-keycloak-service:8080/kc/realms/custom/protocol/openid-connect/certs",
 				testMCPTokenEnv:    "http://ilm-keycloak-service:8080/kc/realms/custom/protocol/openid-connect/token",
 			},
@@ -151,7 +179,7 @@ func TestResolveMCPFollowsTheHostRealmAndPlatformName(t *testing.T) {
 			c := ResolveMCP(mcpPlatform(tc.mutate))
 			for name, want := range tc.want {
 				got, ok := envValue(c.Env, name)
-				require.Truef(t, ok, "%s must be set", name)
+				require.Truef(t, ok, testMustBeSet, name)
 				assert.Equal(t, want, got, name)
 			}
 		})
@@ -511,4 +539,452 @@ func TestMCPServiceMonitorFollowsTheWorkload(t *testing.T) {
 	p.Spec.MCP.Enabled = true
 	p.Spec.Version = testVersion220
 	assert.Empty(t, ResolvePlatformServiceMonitors(p), "no ServiceMonitor on a bundle with no MCP image")
+}
+
+// mcpOptionalSecurityEnv are the variables external mode passes to MCP only when the spec sets the
+// matching setting, so that MCP's own default applies otherwise. Managed mode sets all of them.
+var mcpOptionalSecurityEnv = []string{
+	testMCPAPIAudienceEnv, testMCPExchangeScopeEnv, testMCPAuthScopesEnv, testMCPRequiredScopeEnv,
+}
+
+// externalMCPEnv returns the environment an external identity gives MCP: managed mode's variables in
+// managed mode's order, without those the identity provider decides (decided), and with the values in
+// overrides in their place. It fails the test when an override names a variable managed mode does not
+// render.
+func externalMCPEnv(t *testing.T, managed []common.EnvPair, decided []string, overrides ...map[string]string) []common.EnvPair {
+	t.Helper()
+	want := map[string]string{}
+	for _, e := range managed {
+		if !slices.Contains(decided, e.Name) {
+			want[e.Name] = e.Value
+		}
+	}
+	for _, override := range overrides {
+		maps.Copy(want, override)
+	}
+	var env []common.EnvPair
+	for _, e := range managed {
+		if value, ok := want[e.Name]; ok {
+			env = append(env, common.EnvPair{Name: e.Name, Value: value})
+		}
+	}
+	require.Len(t, env, len(want), "every expected variable is one managed mode renders")
+	return env
+}
+
+// TestMCPEnvExternalIdentity proves an external identity provider replaces what managed mode derives
+// from the platform's own Keycloak. The issuer, the key-set and token endpoints, the client and the
+// exchange mode come from the spec, each optional setting is passed only when the spec sets it, and
+// the client secret is a reference to the Secret the spec names. Every other variable is what managed
+// mode renders, in managed mode's order.
+func TestMCPEnvExternalIdentity(t *testing.T) {
+	const (
+		exchangeScope = "openid corp-upstream"
+		requiredScope = "mcp:use"
+		apiAudience   = "corp-ilm"
+		authScopes    = "openid,delegation:client:mcp-corp"
+	)
+	// The variables the identity provider decides. Every other managed variable keeps its value.
+	identityEnv := append([]string{
+		testMCPIssuerEnv, testMCPJWKSEnv, testMCPTokenEnv, testMCPClientIDEnv, testMCPExchangeModeEnv,
+	}, mcpOptionalSecurityEnv...)
+	managed := ResolveMCP(mcpPlatform(nil)).Env
+	// What external mode must keep as it is in managed mode: the resource URL derived from the host,
+	// the Core API, the HTTP switch and the authentication method.
+	unchanged := map[string]string{
+		testMCPResourceEnv:    testMCPResourceURL,
+		"ILM_API_URL":         "http://core:8080/api",
+		testMCPBackchannelEnv: "true",
+		"ILM_AUTH_METHOD":     "oauth-delegation",
+	}
+	required := map[string]string{
+		testMCPIssuerEnv:       testMCPIdPIssuer,
+		testMCPJWKSEnv:         testMCPIdPJWKS,
+		testMCPTokenEnv:        testMCPIdPToken,
+		testMCPClientIDEnv:     testMCPIdPClientID,
+		testMCPExchangeModeEnv: testMCPExchangeDelegation,
+	}
+
+	tests := []struct {
+		name string
+		// mutate changes the platform on top of the required settings.
+		mutate func(*otilmv1alpha1.Platform)
+		// want holds the optional settings the case sets, and the values it changes.
+		want map[string]string
+		// secretKey is the key the client secret is read from, client-secret when empty.
+		secretKey string
+	}{
+		{name: "required settings only"},
+		{
+			name:   "standard exchange mode",
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.ExchangeMode = testMCPExchangeStandard },
+			want:   map[string]string{testMCPExchangeModeEnv: testMCPExchangeStandard},
+		},
+		{
+			name:   "exchange scope alone",
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.ExchangeScope = exchangeScope },
+			want:   map[string]string{testMCPExchangeScopeEnv: exchangeScope},
+		},
+		{
+			name:   "required scope alone",
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.RequiredScope = requiredScope },
+			want:   map[string]string{testMCPRequiredScopeEnv: requiredScope},
+		},
+		{
+			name:   "API audience alone",
+			mutate: func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.APIAudience = apiAudience },
+			want:   map[string]string{testMCPAPIAudienceEnv: apiAudience},
+		},
+		{
+			name: "authorization scopes alone, comma-joined",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.MCP.Identity.AuthorizationScopes = []string{"openid", "delegation:client:mcp-corp"}
+			},
+			want: map[string]string{testMCPAuthScopesEnv: authScopes},
+		},
+		{
+			name: "every optional setting and another client secret key",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				id := p.Spec.MCP.Identity
+				id.ExchangeScope = exchangeScope
+				id.RequiredScope = requiredScope
+				id.APIAudience = apiAudience
+				id.AuthorizationScopes = []string{"openid", "delegation:client:mcp-corp"}
+				id.ClientSecretKey = testMCPIdPCustomSecretKey
+			},
+			want: map[string]string{
+				testMCPExchangeScopeEnv: exchangeScope,
+				testMCPRequiredScopeEnv: requiredScope,
+				testMCPAPIAudienceEnv:   apiAudience,
+				testMCPAuthScopesEnv:    authScopes,
+			},
+			secretKey: testMCPIdPCustomSecretKey,
+		},
+		{
+			name: "no Keycloak block and another platform name",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Keycloak = nil
+				p.Name = "corp"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ResolveMCP(mcpExternalPlatform(tc.mutate))
+
+			wantEnv := externalMCPEnv(t, managed, identityEnv, required, tc.want)
+			assert.Equal(t, wantEnv, c.Env, "managed mode's variables and order, with the identity provider's values")
+			for name, value := range unchanged {
+				got, ok := envValue(c.Env, name)
+				require.Truef(t, ok, testMustBeSet, name)
+				assert.Equal(t, value, got, name)
+			}
+			assert.Equal(t, []common.SecretEnvRef{{
+				EnvVar: testMCPClientSecretEnv, SecretName: testMCPIdPClientSecret,
+				SecretKey: cmp.Or(tc.secretKey, testMCPIdPClientSecretKey),
+			}}, c.SecretEnv, "the client secret is a required reference to the Secret the spec names")
+		})
+	}
+}
+
+// TestMCPIdentityMode proves which identity mode MCP renders in. Only an explicit external mode is
+// external: no identity block, an identity whose mode is empty (a Platform built in Go skips the
+// CRD's default) and mode managed are all managed. Neither mode applies while MCP does not render.
+func TestMCPIdentityMode(t *testing.T) {
+	tests := []struct {
+		name                      string
+		platform                  *otilmv1alpha1.Platform
+		wantManaged, wantExternal bool
+	}{
+		{"no identity block", mcpPlatform(nil), true, false},
+		{"identity with an empty mode", mcpIdentityPlatform(&otilmv1alpha1.MCPIdentitySpec{}), true, false},
+		{
+			"identity with mode managed",
+			mcpIdentityPlatform(&otilmv1alpha1.MCPIdentitySpec{Mode: testMCPIdentityManaged}), true, false,
+		},
+		{"identity with mode external", mcpExternalPlatform(nil), false, true},
+		{"MCP off", mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }), false, false},
+		{
+			"external identity, MCP off",
+			mcpExternalPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }), false, false,
+		},
+		{
+			"external identity, bundle with no MCP image",
+			mcpExternalPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.Version = testVersion220 }), false, false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.wantManaged, MCPManagedIdentity(tc.platform), "MCPManagedIdentity")
+			assert.Equal(t, tc.wantExternal, MCPExternalIdentity(tc.platform), "MCPExternalIdentity")
+		})
+	}
+}
+
+// TestResolveMCPRendersAnEmptyIdentityAsManaged proves an identity block that names no external mode
+// renders the managed MCP server, byte for byte as a Platform with no identity block does.
+func TestResolveMCPRendersAnEmptyIdentityAsManaged(t *testing.T) {
+	want := ResolveMCP(mcpPlatform(nil))
+	identities := map[string]*otilmv1alpha1.MCPIdentitySpec{
+		"an empty identity": {},
+		"mode managed":      {Mode: testMCPIdentityManaged},
+	}
+	for name, identity := range identities {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, want, ResolveMCP(mcpIdentityPlatform(identity)))
+		})
+	}
+}
+
+// TestMCPClientSecret proves where MCP's client secret is read from: the operator-owned Secret in
+// managed mode, and the Secret the spec references in external mode, under the key it names or
+// client-secret by default.
+func TestMCPClientSecret(t *testing.T) {
+	tests := []struct {
+		name              string
+		platform          *otilmv1alpha1.Platform
+		wantName, wantKey string
+	}{
+		{"managed", mcpPlatform(nil), testMCPClientSecret, testMCPClientSecretKey},
+		{
+			"an identity with an empty mode", mcpIdentityPlatform(&otilmv1alpha1.MCPIdentitySpec{}),
+			testMCPClientSecret, testMCPClientSecretKey,
+		},
+		{"external, default key", mcpExternalPlatform(nil), testMCPIdPClientSecret, testMCPIdPClientSecretKey},
+		{
+			"external, named key",
+			mcpExternalPlatform(func(p *otilmv1alpha1.Platform) {
+				p.Spec.MCP.Identity.ClientSecretKey = testMCPIdPCustomSecretKey
+			}),
+			testMCPIdPClientSecret, testMCPIdPCustomSecretKey,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			name, key := MCPClientSecret(tc.platform)
+			assert.Equal(t, tc.wantName, name)
+			assert.Equal(t, tc.wantKey, key)
+		})
+	}
+}
+
+// TestMCPNoProxyListsItsOwnPlainHTTPHosts proves what MCP's NO_PROXY holds while HTTP_PROXY or
+// HTTPS_PROXY is set: the value Core gets, kept first, then the host of every plain-http URL MCP is given
+// that the value does not list yet, so that MCP's calls inside the cluster never reach the proxy. Those
+// are the Core API, the managed Keycloak's Service with the managed identity, and the key-set and token
+// hosts of an external identity that are http. An https host goes through the proxy's tunnel, so it stays
+// off the list. With no proxy URL nothing is added, and Core's NO_PROXY is never changed.
+func TestMCPNoProxyListsItsOwnPlainHTTPHosts(t *testing.T) {
+	const (
+		httpsJWKS  = "https://idp.example.com/realms/corp/protocol/openid-connect/certs"
+		httpsToken = "https://idp.example.com/realms/corp/protocol/openid-connect/token"
+		keycloak   = "ilm-keycloak-service"
+	)
+	endpoints := func(jwks, token string) func(*otilmv1alpha1.Platform) {
+		return func(p *otilmv1alpha1.Platform) {
+			p.Spec.MCP.Identity.JWKSetURI, p.Spec.MCP.Identity.TokenURI = jwks, token
+		}
+	}
+	tests := []struct {
+		name      string
+		build     func(func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform
+		endpoints func(*otilmv1alpha1.Platform)
+		proxy     otilmv1alpha1.OutboundProxySpec
+		// want is MCP's NO_PROXY, empty for none.
+		want string
+	}{
+		{
+			name: "managed identity: the Core API and the managed Keycloak's Service", build: mcpPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP}, want: "core," + keycloak,
+		},
+		{
+			name: "managed identity: after the entries the user wrote", build: mcpPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP, NoProxy: testNoProxyEntries}, want: testNoProxyEntries + ",core," + keycloak,
+		},
+		{
+			name: "managed identity: a host the user lists already is not added again, whatever separates the entries", build: mcpPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP, NoProxy: "localhost|core, " + keycloak}, want: "localhost|core, " + keycloak,
+		},
+		{
+			name: "managed identity: HTTPS_PROXY alone is a proxy", build: mcpPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTPS: testProxyHTTPS}, want: "core," + keycloak,
+		},
+		{
+			name: "external identity with https endpoints: the Core API alone", build: mcpExternalPlatform, endpoints: endpoints(httpsJWKS, httpsToken),
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP}, want: "core",
+		},
+		{
+			name: "external identity with http endpoints on one Service host: that host once", build: mcpExternalPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP}, want: "core,kc.idp.svc",
+		},
+		{
+			name: "external identity with an http key set and an https token endpoint", build: mcpExternalPlatform, endpoints: endpoints(testMCPIdPJWKS, httpsToken),
+			proxy: otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP}, want: "core,kc.idp.svc",
+		},
+		{
+			name: "external identity with http endpoints on two hosts, one with a cluster domain", build: mcpExternalPlatform,
+			endpoints: endpoints("http://a.idp.svc/certs", "http://pod-0.b.idp.svc.cluster.local:8080/token"),
+			proxy:     otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP, NoProxy: "localhost"}, want: "localhost,core,a.idp.svc,pod-0.b.idp.svc.cluster.local",
+		},
+		{
+			name: "no proxy URL: the hosts to bypass are Core's value as it is", build: mcpPlatform,
+			proxy: otilmv1alpha1.OutboundProxySpec{NoProxy: testNoProxyEntries}, want: testNoProxyEntries,
+		},
+		{name: "no proxy at all: no NO_PROXY", build: mcpPlatform},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := tc.build(func(p *otilmv1alpha1.Platform) {
+				if tc.endpoints != nil {
+					tc.endpoints(p)
+				}
+				p.Spec.Common.Proxy = tc.proxy
+			})
+
+			got, set := envValue(ResolveMCP(p).Env, testNoProxyEnv)
+			assert.Equal(t, tc.want != "", set, "MCP has NO_PROXY only when there is something to put in it")
+			assert.Equal(t, tc.want, got)
+
+			core, coreSet := envValue(ResolveCore(p).Env, testNoProxyEnv)
+			assert.Equal(t, tc.proxy.NoProxy != "", coreSet)
+			assert.Equal(t, tc.proxy.NoProxy, core, "Core's NO_PROXY is the value the spec holds, whatever MCP adds")
+		})
+	}
+}
+
+// TestMCPGetsTrustAndProxyLikeCore proves MCP gets the trusted certificates and the outbound proxy the
+// way Core does, in both identity modes: the same optional Secret reference, and the same proxy
+// variables with the same values, placed after the variables MCP already had. PROXY_ENABLED stays with
+// Core, which alone reads it. With neither setting, MCP has none of them. While a proxy URL is set,
+// MCP's NO_PROXY also lists its own hosts, which TestMCPNoProxyListsItsOwnPlainHTTPHosts covers.
+func TestMCPGetsTrustAndProxyLikeCore(t *testing.T) {
+	const caKey = "ca.crt"
+	trust := func(secret, key string) []common.SecretEnvRef {
+		return []common.SecretEnvRef{{EnvVar: testTrustedCertsEnv, SecretName: secret, SecretKey: key, Optional: true}}
+	}
+	generatedAdminCert := func() *otilmv1alpha1.RegisterAdminSpec {
+		return &otilmv1alpha1.RegisterAdminSpec{
+			Enabled:     true,
+			Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "generated"},
+		}
+	}
+
+	modes := []struct {
+		name  string
+		build func(func(*otilmv1alpha1.Platform)) *otilmv1alpha1.Platform
+	}{
+		{"managed identity", mcpPlatform},
+		{"external identity", mcpExternalPlatform},
+	}
+	tests := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+		// wantTrust is the reference MCP holds after its client secret, and wantProxy the variables it
+		// holds after the ones it already had.
+		wantTrust []common.SecretEnvRef
+		wantProxy map[string]string
+	}{
+		{name: "neither is set"},
+		{
+			name:      "trusted certificates",
+			mutate:    func(p *otilmv1alpha1.Platform) { p.Spec.Common.TrustedCertificates.SecretRef = testTrustSecret },
+			wantTrust: trust(testTrustSecret, caKey),
+		},
+		{
+			name: "trusted certificates under another key",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.TrustedCertificates = otilmv1alpha1.TrustedCertificatesSpec{SecretRef: testTrustSecret, CAKey: testTLSCA}
+			},
+			wantTrust: trust(testTrustSecret, testTLSCA),
+		},
+		{
+			name: "the bundle the operator composes from the administrator certificate's CA and a bundle of the user's",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.TrustedCertificates.SecretRef = testTrustSecret
+				p.Spec.RegisterAdmin = generatedAdminCert()
+			},
+			wantTrust: trust(composedTrustedCertsSecretName, caKey),
+		},
+		{
+			name:      "the bundle the operator composes from the administrator certificate's CA alone",
+			mutate:    func(p *otilmv1alpha1.Platform) { p.Spec.RegisterAdmin = generatedAdminCert() },
+			wantTrust: trust(composedTrustedCertsSecretName, caKey),
+		},
+		{
+			name: "both proxy URLs",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true, HTTP: testProxyHTTP, HTTPS: testProxyHTTPS}
+			},
+			wantProxy: map[string]string{testHTTPProxyEnv: testProxyHTTP, testHTTPSProxyEnv: testProxyHTTPS},
+		},
+		{
+			name: "the hosts to bypass the proxy for, with no proxy URL",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true, NoProxy: testNoProxyEntries}
+			},
+			wantProxy: map[string]string{testNoProxyEnv: testNoProxyEntries},
+		},
+		{
+			name: "only the proxy settings that are set",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{Enabled: true, HTTPS: testProxyHTTPS}
+			},
+			wantProxy: map[string]string{testHTTPSProxyEnv: testProxyHTTPS},
+		},
+		{
+			name: "trusted certificates and the proxy together",
+			mutate: func(p *otilmv1alpha1.Platform) {
+				p.Spec.Common.TrustedCertificates.SecretRef = testTrustSecret
+				p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{HTTP: testProxyHTTP}
+			},
+			wantTrust: trust(testTrustSecret, caKey),
+			wantProxy: map[string]string{testHTTPProxyEnv: testProxyHTTP},
+		},
+	}
+	for _, mode := range modes {
+		for _, tc := range tests {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				p := mode.build(tc.mutate)
+				core, mcp := ResolveCore(p), ResolveMCP(p)
+
+				secretName, secretKey := MCPClientSecret(p)
+				wantSecrets := append([]common.SecretEnvRef{{
+					EnvVar: testMCPClientSecretEnv, SecretName: secretName, SecretKey: secretKey,
+				}}, tc.wantTrust...)
+				assert.Equal(t, wantSecrets, mcp.SecretEnv, "the certificates come after the client secret")
+				coreTrust, _ := secretEnvFor(core.SecretEnv, testTrustedCertsEnv)
+				mcpTrust, _ := secretEnvFor(mcp.SecretEnv, testTrustedCertsEnv)
+				assert.Equal(t, coreTrust, mcpTrust, "the reference is Core's")
+
+				assertMCPProxyEnv(t, p, core, mcp, ResolveMCP(mode.build(nil)).Env, tc.wantProxy)
+			})
+		}
+	}
+}
+
+// assertMCPProxyEnv asserts that MCP's proxy variables are Core's, placed after the variables MCP already
+// had (before), and that they are exactly wantProxy. While a proxy URL is set MCP's NO_PROXY is not
+// Core's, because it lists MCP's own hosts as well, so it is left out of both comparisons.
+func assertMCPProxyEnv(t *testing.T, p *otilmv1alpha1.Platform, core, mcp common.Component, before []common.EnvPair, wantProxy map[string]string) {
+	t.Helper()
+	proxy := p.Spec.Common.Proxy
+	ownList := proxy.HTTP != "" || proxy.HTTPS != ""
+	got, want := slices.Clone(mcp.Env), slices.Clone(before)
+	for _, name := range []string{testHTTPProxyEnv, testHTTPSProxyEnv, testNoProxyEnv} {
+		if name == testNoProxyEnv && ownList {
+			got = slices.DeleteFunc(got, func(e common.EnvPair) bool { return e.Name == name })
+			continue
+		}
+		if value, ok := wantProxy[name]; ok {
+			want = append(want, common.EnvPair{Name: name, Value: value})
+		}
+		coreValue, _ := envValue(core.Env, name)
+		mcpValue, _ := envValue(mcp.Env, name)
+		assert.Equal(t, coreValue, mcpValue, "%s is Core's", name)
+	}
+	assert.Equal(t, want, got, "the proxy variables follow the ones MCP already had")
+	_, coreReads := envValue(core.Env, testProxyEnabledEnv)
+	_, mcpGets := envValue(mcp.Env, testProxyEnabledEnv)
+	assert.True(t, coreReads, "Core reads PROXY_ENABLED")
+	assert.False(t, mcpGets, "MCP does not")
 }

@@ -27,11 +27,11 @@
 #     --from-literal=provisioningApiKey=<api-key>                              # key: provisioningApiKey
 # (The edge TLS Secret and the generated admin cert Secret are created BY cert-manager.)
 #
-# PLACEMENT RULE: anything that applies to EVERY component (shared image, the public
-# hostName, outbound proxy, log level, the trusted-CA bundle, fleet-wide pod-template
-# passthrough) lives under spec.common. Per-component blocks (core/auth/…) override
-# what common sets. Provisioning is a platform-level concern at spec.provisioning; exposing
-# the broker management UI is a messaging property at spec.messaging.management.expose.
+# PLACEMENT RULE: anything shared across components (shared image, the public hostName, log
+# level, fleet-wide pod-template passthrough, and the outbound proxy and trusted-CA bundle,
+# which only some components read) lives under spec.common. Per-component blocks (core/auth/…)
+# override what common sets. Provisioning is a platform-level concern at spec.provisioning;
+# exposing the broker management UI is a messaging property at spec.messaging.management.expose.
 apiVersion: otilm.com/v1alpha1
 kind: Platform
 metadata:
@@ -59,10 +59,11 @@ spec:
     enabled: true
     ingressNamespace: ingress-nginx # ingress-controller / Gateway namespace (default shown)
 
-  # ── spec.common: applies to EVERY component (one placement rule) ──
-  # Shared image defaults, the canonical public hostName, outbound proxy, log level, the
-  # trusted-CA bundle, and the fleet-wide pod-template passthrough. Each component's own
-  # block overrides/augments what is set here. No secret VALUES here — references only.
+  # ── spec.common: shared across components (one placement rule) ──
+  # Shared image defaults, the canonical public hostName, log level and the fleet-wide
+  # pod-template passthrough apply to EVERY component; the outbound proxy and the trusted-CA
+  # bundle are read only by some, as noted below. Each component's own block overrides/augments
+  # what is set here. No secret VALUES here — references only.
   common:
     # Canonical public FQDN. Single source of truth for the external host: the edge uses
     # it for its host/cert when edge.host is unset, and Keycloak (KC_HOSTNAME), the OIDC
@@ -80,15 +81,21 @@ spec:
         - regcred
     logging:
       level: INFO                   # com.czertainly logger level
+    # Core reads the CA bundle as TRUSTED_CERTIFICATES (the MCP server too, from 2.21.0), and auth
+    # mounts it.
     trustedCertificates:
-      secretRef: ilm-trusted-ca     # Secret with the CA bundle (TRUSTED_CERTIFICATES)
+      secretRef: ilm-trusted-ca     # Secret with the CA bundle
       caKey: ca.crt                 # optional in-Secret key override (default "ca.crt")
-    # ── outbound proxy (optional) ──
+    # ── outbound proxy (optional): read by Core, and by the MCP server from 2.21.0 ──
     proxy:
       enabled: true
       http: http://proxy.example.com:3128
       https: http://proxy.example.com:3128
-      noProxy: ".svc,.cluster.local,localhost"
+      # Read as Java's http.nonProxyHosts: each entry is a whole host name, and a "*" at its start
+      # or end is a wildcard, so "*.svc", never ".svc". List every in-cluster host Core calls by a
+      # bare name (auth and scheduler); *.svc and *.cluster.local cover the rest. The operator adds
+      # MCP's own plain-http hosts to MCP's NO_PROXY.
+      noProxy: "auth,scheduler,*.svc,*.cluster.local,localhost"
     # ── fleet-wide pod-template passthrough (optional): applied to EVERY component, merged
     #    BEFORE each component's own override (a per-component override layers on top).
     #    Restores the chart's global.initContainers/sidecarContainers/additionalVolumes/

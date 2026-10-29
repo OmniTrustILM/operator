@@ -307,7 +307,7 @@ func TestPlatformsForSecret(t *testing.T) {
 func TestReferencedSecretNames(t *testing.T) {
 	p := &otilmv1alpha1.Platform{
 		Spec: otilmv1alpha1.PlatformSpec{
-			Version:       platformVersion219,
+			Version:       platformVersion221,
 			Common:        otilmv1alpha1.CommonSpec{TrustedCertificates: otilmv1alpha1.TrustedCertificatesSpec{SecretRef: "trust"}},
 			Database:      otilmv1alpha1.DatabaseSpec{Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "db"}},
 			Messaging:     otilmv1alpha1.MessagingSpec{Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "mq"}},
@@ -320,15 +320,80 @@ func TestReferencedSecretNames(t *testing.T) {
 					Credentials: &otilmv1alpha1.CredentialsRef{SecretRef: "tqmonitor"},
 				},
 			},
+			MCP: otilmv1alpha1.MCPSpec{
+				Enabled:  true,
+				Identity: &otilmv1alpha1.MCPIdentitySpec{Mode: "external", ClientSecretRef: testMCPIdPSecret},
+			},
 		},
 	}
+	others := []string{"db", "mq", "trust", "apikey", "admincert", "edgetls", "tqmonitor"}
 	assert.ElementsMatch(t,
-		[]string{"db", "mq", "trust", "apikey", "admincert", "edgetls", "tqmonitor"},
+		append(others, testMCPIdPSecret),
 		referencedSecretNames(p),
-		"the monitor sidecar's credentials Secret joins the watch when it renders")
+		"the monitor sidecar's credentials Secret and an external identity's client Secret join the watch when they render")
+
+	// Only an external identity's Secret is the user's: the managed identity's is the operator's own,
+	// which the Owns watch covers, and MCP off, or a version whose bundle has no MCP server, renders no
+	// Deployment that reads one. Each of these adds nothing to the other references.
+	notWatched := []struct {
+		name   string
+		mutate func(*otilmv1alpha1.Platform)
+	}{
+		{"the managed identity", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity.Mode = modeManaged }},
+		{"no identity block", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity = nil }},
+		{"MCP turned off", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false }},
+		{"a version with no MCP server", func(p *otilmv1alpha1.Platform) { p.Spec.Version = platformVersion220 }},
+	}
+	for _, tt := range notWatched {
+		t.Run(tt.name, func(t *testing.T) {
+			q := p.DeepCopy()
+			tt.mutate(q)
+			assert.ElementsMatch(t, others, referencedSecretNames(q))
+		})
+	}
 
 	// Empty/unset refs are skipped, including a Platform whose monitor sidecar does not render.
 	assert.Empty(t, referencedSecretNames(&otilmv1alpha1.Platform{}))
+}
+
+// TestPlatformsForSecretResolvesTheVersion: the Secret watch reads Platforms from the cache, before a
+// reconcile resolves their version, so it resolves the version as the reconcile does. A Platform on
+// spec.version develop, and one with no spec.version that status.observedVersion pins, are enqueued for
+// the Secret their external MCP identity names, although the bundle that the unresolved spec.version
+// selects has no MCP server.
+func TestPlatformsForSecretResolvesTheVersion(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  string
+		observed string
+		want     bool
+	}{
+		{name: "an explicit version", version: platformVersion221, want: true},
+		{name: "the develop alias", version: developVersion, want: true},
+		{name: "no version, pinned by status", observed: platformVersion221, want: true},
+		{name: "a version with no MCP server", version: platformVersion220},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := mcpExternalPlatform(func(p *otilmv1alpha1.Platform) {
+				p.Spec.Version = tt.version
+				p.Status.ObservedVersion = tt.observed
+			})
+			s := pruneScheme(t)
+			r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(s).WithObjects(p).Build(), Scheme: s}
+
+			reqs := r.platformsForSecret(context.Background(), &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: testMCPIdPSecret, Namespace: p.Namespace},
+			})
+
+			if !tt.want {
+				assert.Empty(t, reqs)
+				return
+			}
+			require.Len(t, reqs, 1)
+			assert.Equal(t, p.Name, reqs[0].Name)
+		})
+	}
 }
 
 // TestReconcileMissingSecretReturnsNoError: (f) a missing referenced credential Secret

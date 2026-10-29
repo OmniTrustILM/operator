@@ -1751,8 +1751,9 @@ func getPlatformPhaseInNS(ns, name string) string {
 // MCP depends on a real Keycloak in three ways the unit, builder and golden tiers can only simulate.
 // The operator sets Keycloak features that the server has to switch on. It keeps MCP's objects in the
 // realm through the admin API. And it publishes /mcp and the discovery path through Kong. This block
-// applies one managed Platform with MCP off, turns MCP on, then turns CIMD off, and checks each phase
-// against the real Keycloak Operator, a live Keycloak and a live Kong:
+// applies one managed Platform with MCP off, turns MCP on, turns CIMD off, then switches MCP to an
+// external identity provider, and checks each phase against the real Keycloak Operator, a live
+// Keycloak and a live Kong:
 //
 //   - MCP off: the Keycloak CR carries no spec.features, and the realm holds none of MCP's objects. It
 //     has no delegation:client either, because Keycloak adds that scope only to a realm created with
@@ -1775,7 +1776,15 @@ func getPlatformPhaseInNS(ns, name string) string {
 //     anonymous /mcp request with a 401 whose challenge names mcp:access;
 //   - CIMD off: the Keycloak CR drops cimd, mcp-cimd is gone from the realm, and ilm-mcp still obtains
 //     tokens once the running Keycloak has lost the feature. A stored mcp-cimd without the feature
-//     would make every token request fail with a 500.
+//     would make every token request fail with a 500;
+//   - external identity: MCP signs in through a provider the platform does not manage. The Keycloak CR
+//     drops spec.features, the running Keycloak runs none of MCP's features, and the relayed Secret
+//     <platform>-mcp-client is pruned. MCPConfigured is True with the reason External once the Secret
+//     the spec references holds a value. The mcp-server Deployment takes its issuer from the spec and
+//     its client secret from that Secret, and is Ready without a restart although the provider's
+//     key-set and token endpoints name a Service that does not exist, because MCP fetches keys lazily.
+//     Kong still serves the protected-resource metadata of https://<host>/mcp, now naming the external
+//     issuer as its authorization server, and still challenges an anonymous /mcp request.
 //
 // VERSION. spec.version is "develop". The operator image this suite builds is a development build (the
 // Dockerfile's default VERSION=dev), so develop resolves to the newest bundle the build carries: the
@@ -1789,12 +1798,17 @@ func getPlatformPhaseInNS(ns, name string) string {
 // routes the discovery path and challenges an anonymous request. It does not sign a user in,
 // exchange a token or call Core. Core runs the bundle's 2.20.0 image and, as in the managed-Keycloak
 // block, messaging points at a dummy external broker, so Core is not expected to become Ready here.
-// The delegated calls from MCP to Core are therefore out of scope.
+// The delegated calls from MCP to Core are therefore out of scope. The external identity phase goes no
+// further: its provider does not exist, so it shows what the operator renders, prunes and reports, and
+// that MCP starts and answers without the provider. No token is verified or exchanged through it.
 //
 // CREDENTIALS. The initial admin credentials and the relayed ilm-mcp client secret reach the probe
 // pod by secretKeyRef, so no Pod manifest, command or output the suite logs carries them. Inside the
 // pod, the scripts hand them to curl as arguments. The probes print names, status codes, headers and
-// the audience claim of a token, never the client secret or a token.
+// the audience claim of a token, never the client secret or a token. The external provider's client
+// secret is a synthetic value that the suite applies from a manifest file, never as a literal on a
+// command line it logs, and the assertions read only the name and key of the Deployment's reference to
+// it.
 //
 // NAMESPACE. Like the managed-Keycloak block, it runs in the namespace the namespace-scoped Keycloak
 // Operator watches (utils.KeycloakOperatorNamespace).
@@ -2006,6 +2020,9 @@ func platformManagedMCPSpecs() {
 		ns := utils.KeycloakOperatorNamespace
 		const platformName = "ilm-mmcp"
 		const messagingSecretName = "ilm-mmcp-messaging"
+		// externalSecretName holds MCP's client secret at the external identity provider the last spec
+		// points MCP at. The operator does not own it, unlike <platform>-mcp-client.
+		const externalSecretName = "mcp-idp-client"
 		const realmName = "ilm"
 		// publicHost is the platform's public host. It need not resolve: MCP builds its issuer and
 		// resource URLs from it, and the probes reach Kong in-cluster.
@@ -2051,8 +2068,9 @@ func platformManagedMCPSpecs() {
 			utils.WaitForWorkloadsDrained(ns, "keycloak-operator")
 
 			By("creating the external messaging credentials Secret (basic-auth: username/password)")
-			// The only Secret created by hand: the DB, Keycloak admin and ilm-mcp client credentials
-			// are all generated (by CloudNativePG, the Keycloak Operator and Keycloak).
+			// The only Secret created by hand up front (the external identity spec creates one of its
+			// own): the DB, Keycloak admin and ilm-mcp client credentials are all generated (by
+			// CloudNativePG, the Keycloak Operator and Keycloak).
 			Expect(utils.ApplyResource("secret", "generic", messagingSecretName,
 				"-n", ns,
 				"--type=kubernetes.io/basic-auth",
@@ -2080,11 +2098,11 @@ func platformManagedMCPSpecs() {
 					"-n", ns, "--ignore-not-found", "--timeout=120s"))
 			}
 
-			By("waiting for the workload pods to drain, then deleting the messaging Secret")
+			By("waiting for the workload pods to drain, then deleting the Secrets created by hand")
 			// The namespace is shared with the other managed blocks, which must not bring their stacks
 			// up beside this one's on a single node.
 			utils.WaitForWorkloadsDrained(ns, "keycloak-operator")
-			_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", messagingSecretName,
+			_, _ = utils.Run(exec.Command("kubectl", "delete", "secret", messagingSecretName, externalSecretName,
 				"-n", ns, "--ignore-not-found"))
 
 			By("uninstalling the operators this block installed")
@@ -2394,6 +2412,153 @@ spec:
 				}
 			}, 3*time.Minute, 10*time.Second).Should(Succeed())
 		})
+
+		It("switching MCP to an external identity should remove its Keycloak features and relayed secret, and run MCP against the external issuer", func() {
+			// The provider is not there. Nothing answers for the issuer, whose top-level domain .invalid
+			// never resolves, and the key-set and token endpoints name a Service that does not exist. MCP
+			// fetches keys lazily, so it starts without a provider.
+			const (
+				externalIssuer    = "https://idp.example.invalid/realms/demo"
+				externalEndpoints = "http://idp.mcp-e2e.svc:8080/realms/demo/protocol/openid-connect"
+				externalClientID  = "mcp-e2e-client"
+				externalSecretKey = "client-secret"
+			)
+
+			By("creating the Secret that holds MCP's client secret at the external provider")
+			// The value is synthetic. It goes in through a manifest file: a literal on the command line
+			// would reach the log of every command the suite runs.
+			secretFile := writeTempYAML(fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: %s
+stringData:
+  %s: e2e-external-idp-client-secret
+`, externalSecretName, ns, externalSecretKey))
+			defer func() { _ = os.Remove(secretFile) }()
+			_, err := utils.Run(exec.Command("kubectl", "apply", "-f", secretFile))
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the external identity's client Secret")
+
+			By("switching MCP to the external identity on the running Platform")
+			patchPlatform(ns, platformName, fmt.Sprintf(
+				`{"spec":{"mcp":{"identity":{"mode":"external","issuer":%q,"jwkSetUri":%q,"tokenUri":%q,`+
+					`"clientId":%q,"clientSecretRef":%q,"exchangeMode":"standard"}}}}`,
+				externalIssuer, externalEndpoints+"/certs", externalEndpoints+"/token", externalClientID, externalSecretName))
+
+			By("waiting for MCPConfigured=True with the reason External at the new spec generation")
+			// The condition is already True from the managed identity, so it counts only once the operator
+			// has observed the generation the patch created. With an external identity the operator reads
+			// the Secret the spec references and nothing else.
+			Eventually(func(g Gomega) {
+				report := func() string {
+					return "MCPConfigured should be True with the reason External for the current spec generation; it reports: " +
+						platformConditionDetail(ns, platformName, mcpConfiguredCondition)
+				}
+				g.Expect(platformConditionCurrent(g, ns, platformName, mcpConfiguredCondition, conditionStatusTrue)).To(BeTrue(), report)
+				g.Expect(platformConditionDetail(ns, platformName, mcpConfiguredCondition)).To(HavePrefix("External:"), report)
+			}, 5*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the Keycloak CR no longer carries spec.features")
+			Eventually(func(g Gomega) {
+				g.Expect(getKeycloakField(g, "keycloak", keycloakCRName, ns, "{.spec.features}")).To(BeEmpty(),
+					"with an external identity the Keycloak CR should enable no feature")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the Keycloak CR to be Ready, and for the running Keycloak to have lost every MCP feature")
+			// Dropping the features restarts Keycloak. As after CIMD is switched off, the server's own
+			// report shows the restart is done, whatever the CR says meanwhile, and the realm read in the
+			// same pass shows that MCP's other objects stay, as they do when MCP is turned off.
+			Eventually(func(g Gomega) {
+				g.Expect(keycloakCRReady(g, keycloakCRName, ns)).To(BeTrue(),
+					"the Keycloak CR should be Ready again after its restart")
+				out := mcpProbeExec(g, ns, mcpKeycloakFactsScript)
+				expectKeycloakFeatures(g, out, nil, mcpKeycloakFeatures)
+				g.Expect(probeFacts(out)).To(ContainElements(mcpRealmFacts), "the realm should keep the objects MCP needs")
+			}, 10*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the operator pruned the relayed client Secret")
+			// <platform>-mcp-client is the managed identity's Secret. Nothing keeps it desired any more.
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "secret", mcpSecretName, "-n", ns,
+					"--ignore-not-found", "-o", "name"))
+				g.Expect(err).NotTo(HaveOccurred(), "the Secret lookup must succeed (an error is not proof that it is gone)")
+				g.Expect(strings.TrimSpace(out)).To(BeEmpty(), "the relayed Secret %q should be pruned", mcpSecretName)
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying ilm-mcp still obtains tokens")
+			// The operator left the ilm-mcp client in the realm, and the probe pod still holds its secret in
+			// its environment: a container reads it once, when it starts, so pruning the Secret does not
+			// reach it. A realm object that needs a Keycloak feature that is now off could make every token
+			// request fail.
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpTokenScript)
+				for _, prefix := range []string{"TOKEN", "UPSTREAM"} {
+					report := parseMCPTokenReport(out, prefix)
+					g.Expect(report.status).To(Equal("200"),
+						"ilm-mcp should still obtain a token without Keycloak's MCP features (%s; the error code, if any: %q)", prefix, report.errorCode)
+				}
+			}, 3*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("verifying the mcp-server Deployment takes its issuer from the spec and its client secret from the Secret the spec names")
+			// The Deployment holds the name and key of the Secret, never its value.
+			Eventually(func(g Gomega) {
+				g.Expect(mcpServerEnvField(g, ns, "ILM_MCP_SECURITY_ISSUER", ".value")).To(Equal(externalIssuer),
+					"MCP should be configured with the external issuer")
+				g.Expect(mcpServerEnvField(g, ns, "ILM_MCP_SECURITY_CLIENT_SECRET", ".valueFrom.secretKeyRef.name")).To(Equal(externalSecretName),
+					"MCP should read its client secret from the Secret the spec names")
+				g.Expect(mcpServerEnvField(g, ns, "ILM_MCP_SECURITY_CLIENT_SECRET", ".valueFrom.secretKeyRef.key")).To(Equal(externalSecretKey),
+					"MCP should read the default key of that Secret")
+			}, 3*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("waiting for the mcp-server Deployment to roll out Ready")
+			// The Deployment above already carries the new settings, so the rollout is the one they cause:
+			// a rollout the operator has not started yet would count as finished. Ready here means the pod
+			// started and passed its probes without a provider to fetch keys from.
+			Eventually(func(g Gomega) {
+				_, err := utils.Run(exec.Command("kubectl", "rollout", "status", "deployment/"+mcpServerName,
+					"-n", ns, "--timeout=60s"))
+				g.Expect(err).NotTo(HaveOccurred(), "the mcp-server Deployment should finish rolling out Ready")
+			}, 10*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying no mcp-server container restarted, so the pod started within its startup budget")
+			Eventually(func(g Gomega) {
+				out, err := utils.Run(exec.Command("kubectl", "get", "pods", "-n", ns,
+					"-l", "app.kubernetes.io/name="+mcpServerName,
+					"-o", "jsonpath={.items[*].status.containerStatuses[*].restartCount}"))
+				g.Expect(err).NotTo(HaveOccurred(), "the mcp-server pods should be listable")
+				restarts := strings.Fields(out)
+				g.Expect(restarts).NotTo(BeEmpty(), "the mcp-server pod should report its container status")
+				g.Expect(restarts).To(HaveEach("0"), "no mcp-server container should have restarted")
+			}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("asking Kong, anonymously, for the protected-resource metadata and for /mcp")
+			// MCP serves the metadata itself, so it names the external issuer once the new pod answers.
+			Eventually(func(g Gomega) {
+				out := mcpProbeExec(g, ns, mcpGatewayScript)
+
+				metadata := probeMetadataRE.FindStringSubmatch(out)
+				g.Expect(metadata).NotTo(BeNil(), "Kong should answer the discovery path; the probe printed: %s", out)
+				var document struct {
+					Resource             string   `json:"resource"`
+					AuthorizationServers []string `json:"authorization_servers"`
+				}
+				g.Expect(json.Unmarshal([]byte(metadata[1]), &document)).To(Succeed(),
+					"the discovery answer should be a JSON document; the probe printed: %s", out)
+				g.Expect(document.Resource).To(Equal("https://"+publicHost+"/mcp"),
+					"the protected-resource metadata should still name MCP's public resource URL")
+				g.Expect(document.AuthorizationServers).To(ContainElement(externalIssuer),
+					"the protected-resource metadata should name the external issuer among its authorization servers")
+
+				status := probeStatusRE.FindStringSubmatch(out)
+				g.Expect(status).NotTo(BeNil(), "the probe should report /mcp's status; it printed: %s", out)
+				g.Expect(status[1]).To(Equal("401"), "an anonymous /mcp request should still be refused")
+
+				challenge := probeChallengeRE.FindStringSubmatch(out)
+				g.Expect(challenge).NotTo(BeNil(), "the 401 should carry a WWW-Authenticate challenge; the probe printed: %s", out)
+				g.Expect(challenge[1]).To(HavePrefix("Bearer"), "the challenge should be a Bearer challenge")
+			}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		})
 	})
 }
 
@@ -2558,6 +2723,17 @@ func secretKeyIsSet(g Gomega, ns, name, key string) bool {
 	return strings.TrimSpace(out) != ""
 }
 
+// mcpServerEnvField returns a field of one environment variable of the mcp-server container in its
+// Deployment, such as its value or the name and key of the Secret it is read from, or "" when the
+// variable or the field is absent. The Deployment names a Secret there and never holds its value.
+func mcpServerEnvField(g Gomega, ns, envName, field string) string {
+	out, err := utils.Run(exec.Command("kubectl", "get", "deployment", mcpServerName, "-n", ns, "-o",
+		fmt.Sprintf(`jsonpath={.spec.template.spec.containers[?(@.name==%q)].env[?(@.name==%q)]%s}`,
+			mcpServerName, envName, field)))
+	g.Expect(err).NotTo(HaveOccurred(), "Deployment %q should be readable", mcpServerName)
+	return strings.TrimSpace(out)
+}
+
 // platformConditionCurrent reports whether the named Platform condition has the status for the
 // Platform's current spec generation. A condition stamped with an older generation has not seen the
 // latest spec, whatever it reads.
@@ -2572,7 +2748,7 @@ func platformConditionCurrent(g Gomega, ns, name, condType, status string) bool 
 // platformConditionDetail returns "<reason>: <message>" of the named Platform condition, or a
 // placeholder when it cannot be read. The operator's condition messages carry no identity material,
 // so they are safe to put in an assertion message.
-func platformConditionDetail(ns, name, condType string) string {
+func platformConditionDetail(ns, name, condType string) string { //nolint:unparam // name and condType are fixed by this block's callers; kept explicit, like the parameters of platformConditionCurrent
 	out, err := utils.Run(exec.Command("kubectl", "get", "platform", name, "-n", ns, "-o",
 		fmt.Sprintf(`jsonpath={.status.conditions[?(@.type==%[1]q)].reason}: {.status.conditions[?(@.type==%[1]q)].message}`, condType)))
 	if err != nil {

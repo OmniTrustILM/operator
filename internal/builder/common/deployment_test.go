@@ -388,6 +388,83 @@ func TestBuildDeploymentFieldRefEnv(t *testing.T) {
 	assert.Empty(t, fr.Value, "fieldRef must not inline a value")
 }
 
+// TestBuildContainerEnvLeavesEachNameOnce asserts that a name rendered by more than one source is left
+// once, as its last entry and in that entry's place, and that every other entry keeps its order. The
+// operator applies Deployments server-side, and the apiserver refuses an applied container env that
+// names a variable twice; the last entry is the one the kubelet would have used.
+func TestBuildContainerEnvLeavesEachNameOnce(t *testing.T) {
+	const podNamespace = "metadata.namespace"
+	inline := func(name, value string) corev1.EnvVar { return corev1.EnvVar{Name: name, Value: value} }
+	secretRef := func(name, secret string) corev1.EnvVar {
+		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: secret}, Key: "k"}}}
+	}
+	configMapRef := func(name, configMap string) corev1.EnvVar {
+		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: configMap}, Key: "k"}}}
+	}
+	fieldRef := func(name string) corev1.EnvVar {
+		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: podNamespace}}}
+	}
+
+	tests := []struct {
+		name string
+		c    Component
+		want []corev1.EnvVar
+	}{
+		{
+			name: "names used once keep the order of their sources",
+			c: Component{
+				Env:          []EnvPair{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
+				SecretEnv:    []SecretEnvRef{{EnvVar: "S", SecretName: "s", SecretKey: "k"}},
+				ConfigMapEnv: []ConfigMapEnvRef{{EnvVar: "C", ConfigMapName: "c", ConfigMapKey: "k"}},
+				ExtraEnv:     []corev1.EnvVar{secretRef("X", "x")},
+				FieldRefEnv:  []FieldRefEnv{{EnvVar: "F", FieldPath: podNamespace}},
+			},
+			want: []corev1.EnvVar{inline("A", "1"), inline("B", "2"), secretRef("S", "s"), configMapRef("C", "c"), secretRef("X", "x"), fieldRef("F")},
+		},
+		{
+			name: "a later inline entry replaces an earlier one, and takes its own place",
+			c:    Component{Env: []EnvPair{{Name: "A", Value: "operator"}, {Name: "B", Value: "2"}, {Name: "A", Value: "user"}}},
+			want: []corev1.EnvVar{inline("B", "2"), inline("A", "user")},
+		},
+		{
+			name: "three entries of one name leave the last",
+			c:    Component{Env: []EnvPair{{Name: "A", Value: "1"}, {Name: "A", Value: "2"}, {Name: "B", Value: "3"}, {Name: "A", Value: "4"}}},
+			want: []corev1.EnvVar{inline("B", "3"), inline("A", "4")},
+		},
+		{
+			name: "a Secret or ConfigMap reference replaces an inline entry, and a user's keyed reference replaces both",
+			c: Component{
+				Env:          []EnvPair{{Name: "A", Value: "1"}, {Name: "B", Value: "2"}},
+				SecretEnv:    []SecretEnvRef{{EnvVar: "A", SecretName: "operator", SecretKey: "k"}},
+				ConfigMapEnv: []ConfigMapEnvRef{{EnvVar: "B", ConfigMapName: "operator", ConfigMapKey: "k"}},
+				ExtraEnv:     []corev1.EnvVar{secretRef("A", "user")},
+			},
+			want: []corev1.EnvVar{configMapRef("B", "operator"), secretRef("A", "user")},
+		},
+		{
+			name: "a downward-API entry replaces every other source of its name",
+			c: Component{
+				Env:         []EnvPair{{Name: "A", Value: "1"}},
+				ExtraEnv:    []corev1.EnvVar{secretRef("A", "user")},
+				FieldRefEnv: []FieldRefEnv{{EnvVar: "A", FieldPath: podNamespace}},
+			},
+			want: []corev1.EnvVar{fieldRef("A")},
+		},
+		{
+			name: "an unnamed entry is omitted and does not count as a duplicate",
+			c:    Component{Env: []EnvPair{{Name: "", Value: "x"}, {Name: "A", Value: "1"}, {Name: "", Value: "y"}}},
+			want: []corev1.EnvVar{inline("A", "1")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, buildContainerEnv(tt.c))
+		})
+	}
+}
+
 // TestBuildDeploymentLifecycleCommandArgsAdditionalPorts asserts that Lifecycle,
 // Command, Args, and AdditionalPorts are wired onto the main container.
 func TestBuildDeploymentLifecycleCommandArgsAdditionalPorts(t *testing.T) {

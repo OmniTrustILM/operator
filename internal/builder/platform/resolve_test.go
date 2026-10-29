@@ -85,7 +85,7 @@ func TestResolveCoreDatabaseURLFromWiringProfile(t *testing.T) {
 	got, ok := envValue(c.Env, w.DatabaseURLEnv)
 	require.True(t, ok, "database URL env (%s) must be present", w.DatabaseURLEnv)
 	assert.Equal(t, "JDBC_URL", w.DatabaseURLEnv, "guards against silent wiring-profile drift")
-	assert.Equal(t, "jdbc:postgresql://db.example.com:5432/ilmdb?characterEncoding=UTF-8", got)
+	assert.Equal(t, testJDBCURL, got)
 }
 
 func TestResolveCoreMessagingVHostInline(t *testing.T) {
@@ -422,20 +422,20 @@ func TestResolveCoreProxyEnabledInjectsURLs(t *testing.T) {
 	w := bom.Wiring()
 	p := basePlatform()
 	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{
-		Enabled: true, HTTP: "http://proxy:3128", HTTPS: "http://proxy:3129", NoProxy: "localhost,.svc",
+		Enabled: true, HTTP: testProxyHTTP, HTTPS: testProxyHTTPS, NoProxy: testNoProxyList,
 	}
 	c := ResolveCore(p)
 	enabled, _ := envValue(c.Env, w.ProxyEnabledEnv)
 	assert.Equal(t, "true", enabled)
 	httpv, ok := envValue(c.Env, w.HTTPProxyEnv)
 	require.True(t, ok)
-	assert.Equal(t, "http://proxy:3128", httpv)
+	assert.Equal(t, testProxyHTTP, httpv)
 	httpsv, ok := envValue(c.Env, w.HTTPSProxyEnv)
 	require.True(t, ok)
-	assert.Equal(t, "http://proxy:3129", httpsv)
+	assert.Equal(t, testProxyHTTPS, httpsv)
 	nov, ok := envValue(c.Env, w.NoProxyEnv)
 	require.True(t, ok)
-	assert.Equal(t, "localhost,.svc", nov)
+	assert.Equal(t, testNoProxyList, nov)
 }
 
 // fieldRefPath returns the downward-API fieldPath bound to the given env var in a
@@ -703,6 +703,57 @@ func TestResolveCoreTrustedCertificatesSecretBacked(t *testing.T) {
 	assert.Equal(t, "ca.crt", tc.SecretKey)
 	assert.True(t, tc.Optional,
 		"TRUSTED_CERTIFICATES secretKeyRef must be Optional so a not-yet-present bundle does not wedge Core")
+}
+
+// TestCoreEnvOrder pins Core's inline and secret-backed environment, order included, for a Platform
+// that sets everything Core reads from the spec. The trusted-certificates reference and the outbound
+// proxy variables come from helpers MCP uses too, so a change to either must not move a variable in
+// Core's pod template.
+func TestCoreEnvOrder(t *testing.T) {
+	p := basePlatform()
+	p.Spec.Version = testVersion220
+	p.Spec.Common.TrustedCertificates.SecretRef = testTrustSecret
+	p.Spec.Common.Proxy = otilmv1alpha1.OutboundProxySpec{
+		Enabled: true, HTTP: testProxyHTTP, HTTPS: testProxyHTTPS, NoProxy: testNoProxyList,
+	}
+	p.Spec.Common.Logging.Level = "DEBUG"
+	p.Spec.Common.Logging.Format = "ecs"
+	p.Spec.Messaging.TimeQuality.Enabled = true
+	p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{APIURL: testProvURL, APIKeySecretRef: testProvSecret}
+	p.Spec.RegisterAdmin = &otilmv1alpha1.RegisterAdminSpec{
+		Enabled:     true,
+		Certificate: &otilmv1alpha1.AdminCertificateSpec{Enabled: boolPtr(true), Source: "provided", SecretRef: strPtr(testAdminCert)},
+	}
+
+	c := ResolveCore(p)
+	w := wiringFor(p)
+
+	assert.Equal(t, []common.EnvPair{
+		{Name: w.HeaderEnabledEnv, Value: "true"},
+		{Name: w.HeaderNameEnv, Value: testDefaultClientCertHeader},
+		{Name: w.DatabaseURLEnv, Value: testJDBCURL},
+		{Name: w.MessagingVHostEnv, Value: "ilm"},
+		{Name: w.OPABaseURLEnv, Value: w.OPABaseURL},
+		{Name: w.AuthURLEnv, Value: w.AuthURL},
+		{Name: w.SchedulerURLEnv, Value: w.SchedulerURL},
+		{Name: w.LoggingLevelEnv, Value: "DEBUG"},
+		{Name: w.ProvisioningURLEnv, Value: testProvURL},
+		{Name: w.ProxyEnabledEnv, Value: "true"},
+		{Name: w.TimeQualityEnabledEnv, Value: "true"},
+		{Name: w.LogFormatEnv, Value: "ecs"},
+		{Name: w.HTTPProxyEnv, Value: testProxyHTTP},
+		{Name: w.HTTPSProxyEnv, Value: testProxyHTTPS},
+		{Name: w.NoProxyEnv, Value: testNoProxyList},
+	}, c.Env)
+	assert.Equal(t, []common.SecretEnvRef{
+		{EnvVar: w.DatabaseCred.UsernameEnv, SecretName: testDBCreds, SecretKey: w.DatabaseCred.UsernameKey},
+		{EnvVar: w.DatabaseCred.PasswordEnv, SecretName: testDBCreds, SecretKey: w.DatabaseCred.PasswordKey},
+		{EnvVar: w.MessagingCred.UsernameEnv, SecretName: testMQCreds, SecretKey: w.MessagingCred.UsernameKey},
+		{EnvVar: w.MessagingCred.PasswordEnv, SecretName: testMQCreds, SecretKey: w.MessagingCred.PasswordKey},
+		{EnvVar: w.TrustedCertificates.Env, SecretName: testTrustSecret, SecretKey: w.TrustedCertificates.Key, Optional: true},
+		{EnvVar: w.ProvisioningAPIKey.Env, SecretName: testProvSecret, SecretKey: w.ProvisioningAPIKey.Key},
+		{EnvVar: w.AdminCert.Env, SecretName: testAdminCert, SecretKey: w.AdminCert.Key, Optional: true},
+	}, c.SecretEnv)
 }
 
 func TestResolveCoreAdminCertDisabledOmitsEnv(t *testing.T) {
@@ -1804,7 +1855,7 @@ func TestResolveSchedulerInlineEnv(t *testing.T) {
 	// DB URL is inline.
 	dbURL, ok := envValue(c.Env, "JDBC_URL")
 	require.True(t, ok)
-	assert.Equal(t, "jdbc:postgresql://db.example.com:5432/ilmdb?characterEncoding=UTF-8", dbURL)
+	assert.Equal(t, testJDBCURL, dbURL)
 
 	// Messaging vhost is inline.
 	w := bom.Wiring()

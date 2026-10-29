@@ -105,6 +105,7 @@ matrix and [Upgrading](../../docs/site/upgrading.md) for upgrade procedures.
 | Sample | Shows |
 |---|---|
 | [`platform_managed_mcp.yaml`](./platform_managed_mcp.yaml) | The optional **MCP server** on a managed Keycloak: a public host and `mcp.enabled`, on platform version 2.21.0 (a preview bundle — it resolves only because `spec.version` names it). |
+| [`platform_external_mcp.yaml`](./platform_external_mcp.yaml) | The MCP server signing users in through an **external identity provider** (`mcp.identity.mode: external`), on platform version 2.21.0 (a preview bundle, as above). Create the client Secret it references first, with the key `client-secret`. |
 
 Full explanation:
 [The Platform CR → MCP server](../../docs/site/custom-resources/platform.md#mcp-server).

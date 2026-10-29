@@ -137,8 +137,8 @@ type adminRequest struct {
 // rather than text spliced into a single-quoted shell argument. The field order mirrors Core's
 // payload and is kept stable for the render snapshots (JSON object order is not semantic).
 //
-// AllowedDelegates and DelegateClaim are set only while MCP is on; without them Core's defaults
-// (no delegates) apply.
+// AllowedDelegates and DelegateClaim are set only while MCP signs in through this Keycloak; without
+// them Core's defaults (no delegates) apply.
 type oidcProviderRequest struct {
 	IssuerURL        string   `json:"issuerUrl"`
 	ClientID         string   `json:"clientId"`
@@ -341,7 +341,8 @@ curl -X POST \
 // Keycloak, parameterized with the operator-resolved provider config: it takes the client
 // secret as $1, waits for localhost:<coreport> + localhost:<opaport>, then curls a PUT to the
 // LOCALHOST settings endpoint with the provider body (scope ["openid"], audiences
-// [<clientId>], skew 60, and while MCP is on, MCP as the one allowed delegate).
+// [<clientId>], skew 60, and while MCP signs in through this Keycloak, MCP as the one allowed
+// delegate).
 //
 // URL split: issuer/authorization/logout/postLogout are BROWSER-FACING
 // (https://<host>/realms/<realm>/...); token/jwks are BACK-CHANNEL
@@ -396,9 +397,11 @@ func registerInternalKeycloakScript(p *otilmv1alpha1.Platform) string {
 	}
 	// The PUT replaces the whole provider and Core's default allows no delegates, so a body without
 	// the delegate clears it on every Core start and ILM then refuses every delegated token MCP
-	// sends: while MCP is on, every body carries it. ILM reads the delegate from the delegateClaim
-	// field of the outermost act claim, which for MCP's tokens is act.client_id.
-	if MCPEnabled(p) {
+	// sends: while MCP signs in through this Keycloak, every body carries it. An external identity
+	// provider is configured in ILM by the admin, so the operator registers no delegate for it. ILM
+	// reads the delegate from the delegateClaim field of the outermost act claim, which for MCP's
+	// tokens is act.client_id.
+	if MCPManagedIdentity(p) {
 		provider.AllowedDelegates = []string{mcpClientID}
 		provider.DelegateClaim = oidcDelegateClaim
 	}
