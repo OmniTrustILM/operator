@@ -128,6 +128,15 @@ const (
 	testConfigJS             = "config.js"
 	testCABundle             = "ca-bundle"
 	testTLSCA                = "tls-ca"
+	// testJDBCURL is the database URL the wiring profile composes for basePlatform's external database.
+	testJDBCURL = "jdbc:postgresql://db.example.com:5432/ilmdb?characterEncoding=UTF-8"
+	// The outbound proxy settings a spec carries and the variables render back, shared by the Core and
+	// MCP tests.
+	testProxyHTTP   = "http://proxy:3128"
+	testProxyHTTPS  = "http://proxy:3129"
+	testNoProxyList = "localhost,.svc"
+	// testNoProxyEntries is a noProxy value the MCP tests extend with MCP's own hosts.
+	testNoProxyEntries = "localhost,*.svc"
 
 	// trustedcerts_test.go.
 	testMyTrust           = "my-trust"
@@ -159,6 +168,40 @@ const (
 	testMCPTokenEnv        = "ILM_MCP_SECURITY_TOKEN_URI"
 	testMCPReadinessPath   = "/actuator/health/readiness"
 	testMCPLivenessPath    = "/actuator/health/liveness"
+	// testMCPResourceURL is the resource MCP derives from the platform's public host, ilm.example.com
+	// in these tests; testMustBeSet is the failure message of an assertion that a variable is rendered.
+	testMCPResourceURL = "https://ilm.example.com/mcp"
+	testMustBeSet      = "%s must be set"
+	// The settings of the external identity provider the MCP tests configure, and the variables MCP
+	// reads them from. The client id differs from managed mode's, so a value that came from the spec
+	// cannot be mistaken for the one managed mode derives.
+	testMCPClientIDEnv        = "ILM_MCP_SECURITY_CLIENT_ID"
+	testMCPExchangeModeEnv    = "ILM_MCP_SECURITY_EXCHANGE_MODE"
+	testMCPExchangeScopeEnv   = "ILM_MCP_SECURITY_EXCHANGE_SCOPE"
+	testMCPAuthScopesEnv      = "ILM_MCP_SECURITY_AUTHORIZATION_SCOPES"
+	testMCPRequiredScopeEnv   = "ILM_MCP_SECURITY_REQUIRED_SCOPE"
+	testMCPAPIAudienceEnv     = "ILM_MCP_SECURITY_API_AUDIENCE"
+	testMCPBackchannelEnv     = "ILM_MCP_SECURITY_ALLOW_HTTP_BACKCHANNEL"
+	testMCPIdPIssuer          = "https://idp.example.com/realms/corp"
+	testMCPIdPJWKS            = "http://kc.idp.svc:8080/realms/corp/protocol/openid-connect/certs"
+	testMCPIdPToken           = "http://kc.idp.svc:8080/realms/corp/protocol/openid-connect/token"
+	testMCPIdPClientID        = "corp-mcp"
+	testMCPIdPClientSecret    = "mcp-idp-client"
+	testMCPIdPClientSecretKey = "client-secret"
+	testMCPIdentityManaged    = "managed"
+	testMCPIdentityExternal   = "external"
+	testMCPExchangeDelegation = "delegation"
+	testMCPExchangeStandard   = "standard"
+	testMCPIdPCustomSecretKey = "idp-secret"
+
+	// The variables Core and MCP both read for the trusted certificates and the outbound proxy, and
+	// the Secret the tests reference for the certificates.
+	testTrustedCertsEnv = "TRUSTED_CERTIFICATES"
+	testHTTPProxyEnv    = "HTTP_PROXY"
+	testHTTPSProxyEnv   = "HTTPS_PROXY"
+	testNoProxyEnv      = "NO_PROXY"
+	testProxyEnabledEnv = "PROXY_ENABLED"
+	testTrustSecret     = "ilm-trusted-ca"
 
 	// resolve_test.go — the per-bundle proxy exchange names (2.19.0 renamed them).
 	testExchangeCzertainlyProxy = "czertainly-proxy"

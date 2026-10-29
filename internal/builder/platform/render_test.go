@@ -386,6 +386,79 @@ func TestRenderPlatformAdditionalEnvOnEveryComponent(t *testing.T) {
 	}
 }
 
+// envValuesByWorkload returns, for every Deployment and StatefulSet in objs, the value each of its
+// containers gives the env var name, in order. A workload that does not set it is left out.
+func envValuesByWorkload(objs []client.Object, name string) map[string][]string {
+	values := map[string][]string{}
+	for _, o := range objs {
+		pod, ok := podSpecOf(o)
+		if !ok {
+			continue
+		}
+		for _, ctr := range pod.Containers {
+			for _, e := range ctr.Env {
+				if e.Name == name {
+					values[o.GetName()] = append(values[o.GetName()], e.Value)
+				}
+			}
+		}
+	}
+	return values
+}
+
+// podSpecOf returns the pod spec of a Deployment or a StatefulSet, and false for any other object.
+func podSpecOf(o client.Object) (corev1.PodSpec, bool) {
+	switch w := o.(type) {
+	case *appsv1.Deployment:
+		return w.Spec.Template.Spec, true
+	case *appsv1.StatefulSet:
+		return w.Spec.Template.Spec, true
+	}
+	return corev1.PodSpec{}, false
+}
+
+// TestRenderPlatformLeavesEachEnvNameOnce asserts that every workload the Platform renders, a
+// Deployment or a StatefulSet, carries an env name once, as its last entry: the controller applies
+// the workloads server-side, and the apiserver refuses an applied container env that names a
+// variable twice. spec.additionalEnv reaches every component, so it brings in the repeated name.
+func TestRenderPlatformLeavesEachEnvNameOnce(t *testing.T) {
+	const repeated = "REPEATED_ENV"
+	workloads := []string{
+		coreComponentName, schedulerName, authOPAPoliciesName, authName, feAdministratorName,
+		"utils", testMCPName, gatewayName, provisioningName,
+	}
+	tests := []struct {
+		name string
+		kind otilmv1alpha1.WorkloadKind
+	}{
+		{name: "Core and the gateway as Deployments", kind: otilmv1alpha1.WorkloadKindDeployment},
+		{name: "Core and the gateway as StatefulSets", kind: otilmv1alpha1.WorkloadKindStatefulSet},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := mcpPlatform(func(p *otilmv1alpha1.Platform) {
+				p.Spec.Utils.Enabled = true
+				p.Spec.Provisioning = &otilmv1alpha1.ProvisioningSpec{
+					Mode:   provisioningModeDeploy,
+					Deploy: &otilmv1alpha1.ProvisioningDeploySpec{BootstrapSecretRef: testProvBootstrap},
+				}
+				p.Spec.AdditionalEnv = []otilmv1alpha1.EnvVar{
+					{Name: repeated, Value: "first"},
+					{Name: repeated, Value: "last"},
+				}
+			})
+			p.Spec.Core.WorkloadType = tt.kind
+			p.Spec.Gateway.WorkloadType = tt.kind
+
+			want := map[string][]string{}
+			for _, workload := range workloads {
+				want[workload] = []string{"last"}
+			}
+			assert.Equal(t, want, envValuesByWorkload(RenderPlatform(p, testOperatorNamespace), repeated))
+		})
+	}
+}
+
 // TestRenderPlatformStampsTheVersionOnEveryPodTemplate: every component's pod template names
 // the bundle it was rendered from.
 //

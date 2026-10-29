@@ -706,6 +706,12 @@ spec:
             secretKeyRef:
               key: clientSecret
               name: ilm-mcp-client
+        - name: TRUSTED_CERTIFICATES
+          valueFrom:
+            secretKeyRef:
+              key: ca.crt
+              name: trusted-certificates
+              optional: true
         image: hub.omnitrustregistry.com/ilm/mcp-server:1.0.0
         imagePullPolicy: IfNotPresent
         livenessProbe:

@@ -22,8 +22,8 @@ import (
 // database.credentials.secretRef, messaging.credentials.secretRef,
 // trustedCertificates.secretRef, provisioning.apiKeySecretRef,
 // registerAdmin.certificate.secretRef, registerAdmin.password.secretRef,
-// or edge.tls.secretRef. The reconcile then re-composes the operator-managed
-// auth-db / trusted-certificates Secrets (whose checksum annotation rolls the
+// edge.tls.secretRef, or mcp.identity.clientSecretRef. The reconcile then re-composes the
+// operator-managed auth-db / trusted-certificates Secrets (whose checksum annotation rolls the
 // consumers) and re-reads the rotated material.
 //
 // SECURITY: only Secret NAMES are compared and logged here — never the Secret content.
@@ -40,6 +40,11 @@ func (r *Reconciler) platformsForSecret(ctx context.Context, obj client.Object) 
 	var requests []reconcile.Request
 	for i := range platforms.Items {
 		p := &platforms.Items[i]
+		// A reconcile resolves spec.version before it renders: the develop alias, or the version
+		// status.observedVersion pins when spec.version is empty. The Platform comes from the cache
+		// unresolved, so resolve it the same way: a reference that depends on the version's bundle,
+		// MCP's among them, would otherwise be missed for a Platform on develop.
+		p.Spec.Version = effectivePlatformVersion(p)
 		for _, ref := range referencedSecretNames(p) {
 			if ref == name {
 				requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(p)})
@@ -72,7 +77,9 @@ func (r *Reconciler) platformsForSecret(ctx context.Context, obj client.Object) 
 // above) via spec.db.usernameSecret/passwordSecret, so the existing Secret watch already
 // re-enqueues when that Secret appears/rotates; the Keycloak Operator-generated initial-admin
 // Secret is consumed by the OIDC wiring (which reads it directly), not by the provisioning
-// watch set. Empty refs (an unset optional field) are skipped.
+// watch set. Empty refs (an unset optional field) are skipped. It reads the Platform as given, so
+// the caller resolves spec.version first: the references that depend on the version's bundle (the
+// monitor sidecar's, MCP's) follow it.
 func referencedSecretNames(p *otilmv1alpha1.Platform) []string {
 	var names []string
 	add := func(ref string) {
@@ -115,6 +122,15 @@ func referencedSecretNames(p *otilmv1alpha1.Platform) []string {
 	}
 	if e := p.Spec.Edge; e != nil && e.TLS != nil && e.TLS.SecretRef != nil {
 		add(*e.TLS.SecretRef)
+	}
+	// MCP's client secret with an external identity: the user's Secret, which the MCP Deployment reads
+	// by secretKeyRef and the reconciler reads for MCPConfigured and the MCP checksum, so creating or
+	// changing it reconciles. With the managed identity it is the operator's own Secret, which the
+	// Owns watch already covers. Like the monitor's, it is not preflighted: a missing Secret holds MCP
+	// alone back, as MCPConfigured reports, and never the platform.
+	if platformbuilder.MCPExternalIdentity(p) {
+		secret, _ := platformbuilder.MCPClientSecret(p)
+		add(secret)
 	}
 	return names
 }

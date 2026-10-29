@@ -341,7 +341,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// MCP's Keycloak objects and the relayed ilm-mcp client secret (spec.mcp.enabled only). The
 	// same ORDERING rule applies: the relayed <platform>-mcp-client Secret is an owned child that
-	// only this step adds to the desired set, so it must run before the prune.
+	// only this step adds to the desired set, so it must run before the prune. With an external
+	// identity the step relays nothing and touches nothing in Keycloak: it reports the Secret the
+	// spec references, and the prune reclaims a relayed Secret that managed mode left.
 	mcpRequeue := r.reconcileMCPKeycloak(ctx, &platform, desired)
 
 	// Prune de-rendered children, register the password admin, measure readiness, persist
@@ -808,7 +810,7 @@ func (r *Reconciler) composeBaseSecrets(ctx context.Context, platform *otilmv1al
 
 // coreRollChecksums carries the per-pass config-checksum inputs composeAndApplyBase computes
 // once — Core's combined checksum (trusted-certs + relayed OIDC client Secret + in-pod scripts),
-// the gateway's kong.yml checksum, the MCP server's relayed client Secret checksum, and whether
+// the gateway's kong.yml checksum, the MCP server's (its client Secret + trusted-certs), and whether
 // Core's checksum is currently FROZEN behind its first migration — so applyBaseObject can stamp
 // every rendered object without recomputing them.
 type coreRollChecksums struct {
@@ -864,8 +866,8 @@ func (r *Reconciler) applyBaseObject(ctx context.Context, platform *otilmv1alpha
 	// Stamp the per-component config checksums onto their pod templates so a change in config
 	// that lives OUTSIDE the pod template rolls that component: Core (trusted-certs bundle +
 	// relayed OIDC client Secret + in-pod scripts ConfigMap), the gateway (kong.yml) and the MCP
-	// server (relayed MCP client Secret). Each stamp is a no-op for non-matching objects / an
-	// empty checksum.
+	// server (its client Secret + trusted-certs bundle). Each stamp is a no-op for non-matching
+	// objects / an empty checksum.
 	coreStamp := sums.core
 	if isCoreWorkload(obj) && sums.coreExists && !sums.coreReady && sums.frozen != "" {
 		coreStamp = sums.frozen // freeze during the first migration; unfreeze once Core is Ready
@@ -941,7 +943,7 @@ func (r *Reconciler) composeAndApplyBase(ctx context.Context, platform *otilmv1a
 	// deploys Core once with all config up front — this makes the operator match that.
 	coreExists, coreReady, coreFrozenChecksum := r.coreWorkloadStatus(ctx, platform)
 	sums := coreRollChecksums{
-		core: coreChecksum, gateway: gatewayChecksum, mcp: r.mcpClientChecksum(ctx, platform),
+		core: coreChecksum, gateway: gatewayChecksum, mcp: r.mcpConfigChecksum(ctx, platform, trustedCertsChecksum),
 		frozen: coreFrozenChecksum, coreExists: coreExists, coreReady: coreReady,
 	}
 	for _, obj := range platformbuilder.RenderPlatformBase(platform, r.OperatorNamespace) {
@@ -1575,26 +1577,36 @@ func (r *Reconciler) oidcClientChecksum(ctx context.Context, p *otilmv1alpha1.Pl
 	if !platformbuilder.KeycloakManaged(p) {
 		return ""
 	}
-	return r.relayedSecretChecksum(ctx, p.Namespace, platformbuilder.OIDCClientSecretName(p))
+	return r.secretChecksum(ctx, p.Namespace, platformbuilder.OIDCClientSecretName(p))
 }
 
-// mcpClientChecksum returns a SHA-256 checksum of the operator-owned MCP client Secret
-// (<platform>-mcp-client) while the platform renders the MCP server, or "" when it does not or the
-// Secret does not exist yet. Stamped on the MCP Deployment, it rolls the server once
-// reconcileMCPKeycloak relays a different client secret: the server reads it from an environment
-// variable, which a running container never re-reads. The value is hashed, never logged or placed
-// in status.
-func (r *Reconciler) mcpClientChecksum(ctx context.Context, p *otilmv1alpha1.Platform) string {
+// mcpConfigChecksum returns the checksum stamped on the MCP Deployment while the platform renders
+// the MCP server, or "" when it does not or there is nothing to follow yet. It follows the Secret the
+// server reads its client secret from (MCPClientSecret: the <platform>-mcp-client Secret that
+// reconcileMCPKeycloak relays into with the managed identity, the Secret the spec references with the
+// external one) and, as Core's checksum does, the trusted-certificates bundle the operator composes.
+// The server reads both from environment variables, which a running container never re-reads, so a
+// change to either must roll it. A user's trusted-certificates Secret that the operator does not
+// compose is referenced as it is and is not followed, again as for Core.
+//
+// Without a composed bundle it is the client Secret's own checksum, so an operator upgrade leaves the
+// stamp of such a platform unchanged. The values are hashed, never logged or placed in status.
+func (r *Reconciler) mcpConfigChecksum(ctx context.Context, p *otilmv1alpha1.Platform, trustedCerts string) string {
 	if !platformbuilder.MCPEnabled(p) {
 		return ""
 	}
-	return r.relayedSecretChecksum(ctx, p.Namespace, platformbuilder.MCPClientSecretName(p))
+	name, _ := platformbuilder.MCPClientSecret(p)
+	clientSecret := r.secretChecksum(ctx, p.Namespace, name)
+	if trustedCerts == "" {
+		return clientSecret
+	}
+	return checksum.CombineChecksums(map[string]string{"clientSecret": clientSecret, "trustedCerts": trustedCerts})
 }
 
-// relayedSecretChecksum returns a SHA-256 checksum of a relayed client Secret's data, or "" when
-// the Secret cannot be read: absent, or a transient read error. No stamp means no spurious roll,
-// and the next reconcile self-heals.
-func (r *Reconciler) relayedSecretChecksum(ctx context.Context, namespace, name string) string {
+// secretChecksum returns a SHA-256 checksum of a Secret's data, or "" when the Secret cannot be
+// read: absent, or a transient read error. No stamp means no spurious roll, and the next reconcile
+// self-heals.
+func (r *Reconciler) secretChecksum(ctx context.Context, namespace, name string) string {
 	var sec corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sec); err != nil {
 		return ""

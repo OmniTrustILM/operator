@@ -69,7 +69,7 @@ metadata: { name: ilm, namespace: ilm }
 spec:
   version: ""                               # selects the platform version bundle; empty = the operator's default
 
-  # ── cross-component config (applies to EVERY component) ──
+  # ── cross-component config (proxy and trustedCertificates are read by only some components) ──
   common:
     hostName: ilm.example.com               # the canonical public FQDN (drives edge host, Keycloak/OIDC, CORS)
     image: { registry: hub.omnitrustregistry.com, repository: ilm, pullSecrets: [], tag: "", pullPolicy: IfNotPresent }
@@ -311,11 +311,12 @@ in its own `Secret`, referenced by name.** Credentials use standard Secret types
 reason about.** Runtime operational settings (logging, audit, OIDC providers) live in the
 application database, not the CR.
 
-**One placement rule for cross-component config: `spec.common`.** Anything that applies to
-every component — the shared image defaults, the public `hostName`, the outbound `proxy`, the
-log level, the trusted-CA bundle, and the fleet-wide pod-template passthrough (init/sidecar
-containers, volumes, ports, envFrom) — lives under `spec.common`. Each component's own block
-(`core`, `auth`, …) **overrides/augments** what `common` sets.
+**One placement rule for cross-component config: `spec.common`.** Anything shared across
+components — the shared image defaults, the public `hostName`, the log level, and the
+fleet-wide pod-template passthrough (init/sidecar containers, volumes, ports, envFrom), which
+apply to every component, plus the outbound `proxy` (Core and the MCP server) and the
+trusted-CA bundle (Core, the MCP server, and auth) — lives under `spec.common`. Each
+component's own block (`core`, `auth`, …) **overrides/augments** what `common` sets.
 
 **No hardcoded names — the generic mapping is canonical.** The operator hardcodes **no**
 environment-variable names and **no** expected Secret/ConfigMap keys in its reconcile *logic*.

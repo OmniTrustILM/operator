@@ -251,6 +251,27 @@ func TestBuildDeploymentEnvVars(t *testing.T) {
 	assert.Equal(t, "localhost", envMap["DB_HOST"])
 }
 
+// TestBuildDeploymentKeepsDuplicateEnvNames asserts that every env entry of the CR renders, in order,
+// when two of them share a name. The Connector controller applies its Deployment with CreateOrUpdate,
+// which accepts a duplicate name, and Kubernetes expands $(VAR) references in list order: B reads
+// "one" here, where dropping the first A would leave B before any A and give it the literal "$(A)".
+func TestBuildDeploymentKeepsDuplicateEnvNames(t *testing.T) {
+	conn := newTestConnector()
+	conn.Spec.Env = []otilmv1alpha1.EnvVar{
+		{Name: "A", Value: "one"},
+		{Name: "B", Value: "$(A)"},
+		{Name: "A", Value: "two"},
+	}
+
+	c := connector.BuildDeployment(conn, testChecksum).Spec.Template.Spec.Containers[0]
+
+	assert.Equal(t, []corev1.EnvVar{
+		{Name: "A", Value: "one"},
+		{Name: "B", Value: "$(A)"},
+		{Name: "A", Value: "two"},
+	}, c.Env)
+}
+
 func TestBuildDeploymentSecretRefEnv(t *testing.T) {
 	conn := newTestConnector()
 	envVarName := "DB_PASSWORD"

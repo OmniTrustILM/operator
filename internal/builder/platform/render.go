@@ -154,6 +154,8 @@ func ResolvePlatformServiceMonitors(p *otilmv1alpha1.Platform) []client.Object {
 // brief outage across the switch. The switch is REFUSED outright while a messaging migration is
 // recorded — the fence and the switch move the same workloads and cannot see each other.
 func buildWorkload(c common.Component) client.Object {
+	// The controller applies every workload server-side, which rejects a duplicate env name.
+	c.UniqueEnvNames = true
 	if c.WorkloadType == otilmv1alpha1.WorkloadKindStatefulSet {
 		return common.BuildStatefulSet(c)
 	}
@@ -240,7 +242,8 @@ func RenderPlatformBase(p *otilmv1alpha1.Platform, operatorNamespace string) []c
 
 	// mcp-server: ServiceAccount + Deployment + Service — only when enabled and the version's
 	// bundle carries its image. The Deployment reads its client secret by secretKeyRef from the
-	// operator-owned Secret named by MCPClientSecretName, which is not part of the render model.
+	// Secret MCPClientSecret names: the operator-owned one with the managed identity, the one the
+	// spec references with the external identity. Neither is part of the render model.
 	// A platform that leaves MCP off renders nothing here.
 	if MCPEnabled(p) {
 		mcp := withPlatformGlobals(p, ResolveMCP(p))

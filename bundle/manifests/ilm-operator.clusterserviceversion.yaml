@@ -718,6 +718,13 @@ spec:
         reconciles; a second one is degraded immediately (AnotherPlatformExists). A validating
         admission webhook will replace that racy list-based guard with create-time enforcement
         in a later milestone. To run multiple platforms, use separate namespaces.
+
+        One cross-field rule sits on the Platform itself, the only level where metadata.name is visible:
+        mcp.identity.clientSecretRef may not name <platform>-mcp-client. The operator owns that Secret
+        for the managed identity and prunes it when the platform switches to an external one, so an
+        external identity that read it would leave the MCP pods without their client secret. The rule
+        needs no mode check, because the managed identity takes no clientSecretRef, and it tests for spec
+        because the root does not require it.
       displayName: Platform
       kind: Platform
       name: platforms.otilm.com

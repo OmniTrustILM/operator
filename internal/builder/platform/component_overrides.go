@@ -55,7 +55,8 @@ func applyComponentSpec(p *otilmv1alpha1.Platform, c *common.Component, spec oti
 	// buildContainerEnv renders c.Env, then c.SecretEnv, then c.ConfigMapEnv, then
 	// c.ExtraEnv, then c.FieldRefEnv — that FIXED slice order, not Go append order, decides
 	// who wins a duplicate name (Kubernetes container-env semantics: last one in the
-	// rendered list wins). That is THREE precedence tiers, not one:
+	// rendered list wins). Platform workloads keep only that last entry of each name,
+	// because server-side apply rejects a duplicate. That is THREE precedence tiers, not one:
 	//   - a PLAIN-VALUE operator default (one the operator itself appended to c.Env, e.g.
 	//     Core's explicit PLATFORM_INSTANCE_ID) loses to a user spec.env entry of the same
 	//     name, because the user's entry lands in the SAME slice, after it.

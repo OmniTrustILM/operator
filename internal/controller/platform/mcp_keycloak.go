@@ -23,11 +23,14 @@ import (
 )
 
 // MCP status condition type and reasons. Like OIDCConfigured, MCPConfigured is an adjunct signal:
-// it reports MCP's Keycloak setup and never flips the Platform to Degraded. It exists only while
-// spec.mcp.enabled is true. Reasons and messages carry no identity material.
+// it reports the setup of the identity MCP signs in through and never flips the Platform to Degraded.
+// It exists only while spec.mcp.enabled is true. Reasons and messages carry no identity material: at
+// most the name and key of a Secret.
 const (
-	// conditionMCPConfigured reports whether MCP's objects are in the managed Keycloak's realm and
-	// the ilm-mcp client secret is relayed into <platform>-mcp-client, which the MCP server reads.
+	// conditionMCPConfigured reports whether the MCP server has the identity it needs. With the managed
+	// identity, MCP's objects are in the managed Keycloak's realm and the ilm-mcp client secret is
+	// relayed into <platform>-mcp-client, which the MCP server reads. With an external identity, the
+	// Secret the spec references holds the client secret the MCP server reads.
 	conditionMCPConfigured = "MCPConfigured"
 	// reasonMCPWaitingForKeycloak: the managed Keycloak or its admin credentials are not ready yet.
 	// The step requeues.
@@ -40,23 +43,36 @@ const (
 	// reasonMCPUnsupportedVersion: MCP is enabled on a platform version whose bundle has no MCP
 	// server. A spec.version change clears it, and so does turning MCP off.
 	reasonMCPUnsupportedVersion = "UnsupportedVersion"
+	// reasonMCPExternal: MCP signs in through an identity provider the platform does not manage, and
+	// the Secret holding its client secret exists with a value under its key.
+	reasonMCPExternal = "External"
+	// reasonMCPMissingSecret: the Secret holding MCP's client secret with an external identity does
+	// not exist or has no value under its key. Creating or changing the Secret clears it.
+	reasonMCPMissingSecret = "MissingSecret"
 )
 
 // mcpServerWorkloadName is the MCP server's workload name, which the Secret relaying its client
 // secret carries as its component label. It mirrors the builder's MCP component name.
 const mcpServerWorkloadName = "mcp-server"
 
-// reconcileMCPKeycloak keeps MCP's objects in the managed Keycloak's realm through the admin API
-// and relays the generated ilm-mcp client secret into the operator-owned Secret
-// <platform>-mcp-client, which the MCP Deployment reads by secretKeyRef. Like
-// reconcileOIDCProvider it is an adjunct that never degrades the Platform; it returns true to
-// request a requeue.
+// reconcileMCPKeycloak sets MCPConfigured for the identity MCP signs in through. With the managed
+// identity it keeps MCP's objects in the managed Keycloak's realm through the admin API and relays
+// the generated ilm-mcp client secret into the operator-owned Secret <platform>-mcp-client, which the
+// MCP Deployment reads by secretKeyRef. Like reconcileOIDCProvider it is an adjunct that never
+// degrades the Platform; it returns true to request a requeue.
 //
-// The admin API pass runs once per spec generation, and again whenever the relayed Secret is missing
-// or holds no client secret: the MCP Deployment's secretKeyRef is required, so new MCP pods cannot
-// start without it. Every path that keeps MCP on adds the Secret to the desired set, waits and
-// failures included, so the prune that follows reclaims it only once MCP is off or its platform
-// version has no MCP server.
+// With an external identity (spec.mcp.identity.mode external) it writes nothing to Keycloak and
+// relays nothing. It keeps no <platform>-mcp-client Secret desired, so the prune reclaims one that the
+// managed identity left, and it only reports whether the Secret the spec references holds the client
+// secret. The Secret watch re-runs the step when that Secret is created or changes, so the step never
+// requests a requeue.
+//
+// The rest applies to the managed identity. The admin API pass runs once per spec generation, and
+// again whenever the relayed Secret is missing or holds no client secret: the MCP Deployment's
+// secretKeyRef is required, so new MCP pods cannot start without it. Every path that keeps MCP on
+// adds the Secret to the desired set, waits and failures included, so the prune that follows
+// reclaims it only once MCP is off, its platform version has no MCP server, or its identity is
+// external.
 //
 // The pass asks for MCP's CIMD client policy only while the rendered Keycloak CR enables the cimd
 // feature. An override can replace spec.features without cimd while spec.mcp.cimd stays on; the
@@ -65,7 +81,7 @@ const mcpServerWorkloadName = "mcp-server"
 //
 // SECURITY: the admin credentials and the client secret reach only the registrar and the Secret's
 // data. Conditions and logs carry the registrar's step and at most an HTTP status code, or the fixed
-// reason a Secret write failed.
+// reason a Secret write failed, or, with an external identity, the name and key of its Secret.
 func (r *Reconciler) reconcileMCPKeycloak(ctx context.Context, p *otilmv1alpha1.Platform, desired desiredSet) bool {
 	if !p.Spec.MCP.Enabled {
 		meta.RemoveStatusCondition(&p.Status.Conditions, conditionMCPConfigured)
@@ -75,13 +91,17 @@ func (r *Reconciler) reconcileMCPKeycloak(ctx context.Context, p *otilmv1alpha1.
 		setMCPConfigured(p, metav1.ConditionFalse, reasonMCPUnsupportedVersion, "MCP needs platform version 2.21.0 or later")
 		return false
 	}
+	if platformbuilder.MCPExternalIdentity(p) {
+		r.reportMCPExternalClientSecret(ctx, p)
+		return false
+	}
 
 	secretName := platformbuilder.MCPClientSecretName(p)
 	desired.add(r, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: p.Namespace}})
 
 	if cond := meta.FindStatusCondition(p.Status.Conditions, conditionMCPConfigured); cond != nil &&
 		cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == p.Generation &&
-		r.mcpClientSecretRelayed(ctx, p) {
+		r.mcpClientSecretHeld(ctx, p) {
 		return false
 	}
 	if !meta.IsStatusConditionTrue(p.Status.Conditions, conditionKeycloakReady) {
@@ -127,14 +147,32 @@ func (r *Reconciler) reconcileMCPKeycloak(ctx context.Context, p *otilmv1alpha1.
 	return false
 }
 
-// mcpClientSecretRelayed reports whether <platform>-mcp-client exists and holds a client secret,
-// read from the cache. The API server stores a relayed StringData under Data.
-func (r *Reconciler) mcpClientSecretRelayed(ctx context.Context, p *otilmv1alpha1.Platform) bool {
+// reportMCPExternalClientSecret sets MCPConfigured for an external identity from the Secret the MCP
+// Deployment reads its client secret from: True when it holds a value under its key, and False,
+// naming the Secret and the key, when it does not exist or holds none. The Secret is the user's, so
+// nothing is written to it or to Keycloak.
+func (r *Reconciler) reportMCPExternalClientSecret(ctx context.Context, p *otilmv1alpha1.Platform) {
+	name, key := platformbuilder.MCPClientSecret(p)
+	if !r.mcpClientSecretHeld(ctx, p) {
+		setMCPConfigured(p, metav1.ConditionFalse, reasonMCPMissingSecret,
+			fmt.Sprintf("Secret %q does not exist or has no value under key %q", name, key))
+		return
+	}
+	setMCPConfigured(p, metav1.ConditionTrue, reasonMCPExternal,
+		fmt.Sprintf("MCP signs in through an external identity provider and its client secret is in Secret %q", name))
+}
+
+// mcpClientSecretHeld reports whether the Secret the MCP server reads its client secret from exists
+// and holds a value under its key, read from the cache: <platform>-mcp-client with the managed
+// identity, the Secret the spec references with the external one. The API server stores a relayed
+// StringData under Data. A read that fails counts as no value.
+func (r *Reconciler) mcpClientSecretHeld(ctx context.Context, p *otilmv1alpha1.Platform) bool {
+	name, key := platformbuilder.MCPClientSecret(p)
 	var s corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: platformbuilder.MCPClientSecretName(p)}, &s); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: p.Namespace, Name: name}, &s); err != nil {
 		return false
 	}
-	return len(s.Data[platformbuilder.MCPClientSecretKey]) > 0
+	return len(s.Data[key]) > 0
 }
 
 // renderedKeycloakEnablesCIMD reports whether the Keycloak CR the gate renders for p, overrides

@@ -4,7 +4,9 @@
 # hosted Claude apps, Codex) works with ILM on behalf of the user who signs in. It is OFF by
 # default and read-only when on. This Platform turns it on with the three things it needs: a
 # managed Keycloak, a public host and spec.mcp.enabled. Everything else is the smallest
-# configuration that converges, with the database and the broker managed too.
+# configuration that converges, with the database and the broker managed too. MCP then signs
+# users in through that Keycloak (the managed identity); platform_external_mcp.yaml signs them in
+# through an identity provider you run.
 #
 # PLATFORM VERSION. MCP ships in the 2.21.0 bundle, a PREVIEW bundle: its platform artifacts are
 # not published yet, so it resolves only because spec.version names it. A version whose bundle
@@ -32,8 +34,9 @@
 #     /.well-known/oauth-protected-resource;
 #   - the Keycloak features token-exchange-delegation, parameterized-scopes and cimd, and MCP's
 #     client, client scopes, client policies and delegation permission in the realm;
-#   - the MCPConfigured condition, which reports whether the Keycloak objects are in place and
-#     the client secret is relayed.
+#   - the MCPConfigured condition, which with this managed identity reports whether the Keycloak
+#     objects are in place and the client secret is relayed. (With an external identity it only
+#     reports whether the Secret holding the client secret exists.)
 #   Turning MCP on or off restarts the managed Keycloak (a short sign-in outage with one
 #   instance), Core and the gateway.
 #

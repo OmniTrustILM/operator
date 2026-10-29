@@ -176,11 +176,12 @@ func StampGatewayConfigChecksum(obj client.Object, checksum string) bool {
 }
 
 // StampMCPConfigChecksum sets the checksum/config pod-template annotation on the mcp-server
-// workload so a change to its relayed client Secret (<platform>-mcp-client) rolls the MCP server's
-// pods. The server reads the client secret from an environment variable, which a running container
-// never re-reads. No-op for any other object or an empty checksum; returns true when it stamped.
-// Threaded in by the reconciler like Core's and the gateway's checksums, so RenderPlatform stays
-// deterministic.
+// workload so a change to the Secret that holds its client secret (the relayed
+// <platform>-mcp-client with the managed identity, the Secret the spec references with the external
+// one) or to the trusted-certificates bundle the operator composes rolls the MCP server's pods. The
+// server reads both from environment variables, which a running container never re-reads. No-op for
+// any other object or an empty checksum; returns true when it stamped. Threaded in by the reconciler
+// like Core's and the gateway's checksums, so RenderPlatform stays deterministic.
 func StampMCPConfigChecksum(obj client.Object, checksum string) bool {
 	return stampWorkloadConfigChecksum(obj, mcpServerComponent, checksum)
 }

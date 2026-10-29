@@ -453,10 +453,10 @@ type KeycloakRealmImportSpec struct {
 	Key string `json:"key,omitempty"`
 }
 
-// TrustedCertificatesSpec references a Secret holding the CA bundle injected into
-// platform components as TRUSTED_CERTIFICATES. The value is never inlined; only the
-// Secret name (and the in-Secret key) is held here (the operator reads the CA bundle
-// via secretKeyRef / volume).
+// TrustedCertificatesSpec references a Secret holding the CA bundle that Core and the MCP
+// server read as TRUSTED_CERTIFICATES and that auth mounts at /etc/ssl/certs. The value is
+// never inlined; only the Secret name (and the in-Secret key) is held here (the operator
+// reads the CA bundle via secretKeyRef / volume).
 type TrustedCertificatesSpec struct {
 	// SecretRef names a Secret whose CAKey holds the trusted CA bundle (PEM).
 	SecretRef string `json:"secretRef,omitempty"`
@@ -502,9 +502,9 @@ type LoggingSpec struct {
 	Format string `json:"format,omitempty"`
 }
 
-// OutboundProxySpec configures outbound HTTP(S) proxy support for platform components.
-// When Enabled is true, PROXY_ENABLED is set; the HTTP/HTTPS/NoProxy values are
-// only injected when non-empty.
+// OutboundProxySpec configures outbound HTTP(S) proxy support for Core and the MCP server, the
+// components that read it. When Enabled is true, Core's PROXY_ENABLED is set; the
+// HTTP/HTTPS/NoProxy values are only injected, into both, when non-empty.
 type OutboundProxySpec struct {
 	// Enabled turns on proxy support (sets PROXY_ENABLED=true).
 	Enabled bool `json:"enabled,omitempty"`
@@ -512,7 +512,14 @@ type OutboundProxySpec struct {
 	HTTP string `json:"http,omitempty"`
 	// HTTPS is the HTTPS proxy URL (injected as HTTPS_PROXY when set).
 	HTTPS string `json:"https,omitempty"`
-	// NoProxy is the comma-separated no-proxy list (injected as NO_PROXY when set).
+	// NoProxy lists the hosts that bypass the proxy (injected as NO_PROXY when set). Core and the MCP
+	// server read it as Java's http.nonProxyHosts: entries are separated by "," or "|", each matches
+	// a whole host name, and a "*" at its start or end is a wildcard, so write "*.svc", because
+	// ".svc" matches nothing. Loopback hosts always bypass the proxy. Core's NO_PROXY is this value as
+	// it is, so list the in-cluster hosts Core calls, bare names such as auth and scheduler and a
+	// managed Keycloak's Service among them, and use "*.svc" and "*.cluster.local" for fully qualified
+	// names, as in "auth,scheduler,*.svc,*.cluster.local". While HTTP or HTTPS is set, the MCP server's
+	// NO_PROXY is this value followed by the hosts of its own plain-http URLs, which need no entry here.
 	NoProxy string `json:"noProxy,omitempty"`
 }
 
@@ -807,14 +814,19 @@ type UtilsSpec struct {
 
 // MCPSpec controls the optional MCP server component: the Model Context Protocol endpoint an AI
 // client (such as Claude Code) uses to work with ILM on behalf of the user who signs in. It embeds
-// the shared ComponentSpec and adds the Enabled toggle (MCP is opt-in), the Access level, and the
-// CIMD and Delegation options of the Keycloak setup the operator keeps in place for it.
+// the shared ComponentSpec and adds the Enabled toggle (MCP is opt-in), the Access level, the
+// Identity that selects the provider MCP signs its users in through, and the CIMD and Delegation
+// options of the Keycloak setup the operator keeps in place for it.
 //
-// MCP is supported with a MANAGED Keycloak only: the operator provisions MCP's Keycloak objects
-// through the Keycloak admin API. Enabling it therefore requires keycloak.mode=managed, a public
-// host (common.hostName, or edge.host on an enabled edge) and, when keycloak.managed.version is
-// pinned, 26.8.1 or later. Those rules live on PlatformSpec, which sees all three sections. MCP
-// also needs a platform version whose bundle carries the MCP server image (2.21.0 and later).
+// With the managed identity, the default, MCP signs in through the platform's own Keycloak, which the
+// operator prepares through the Keycloak admin API. With identity.mode external it signs in through a
+// provider the platform does not manage, and the operator provisions nothing there. What each mode
+// requires of keycloak and the public host is validated on PlatformSpec. MCP also needs a platform
+// version whose bundle carries the MCP server image (2.21.0 and later).
+//
+// The delegation group names a Keycloak group the operator creates, so only the managed identity
+// takes it; this rule lives here because it reads identity and delegation, which are both in MCPSpec.
+// +kubebuilder:validation:XValidation:rule="!has(self.identity) || self.identity.mode != 'external' || !has(self.delegation) || !has(self.delegation.group) || self.delegation.group.size() == 0",message="mcp.delegation.group is used only with identity.mode managed"
 type MCPSpec struct {
 	// ComponentSpec is the shared per-component override surface (inline).
 	ComponentSpec `json:",inline"`
@@ -829,10 +841,113 @@ type MCPSpec struct {
 	// +kubebuilder:validation:Enum=read-only;read-write;full
 	// +kubebuilder:default=read-only
 	Access string `json:"access,omitempty"`
+	// Identity selects the identity provider MCP signs its users in through. When omitted, MCP uses
+	// the platform's own Keycloak, as with identity.mode managed. With identity.mode external the
+	// provider must support RFC 8693 token exchange: MCP accepts a user's token for its own resource,
+	// https://<host>/mcp, that carries the required scope and not the ILM audience, and exchanges it
+	// for a token for the same user that carries the ILM audience. ILM must have an OAuth2 provider
+	// for the issuer, which is up to you; with exchangeMode delegation it must also allow MCP's
+	// client as a delegate (allowedDelegates, with delegateClaim client_id), which needs Core 2.21 or
+	// later.
+	// +optional
+	Identity *MCPIdentitySpec `json:"identity,omitempty"`
 	// CIMD configures sign-in with OAuth Client ID Metadata Documents.
 	CIMD MCPCIMDSpec `json:"cimd,omitempty"`
 	// Delegation configures whom MCP may act for.
 	Delegation MCPDelegationSpec `json:"delegation,omitempty"`
+}
+
+// MCPIdentitySpec selects the identity provider MCP signs its users in through and how MCP acts for
+// them. With mode managed (the default) the provider is the platform's own Keycloak, which the
+// operator prepares for MCP, and no other setting applies. With mode external it is an identity
+// provider the platform does not manage, whichever Keycloak the platform uses for its own sign-in:
+// you register MCP at that provider and give the Platform the resulting settings, and the operator
+// writes nothing to the provider.
+//
+// Its rules are the XValidation messages below. An empty string counts as unset, as an empty
+// delegation group does. URLs carry no userinfo or fragment because MCP rejects them.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'external' || (has(self.issuer) && self.issuer.size() > 0 && has(self.jwkSetUri) && self.jwkSetUri.size() > 0 && has(self.tokenUri) && self.tokenUri.size() > 0 && has(self.clientId) && self.clientId.size() > 0 && has(self.clientSecretRef) && self.clientSecretRef.size() > 0 && has(self.exchangeMode))",message="identity.mode external requires issuer, jwkSetUri, tokenUri, clientId, clientSecretRef and exchangeMode"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'external' || ((!has(self.issuer) || self.issuer.size() == 0) && (!has(self.jwkSetUri) || self.jwkSetUri.size() == 0) && (!has(self.tokenUri) || self.tokenUri.size() == 0) && (!has(self.clientId) || self.clientId.size() == 0) && (!has(self.clientSecretRef) || self.clientSecretRef.size() == 0) && (!has(self.clientSecretKey) || self.clientSecretKey.size() == 0) && !has(self.exchangeMode) && (!has(self.exchangeScope) || self.exchangeScope.size() == 0) && (!has(self.requiredScope) || self.requiredScope.size() == 0) && (!has(self.authorizationScopes) || self.authorizationScopes.size() == 0) && (!has(self.apiAudience) || self.apiAudience.size() == 0))",message="identity settings other than mode are used only with identity.mode external"
+// +kubebuilder:validation:XValidation:rule="!has(self.issuer) || self.issuer.size() == 0 || self.issuer.matches('^https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$')",message="issuer must be an https URL without userinfo, query or fragment"
+// +kubebuilder:validation:XValidation:rule="!has(self.jwkSetUri) || self.jwkSetUri.size() == 0 || self.jwkSetUri.matches('^https://[^/?#@[:space:]]+(/[^#[:space:]]*)?$') || self.jwkSetUri.matches('^http://([a-z0-9-]+[.]){2,}svc([.][a-z0-9-]+)*(:[0-9]{1,5})?(/[^#[:space:]]*)?$')",message="jwkSetUri and tokenUri may use http only for a Kubernetes Service host (.svc), and take no userinfo, fragment or whitespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.tokenUri) || self.tokenUri.size() == 0 || self.tokenUri.matches('^https://[^/?#@[:space:]]+(/[^#[:space:]]*)?$') || self.tokenUri.matches('^http://([a-z0-9-]+[.]){2,}svc([.][a-z0-9-]+)*(:[0-9]{1,5})?(/[^#[:space:]]*)?$')",message="jwkSetUri and tokenUri may use http only for a Kubernetes Service host (.svc), and take no userinfo, fragment or whitespace"
+type MCPIdentitySpec struct {
+	// Mode selects the identity provider: "managed" (the default) is the platform's own Keycloak,
+	// prepared by the operator, and "external" is a provider the platform does not manage. The other
+	// settings apply to external mode only.
+	// +kubebuilder:validation:Enum=managed;external
+	// +kubebuilder:default=managed
+	Mode string `json:"mode,omitempty"`
+	// Issuer is the issuer the provider puts in the tokens it signs, an https URL without userinfo, a
+	// query or a fragment. MCP accepts only tokens of exactly this issuer. Required with mode external.
+	// With a managed Keycloak it may not be the platform's own Keycloak, which is served under
+	// https://<host>/kc/ and belongs to mode managed.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	Issuer string `json:"issuer,omitempty"`
+	// JWKSetURI is the provider's endpoint for the keys that verify its signatures. Required with mode
+	// external. It is an https URL without userinfo or a fragment, or an http URL only for a Kubernetes
+	// Service name, <service>.<namespace>.svc such as keycloak.idp.svc, optionally followed by the
+	// cluster domain and optionally preceded by the pod name of a headless Service. Plain http is meant
+	// for providers inside the cluster, but the shape of a name cannot tell a cluster domain from a
+	// public DNS zone.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	JWKSetURI string `json:"jwkSetUri,omitempty"`
+	// TokenURI is the provider's token endpoint, where MCP exchanges a user's token. Required with mode
+	// external. It takes the same URLs as jwkSetUri.
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	TokenURI string `json:"tokenUri,omitempty"`
+	// ClientID is the ID of the client registered for MCP at the provider, with which MCP signs in to
+	// the token endpoint. Required with mode external.
+	// +kubebuilder:validation:MaxLength=255
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+	// ClientSecretRef names a Secret in the Platform's namespace whose ClientSecretKey holds the secret
+	// of MCP's client. Required with mode external. The Secret is referenced from MCP's pod and never
+	// copied. It must be a valid Secret name, a DNS-1123 subdomain, because Kubernetes refuses the pod's
+	// reference to any other.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self.size() == 0 || self.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?([.][a-z0-9]([-a-z0-9]*[a-z0-9])?)*$')",message="clientSecretRef must be a Secret name: lowercase letters, digits, '-' and '.', each part starting and ending with a letter or digit"
+	// +optional
+	ClientSecretRef string `json:"clientSecretRef,omitempty"`
+	// ClientSecretKey is the key in the referenced Secret that holds the client secret. When empty it
+	// defaults to "client-secret". It must be a valid Secret key: Kubernetes refuses the pod's reference
+	// to one that has a character other than a letter, a digit, '-', '_' or '.', that is '.', or that
+	// starts with '..'.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:XValidation:rule="self.size() == 0 || self.matches('^([-_a-zA-Z0-9]|[.][-_a-zA-Z0-9])[-._a-zA-Z0-9]*$')",message="clientSecretKey must be a Secret key: letters, digits, '-', '_' and '.', never '.' alone or starting with '..'"
+	// +optional
+	ClientSecretKey string `json:"clientSecretKey,omitempty"`
+	// ExchangeMode selects the RFC 8693 token exchange MCP uses to call ILM as the signed-in user:
+	// "standard" asks for a token for that user, and "delegation" for one that also names MCP as the
+	// acting client in act.client_id, which needs ILM 2.21 or later to allow MCP's client as a
+	// delegate. Required with mode external.
+	// +kubebuilder:validation:Enum=standard;delegation
+	// +optional
+	ExchangeMode string `json:"exchangeMode,omitempty"`
+	// ExchangeScope is the scope MCP asks for when it exchanges a token, as space-separated scope
+	// names. When empty, the provider's own defaults apply.
+	// +kubebuilder:validation:MaxLength=1024
+	// +optional
+	ExchangeScope string `json:"exchangeScope,omitempty"`
+	// RequiredScope is the scope a user's token must carry for MCP to accept it. When empty it is
+	// MCP's own default, "mcp:access".
+	// +kubebuilder:validation:MaxLength=255
+	// +optional
+	RequiredScope string `json:"requiredScope,omitempty"`
+	// AuthorizationScopes are scopes besides RequiredScope that MCP advertises to its clients, for
+	// them to request when they sign in. When empty, MCP advertises RequiredScope alone.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MaxLength=255
+	// +optional
+	AuthorizationScopes []string `json:"authorizationScopes,omitempty"`
+	// APIAudience is the audience of the token MCP gets from the exchange, which ILM accepts and a
+	// user's token for MCP may not carry. When empty it is MCP's own default, "ilm".
+	// +kubebuilder:validation:MaxLength=255
+	// +optional
+	APIAudience string `json:"apiAudience,omitempty"`
 }
 
 // MCPCIMDSpec configures sign-in with OAuth Client ID Metadata Documents (CIMD): an MCP client
@@ -842,7 +957,10 @@ type MCPCIMDSpec struct {
 	// Enabled turns CIMD sign-in on. It defaults to true, and an unset value counts as true. With it
 	// on, the operator enables Keycloak's cimd feature and keeps the client policy that admits
 	// metadata-document clients in the realm. Set it to false to leave both off, in which case MCP
-	// clients have to be registered in Keycloak by hand.
+	// clients have to be registered in Keycloak by hand. It applies to identity.mode managed only:
+	// with identity.mode external it has no effect, and CIMD is up to the identity provider.
+	// Switching a platform from managed to external removes the mcp-cimd client policy and profile
+	// from the platform's Keycloak realm.
 	// +kubebuilder:default=true
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
@@ -854,7 +972,9 @@ type MCPDelegationSpec struct {
 	// Group names a top-level Keycloak group of the platform realm. When set, MCP may act only for
 	// the members of that group: the operator creates the group when it is missing, and adding
 	// members is up to you. When empty (the default), MCP may act for every user of the realm. It
-	// is a group name, not a path, so it holds no "/", and is at most 255 characters long.
+	// is a group name, not a path, so it holds no "/", and is at most 255 characters long. Only
+	// identity.mode managed uses it: identity.mode external rejects it, because the operator creates
+	// nothing at that identity provider.
 	// +kubebuilder:validation:Pattern=`^[^/]{0,255}$`
 	// +optional
 	Group string `json:"group,omitempty"`
@@ -1340,30 +1460,42 @@ const (
 // sibling sub-tree that rule cannot see.
 // +kubebuilder:validation:XValidation:rule="!has(self.core) || !has(self.core.timeQualityMonitor) || !has(self.core.timeQualityMonitor.enabled) || !self.core.timeQualityMonitor.enabled || self.messaging.mode == 'managed' || (has(self.core.timeQualityMonitor.credentials) && has(self.core.timeQualityMonitor.credentials.secretRef) && self.core.timeQualityMonitor.credentials.secretRef.size() > 0)",message="core.timeQualityMonitor.credentials.secretRef is required when messaging.mode=external (with an external broker the operator has no generated monitor-user Secret to wire)"
 //
-// A sixth cross-field rule gates MCP on a MANAGED Keycloak: the operator provisions MCP's
-// Keycloak objects (its client, client scopes and delegation permission) through the Keycloak
-// admin API, which only exists when the operator provisions Keycloak (keycloak.mode=managed).
-// It lives here (not on MCPSpec) because keycloak.mode is in a sibling sub-tree the MCPSpec rule
-// cannot see.
-// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.keycloak) && self.keycloak.mode == 'managed')",message="mcp.enabled requires keycloak.mode=managed (the operator provisions MCP's Keycloak objects through the admin API)"
+// A sixth cross-field rule gates MCP with the managed identity on a MANAGED Keycloak: the operator
+// provisions MCP's Keycloak objects (its client, client scopes and delegation permission) through
+// the Keycloak admin API, which only exists when the operator provisions Keycloak
+// (keycloak.mode=managed). External identity (mcp.identity.mode=external) provisions nothing, so it
+// runs with any Keycloak mode, and with no keycloak block. The rule lives here (not on MCPSpec)
+// because keycloak.mode is in a sibling sub-tree the MCPSpec rule cannot see.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.mcp.identity) && self.mcp.identity.mode == 'external') || (has(self.keycloak) && self.keycloak.mode == 'managed')",message="mcp.enabled requires keycloak.mode=managed (the operator provisions MCP's Keycloak objects through the admin API), or mcp.identity.mode external for an identity provider the platform does not manage"
 //
 // A seventh cross-field rule gives MCP a public host, the one the operator resolves for the
 // platform: the host of an ENABLED edge, otherwise the canonical common.hostName. The host of a
 // disabled edge is ignored by that resolution, so edge.host satisfies the rule only while
-// edge.enabled is true. MCP builds its issuer and resource URLs
-// (https://<host>/kc/realms/<realm> and https://<host>/mcp) from the resolved host. It lives
-// here because the edge and common blocks are sibling sub-trees the MCPSpec rule cannot see.
+// edge.enabled is true. MCP builds its resource URL (https://<host>/mcp) from the resolved host
+// with either identity, and with the managed identity its issuer too
+// (https://<host>/kc/realms/<realm>). It lives here because the edge and common blocks are
+// sibling sub-trees the MCPSpec rule cannot see.
 // +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.edge) && has(self.edge.enabled) && self.edge.enabled && has(self.edge.host) && self.edge.host.size() > 0) || (has(self.common) && has(self.common.hostName) && self.common.hostName.size() > 0)",message="mcp.enabled needs a public host: set common.hostName, or edge.host on an enabled edge"
 //
 // An eighth cross-field rule keeps a PINNED managed Keycloak at 26.8.1 or later, the release both
 // install paths run. An unpinned version is not checked: the Keycloak Operator prerequisite
-// supplies its own matching 26.8.1 server image. The rule lives here because
-// keycloak.managed.version is in a sibling sub-tree the MCPSpec rule cannot see. The version is
-// a Keycloak image tag, so the pattern accepts 26.8.1 to 26.8.99, 26.9 and later 26.x, and 27 to
-// 99, each optionally followed by a tag suffix such as the -0 of 26.8.1-0. A tag that cannot be
-// shown to be 26.8.1 or later is rejected: one that names no patch of 26.8, or that is not a
-// version at all, such as latest.
-// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || !has(self.keycloak) || !has(self.keycloak.managed) || !has(self.keycloak.managed.version) || self.keycloak.managed.version.size() == 0 || self.keycloak.managed.version.matches('^(26[.]8[.][1-9][0-9]?|26[.](9|[1-9][0-9]+)|(2[7-9]|[3-9][0-9]))([.-].*)?$')",message="mcp.enabled requires keycloak.managed.version 26.8.1 or later (the release both install paths run)"
+// supplies its own matching 26.8.1 server image. External identity is not checked either, because
+// it puts nothing in that Keycloak. The rule lives here because keycloak.managed.version is in a
+// sibling sub-tree the MCPSpec rule cannot see. The version is a Keycloak image tag, so the
+// pattern accepts 26.8.1 to 26.8.99, 26.9 and later 26.x, and 27 to 99, each optionally followed
+// by a tag suffix such as the -0 of 26.8.1-0. A tag that cannot be shown to be 26.8.1 or later is
+// rejected: one that names no patch of 26.8, or that is not a version at all, such as latest.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || (has(self.mcp.identity) && self.mcp.identity.mode == 'external') || !has(self.keycloak) || !has(self.keycloak.managed) || !has(self.keycloak.managed.version) || self.keycloak.managed.version.size() == 0 || self.keycloak.managed.version.matches('^(26[.]8[.][1-9][0-9]?|26[.](9|[1-9][0-9]+)|(2[7-9]|[3-9][0-9]))([.-].*)?$')",message="mcp.enabled requires keycloak.managed.version 26.8.1 or later (the release both install paths run)"
+//
+// A further cross-field rule keeps external identity off the platform's own Keycloak. With a MANAGED
+// Keycloak, that Keycloak is served under https://<host>/kc/ on the platform's public host, the host
+// the public-host rule resolves, and the operator prepares it for MCP with the managed identity only, so
+// external identity pointed at it would find it unprepared. An external issuer under that path is
+// therefore rejected, whichever realm it names, in whatever case its host is written and with the
+// https default port 443 spelled out or not; use the managed identity for the platform's own
+// Keycloak. The rule lives here because the edge, common and keycloak blocks are sibling sub-trees
+// the MCPSpec rule cannot see.
+// +kubebuilder:validation:XValidation:rule="!has(self.mcp) || !has(self.mcp.enabled) || !self.mcp.enabled || !has(self.mcp.identity) || self.mcp.identity.mode != 'external' || !has(self.mcp.identity.issuer) || !has(self.keycloak) || self.keycloak.mode != 'managed' || ((has(self.edge) && has(self.edge.enabled) && self.edge.enabled && has(self.edge.host) && self.edge.host.size() > 0) ? !(self.mcp.identity.issuer.lowerAscii().startsWith('https://' + self.edge.host.lowerAscii() + '/kc/') || self.mcp.identity.issuer.lowerAscii().startsWith('https://' + self.edge.host.lowerAscii() + ':443/kc/')) : (!has(self.common) || !has(self.common.hostName) || !(self.mcp.identity.issuer.lowerAscii().startsWith('https://' + self.common.hostName.lowerAscii() + '/kc/') || self.mcp.identity.issuer.lowerAscii().startsWith('https://' + self.common.hostName.lowerAscii() + ':443/kc/'))))",message="identity.mode external needs a provider the platform does not manage; use identity.mode managed for the platform's Keycloak"
 type PlatformSpec struct {
 	// Version selects which platform version bundle the operator reconciles this
 	// Platform against — the tested set of component images, env-var wiring, and managed-
@@ -1386,10 +1518,11 @@ type PlatformSpec struct {
 	// unsupported.
 	// +optional
 	Version string `json:"version,omitempty"`
-	// Common holds configuration applied to EVERY platform component: shared image
-	// defaults, outbound proxy, log level, the trusted-CA bundle, the platform's public
-	// hostName, and the fleet-wide pod-template passthrough (init/sidecar containers,
-	// volumes, ports, envFrom). Each component's inline ComponentSpec overrides/augments it.
+	// Common holds configuration shared across platform components: shared image defaults, log
+	// level, the platform's public hostName and the fleet-wide pod-template passthrough
+	// (init/sidecar containers, volumes, ports, envFrom), which apply to EVERY component, plus the
+	// outbound proxy and the trusted-CA bundle, which only some components read. Each component's
+	// inline ComponentSpec overrides/augments it.
 	// +optional
 	Common CommonSpec `json:"common,omitempty"`
 	// Database is the required database connection (external or managed).
@@ -1448,8 +1581,9 @@ type PlatformSpec struct {
 	// Utils controls the optional utils component.
 	Utils UtilsSpec `json:"utils,omitempty"`
 	// MCP controls the optional MCP server component, which lets an MCP client such as Claude
-	// Code work with ILM on behalf of the signed-in user. It is off and read-only by default, and
-	// enabling it needs a managed Keycloak and a public host.
+	// Code work with ILM on behalf of the signed-in user. It is off and read-only by default.
+	// Enabling it needs a public host, and a managed Keycloak unless identity.mode is external,
+	// which signs users in through an identity provider the platform does not manage.
 	MCP MCPSpec `json:"mcp,omitempty"`
 	// Gateway configures the Kong API gateway and its declarative routing/plugins.
 	Gateway GatewaySpec `json:"gateway,omitempty"`
@@ -1516,11 +1650,8 @@ type NetworkPolicySpec struct {
 	IngressNamespace string `json:"ingressNamespace,omitempty"`
 }
 
-// CommonSpec holds configuration applied to EVERY platform component: shared image
-// defaults, outbound proxy, log level, the trusted-CA bundle, the platform's public
-// hostname, and the fleet-wide pod-template passthrough (init/sidecar containers,
-// volumes, ports, envFrom). Each component's inline ComponentSpec overrides/augments
-// what is set here. No secret VALUES live here — only references.
+// CommonSpec holds the configuration shared across platform components, as described on
+// PlatformSpec.Common. No secret VALUES live here — only references.
 //
 // It consolidates the shared image/proxy/logging/trustedCertificates settings plus a
 // fleet-wide pod-template passthrough (initContainers / sidecarContainers /
@@ -1560,14 +1691,15 @@ type CommonSpec struct {
 	// +optional
 	// +kubebuilder:validation:Pattern=`^(\*\.)?[a-zA-Z0-9._-]{1,253}$`
 	HostName string `json:"hostName,omitempty"`
-	// Proxy configures outbound HTTP(S) proxy support for all components.
+	// Proxy configures outbound HTTP(S) proxy support for Core and the MCP server.
 	// +optional
 	Proxy OutboundProxySpec `json:"proxy,omitempty"`
 	// Logging configures the platform log level for all components.
 	// +optional
 	Logging LoggingSpec `json:"logging,omitempty"`
-	// TrustedCertificates references the CA bundle (TRUSTED_CERTIFICATES) trusted by all
-	// components. Reference only — the PEM is never inlined.
+	// TrustedCertificates references the CA bundle (TRUSTED_CERTIFICATES) that Core and the MCP
+	// server trust and that auth mounts at /etc/ssl/certs. Reference only — the PEM is never
+	// inlined.
 	// +optional
 	TrustedCertificates TrustedCertificatesSpec `json:"trustedCertificates,omitempty"`
 
@@ -1722,6 +1854,14 @@ type PlatformStatus struct {
 // reconciles; a second one is degraded immediately (AnotherPlatformExists). A validating
 // admission webhook will replace that racy list-based guard with create-time enforcement
 // in a later milestone. To run multiple platforms, use separate namespaces.
+//
+// One cross-field rule sits on the Platform itself, the only level where metadata.name is visible:
+// mcp.identity.clientSecretRef may not name <platform>-mcp-client. The operator owns that Secret
+// for the managed identity and prunes it when the platform switches to an external one, so an
+// external identity that read it would leave the MCP pods without their client secret. The rule
+// needs no mode check, because the managed identity takes no clientSecretRef, and it tests for spec
+// because the root does not require it.
+// +kubebuilder:validation:XValidation:rule="!has(self.spec) || !has(self.spec.mcp) || !has(self.spec.mcp.identity) || !has(self.spec.mcp.identity.clientSecretRef) || self.spec.mcp.identity.clientSecretRef != self.metadata.name + '-mcp-client'",message="identity.clientSecretRef must not name <platform>-mcp-client, the Secret the operator owns for the managed identity"
 type Platform struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

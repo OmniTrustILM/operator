@@ -267,6 +267,13 @@ type Component struct {
 	// shape the typed SecretEnv/ConfigMapEnv helpers do not cover (e.g. arbitrary EnvVar
 	// names).
 	ExtraEnv []corev1.EnvVar
+	// UniqueEnvNames, when true, keeps only the last entry of each name in the main container's
+	// env: the Platform controller applies its workloads server-side, and the apiserver rejects
+	// an applied container env that names a variable twice. When false every entry stays, in
+	// order: the Connector and Proxy controllers write with CreateOrUpdate, which accepts a
+	// duplicate name, and Kubernetes expands $(VAR) references in list order, so dropping an
+	// earlier entry would change what a later reference reads.
+	UniqueEnvNames bool
 	// EnvFrom carries whole-Secret / whole-ConfigMap envFrom sources (a SecretRef/
 	// ConfigMapRef of type=env with no key mapping projects every key). Rendered on the
 	// main container's EnvFrom.

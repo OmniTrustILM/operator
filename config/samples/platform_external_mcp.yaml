@@ -1,0 +1,111 @@
+# platform_external_mcp.yaml — the optional MCP server with an external identity provider.
+#
+# MCP is the Model Context Protocol endpoint through which an AI client (Claude Code, the
+# hosted Claude apps, Codex) works with ILM on behalf of the user who signs in. It is OFF by
+# default and read-only when on, and by default it signs users in through the platform's own
+# Keycloak (platform_managed_mcp.yaml). This Platform sets spec.mcp.identity.mode external
+# instead: MCP signs users in through an identity provider you run (https://idp.example.com
+# here), and the operator writes nothing to that provider. The platform's own Keycloak mode does
+# not matter, so this sample has no keycloak block, and it uses an external database and broker,
+# as platform_minimal_external.yaml does.
+#
+# PLATFORM VERSION. MCP ships in the 2.21.0 bundle, a PREVIEW bundle: its platform artifacts are
+# not published yet, so it resolves only because spec.version names it. A version whose bundle
+# carries no MCP server renders nothing for it and reports MCPConfigured=False/UnsupportedVersion.
+# The 2.21.0 bundle names the mcp-server 1.0.0 image, which is not published yet; the commented
+# image override under spec.mcp selects the development build. The bundle still runs Core 2.20.0,
+# which ignores a provider's allowedDelegates, so exchangeMode delegation needs Core 2.21.0 or
+# later; this sample uses standard.
+#
+# PREREQUISITES
+#   - The ILM operator running in the cluster (make deploy / helm install).
+#   - An external PostgreSQL and AMQP broker, as in platform_minimal_external.yaml.
+#   - An identity provider that supports RFC 8693 token exchange, with MCP registered as a
+#     confidential client. It must issue users a token for https://<hostName>/mcp that carries
+#     the scope mcp:access and not the audience ilm, and exchange it for a token for the same
+#     user with the audience ilm. The Keycloak objects listed under "MCP server" in
+#     docs/site/custom-resources/platform.md are a worked example.
+#   - ILM configured with an OAuth2 provider for the issuer. With exchangeMode delegation that
+#     provider must also list MCP's client in allowedDelegates, with delegateClaim client_id.
+#   - A route from MCP clients to https://<hostName>/mcp, with a certificate they trust: an edge
+#     (platform_edge_*.yaml, platform_gatewayapi.yaml) or your own ingress to the api-gateway
+#     Service.
+#
+# SECRETS YOU MUST CREATE FIRST (same namespace as the Platform). Exact keys matter:
+#   kubectl create secret generic ilm-db -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<db-password>              # keys: username, password
+#   kubectl create secret generic ilm-messaging -n ilm \
+#     --from-literal=username=ilm --from-literal=password=<broker-password>          # keys: username, password
+#   kubectl create secret generic mcp-idp-client -n ilm \
+#     --from-literal=client-secret=<mcp-client-secret>                               # key: client-secret
+# The last one holds MCP's client secret at the identity provider. Admission rejects the name
+# <platform>-mcp-client (ilm-mcp-client here), which the operator owns for the managed identity.
+# Until the Secret exists, MCPConfigured is False/MissingSecret and the mcp-server pod waits
+# for it.
+#
+# WHAT THE OPERATOR ADDS FOR MCP
+#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp and
+#     /.well-known/oauth-protected-resource;
+#   - the MCPConfigured condition, which reports only whether the client Secret holds a value
+#     under its key: True/External, or False/MissingSecret.
+#   Nothing in Keycloak, nothing at the provider, and no MCP delegate in ILM. Turning MCP on or
+#   off rolls the gateway, once.
+#
+# The full guide is docs/site/custom-resources/platform.md, "External identity provider".
+apiVersion: otilm.com/v1alpha1
+kind: Platform
+metadata:
+  name: ilm
+  namespace: ilm
+spec:
+  version: "2.21.0"                 # a preview bundle that carries the MCP server
+  common:
+    hostName: ilm.example.com       # the public host: MCP's resource URL, https://<hostName>/mcp, is built from it
+    # MCP gets Core's trusted CA bundle and outbound proxy from here. Use them for a provider behind a
+    # private CA or a proxy. noProxy is Core's: it lists the in-cluster hosts Core calls by a bare name,
+    # auth and scheduler. While a proxy URL is set, the operator adds MCP's own plain-http hosts to
+    # MCP's NO_PROXY, so they need no entry. *.svc and *.cluster.local cover the fully qualified names.
+    # It is read as Java's http.nonProxyHosts, so "*.svc", never ".svc".
+    # trustedCertificates: { secretRef: ilm-trusted-ca }
+    # proxy:
+    #   http: http://proxy.example.com:3128
+    #   https: http://proxy.example.com:3128
+    #   noProxy: "auth,scheduler,*.svc,*.cluster.local,localhost"
+  database:
+    mode: external
+    host: postgres.example.com
+    port: 5432
+    name: ilmdb
+    credentials:
+      secretRef: ilm-db
+  messaging:
+    mode: external
+    brokerType: rabbitmq
+    host: rabbitmq.example.com
+    port: 5672
+    virtualHost: ilm
+    credentials:
+      secretRef: ilm-messaging
+  mcp:
+    enabled: true
+    identity:
+      mode: external                # sign users in through a provider you run, not the platform's Keycloak
+      issuer: https://idp.example.com/realms/demo   # exactly the issuer in the provider's tokens
+      # A provider inside the cluster may use http:// for the next two URLs, but only with a
+      # <service>.<namespace>.svc host, as in http://keycloak.idp.svc:8080/realms/demo/... — and
+      # then, when a proxy is set, the operator adds that host to MCP's NO_PROXY.
+      jwkSetUri: https://idp.example.com/realms/demo/protocol/openid-connect/certs
+      tokenUri: https://idp.example.com/realms/demo/protocol/openid-connect/token
+      clientId: ilm-mcp             # the confidential client registered for MCP at the provider
+      clientSecretRef: mcp-idp-client   # the Secret created above; its key client-secret holds the client's secret
+      exchangeMode: standard        # standard | delegation
+      # clientSecretKey: client-secret   # the key in that Secret (default client-secret)
+      # requiredScope: mcp:access        # the scope a user's token must carry (default mcp:access)
+      # exchangeScope: ""                # the scopes MCP asks for in the exchange (empty: the provider's defaults)
+      # authorizationScopes: []          # scopes besides requiredScope that MCP advertises to its clients
+      # apiAudience: ilm                 # the audience of the exchanged token (default ilm)
+    # access: read-only             # read-only (default) | read-write | full — the tools MCP offers
+    # image: { tag: develop-latest }  # the development build, until the bundle's mcp-server:1.0.0 image is published
+    # env:                          # the browser origins and the signature algorithms have no field: set them here
+    #   - { name: ILM_MCP_SECURITY_ALLOWED_ORIGINS, value: "https://app.example.com" }   # default: none
+    #   - { name: ILM_MCP_SECURITY_JWS_ALGORITHMS, value: "RS256,ES256" }                # default: RS256

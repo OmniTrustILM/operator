@@ -581,6 +581,10 @@ func TestRegisterInternalKeycloakScriptAllowsMCPDelegate(t *testing.T) {
 		{"defaults", nil},
 		{"CIMD off", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = boolPtr(false) }},
 		{"delegation limited to a group", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Delegation.Group = "mcp-users" }},
+		{"identity with an empty mode", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{} }},
+		{"identity with mode managed", func(p *otilmv1alpha1.Platform) {
+			p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{Mode: testMCPIdentityManaged}
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -624,4 +628,20 @@ func TestRegisterInternalKeycloakScriptWithoutMCPIsUnchanged(t *testing.T) {
 			assert.EqualValues(t, oidcSkewSeconds, body["skew"])
 		})
 	}
+}
+
+// TestRegisterInternalKeycloakScriptOmitsDelegatesForExternalIdentity proves MCP's client is no
+// delegate of Core's internal provider while MCP signs in through an external identity provider: that
+// provider's ILM settings are the admin's, and the operator writes nothing for it. The body is the one
+// of a platform with MCP off, so Core's defaults, which allow no delegates, stay in force.
+func TestRegisterInternalKeycloakScriptOmitsDelegatesForExternalIdentity(t *testing.T) {
+	external := mcpExternalPlatform(nil)
+	require.True(t, MCPExternalIdentity(external), "the case must render MCP in external mode")
+	off := mcpPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Enabled = false })
+
+	body := internalProviderBody(t, external)
+
+	assert.NotContains(t, body, "allowedDelegates")
+	assert.NotContains(t, body, "delegateClaim")
+	assert.Equal(t, internalProviderBody(t, off), body)
 }

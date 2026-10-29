@@ -97,6 +97,19 @@ const (
 	testMCPDelegationGroup   = "ilm-mcp-users"
 	featureTokenExchange     = "token-exchange-delegation"
 	featureParamScopes       = "parameterized-scopes"
+	// testKeycloakNotReady names the table case of a managed Keycloak that is not Ready yet.
+	testKeycloakNotReady = "Keycloak is not ready"
+
+	// External-identity fixtures: the Secret MCP's client secret is read from, the key it holds it
+	// under by default and the one a spec can name instead, the secret itself, and the provider's
+	// URLs, which no condition or log may carry.
+	testMCPIdPSecret      = "mcp-idp-client"
+	testMCPIdPSecretKey   = "client-secret"
+	testMCPIdPCustomKey   = "idp-secret"
+	testMCPIdPSecretValue = "fake-idp-client-secret"
+	testMCPIdPIssuer      = "https://idp.example.com/realms/corp"
+	testMCPIdPJWKS        = "https://idp.example.com/realms/corp/protocol/openid-connect/certs"
+	testMCPIdPToken       = "https://idp.example.com/realms/corp/protocol/openid-connect/token"
 
 	// Relay failure fixtures: the client secret the OIDC fake registrar hands back, and text a failed
 	// write of a relayed client Secret can carry, an admission webhook's denial and the name of the

@@ -14,8 +14,9 @@ SPDX-License-Identifier: Apache-2.0
 // credentials) it emits the CR's Secret REFERENCE (e.g. database.credentials.secretRef)
 // plus a top-of-file "# TODO: create Secret" block with a ready-to-edit
 // `kubectl create secret` line. Secret creation stays a human decision; the tool only
-// scaffolds it. MCP's client secret is the one secret with no reference: the operator
-// generates it, so neither it nor a reference to it is copied, and the report says why.
+// scaffolds it. MCP's client secret has a reference only with an external identity, where the
+// converter copies the name of the Secret that holds it. With the managed identity the operator
+// generates the secret, so neither it nor a reference to it is copied, and the report says why.
 //
 // The conversion is best-effort, not 100%: values with no CR equivalent are flagged with
 // "# UNMAPPED: <values path>" and customization the user must move by hand (connectors,
@@ -30,6 +31,7 @@ import (
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/yaml"
 )
 
@@ -37,6 +39,10 @@ import (
 // values.yaml describes a chart install, which the operator adopts by REFERENCING the
 // running infra in external mode; opting into managed mode is a separate human decision.
 const modeExternal = "external"
+
+// modeManaged is the mode of an operator-provisioned Keycloak: what the chart's bundled Keycloak
+// (global.keycloak.enabled) converts to, and the Keycloak MCP's managed identity signs in through.
+const modeManaged = "managed"
 
 // coreImageKey is the umbrella values top-level key that carries Core's image (the chart's
 // `image` block is Core's image; every other component has its own block).
@@ -53,6 +59,9 @@ const (
 	defaultAdminKeyKey    = "tls.key"
 	defaultProvAPIKeyKey  = "provisioningApiKey"
 	defaultKeycloakSecKey = "clientSecret" //nolint:gosec // in-Secret KEY name, not a credential value
+	// defaultMCPSecretKey is the key MCP reads an external identity's client secret from when
+	// spec.mcp.identity.clientSecretKey is empty.
+	defaultMCPSecretKey = "client-secret" //nolint:gosec // in-Secret KEY name, not a credential value
 )
 
 // Default names of the Secrets the converter scaffolds references to. Exported so callers
@@ -275,7 +284,7 @@ func (r *Result) mapKeycloak(global vals, spec *otilmv1alpha1.PlatformSpec) {
 	// The chart's global.keycloak is the INTERNAL bundled Keycloak; on the operator side
 	// that is keycloak.mode=managed (Keycloak Operator). The CR carries only mode/realm
 	// here; the managed sizing is a deliberate manual decision.
-	spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: "managed", Realm: "ilm"}
+	spec.Keycloak = &otilmv1alpha1.KeycloakSpec{Mode: modeManaged, Realm: "ilm"}
 	r.customization = append(r.customization,
 		"global.keycloak.enabled=true -> keycloak.mode=managed: fill keycloak.managed (instances/version/storage) per docs/design/examples/platform_managed_keycloak.yaml (Keycloak Operator must be installed)")
 	if _, ok := kc["clientSecret"]; ok {
@@ -700,19 +709,36 @@ func (r *Result) mapComponentReplicas(block vals, comp *otilmv1alpha1.ComponentS
 	}
 }
 
-// Reasons the report gives for an MCP value that is not converted.
+// Reasons the report gives for an MCP value that is not converted, or notes it adds to the output.
 const (
 	// mcpClientSecretNote is shared by every values path that holds MCP's client secret or a
-	// reference to it.
+	// reference to it, with the managed identity.
 	mcpClientSecretNote = "not copied: the operator manages MCP's client secret. It relays the one Keycloak " +
 		"generates for the ilm-mcp client into a Secret it owns, so there is no Secret to create or reference"
-	// mcpIdentityProviderNote is the reason for an issuer, key-set or token endpoint. It says what
-	// the value was for, so the line cannot be read as if the conversion kept it.
-	mcpIdentityProviderNote = "not converted: it points MCP at another identity provider, but the operator " +
-		"runs MCP against the platform's managed Keycloak only and derives these endpoints itself"
-	// mcpSecurityNote is the reason for every other mcpServer.security value.
+	// mcpExternalClientSecretNote is the same reason with an external identity, which reads its client secret
+	// from a Secret the operator never creates. The name of that Secret comes from
+	// mcpServer.security.clientSecretRef only, so a value or a reference under global.mcp is not it.
+	mcpExternalClientSecretNote = "not copied: with an external identity MCP reads its client secret from the " +
+		"Secret that spec.mcp.identity.clientSecretRef names, and the operator never creates that Secret. The " +
+		"conversion takes the name from mcpServer.security.clientSecretRef only"
+	// mcpOwnKeycloakNote is the reason for an issuer, key-set or token endpoint with the managed identity,
+	// where MCP signs in through the platform's own Keycloak. It says the operator derives them, so the line
+	// cannot be read as if the conversion kept another provider.
+	mcpOwnKeycloakNote = "not converted: MCP signs in through the platform's own Keycloak, whose issuer and " +
+		"endpoints the operator derives"
+	// mcpSecurityNote is the reason for every other mcpServer.security value with the managed identity.
 	mcpSecurityNote = "not converted: the operator derives MCP's security settings to match the Keycloak " +
 		"objects it provisions for MCP"
+	// mcpResourceNote is the reason for mcpServer.security.resource with an external identity.
+	mcpResourceNote = "not converted: the operator derives MCP's resource from the platform's public host, " +
+		"as https://<host>/mcp"
+	// mcpNoFieldNote is the reason for every other mcpServer.security value with an external identity.
+	mcpNoFieldNote = "not converted: the Platform has no field for it"
+	// mcpOffNote is the reason for every mcpServer.security value of an identity provider that the values name
+	// while MCP is off. The Platform checks an identity block whether or not MCP is on, so it is mapped only for
+	// MCP that is on.
+	mcpOffNote = "not converted: MCP is off (global.mcp.enabled is not true), so its identity provider settings " +
+		"are left out. Turn MCP on and convert again"
 	// mcpNetworkPolicyNote is the reason for mcpServer.networkPolicy.
 	mcpNetworkPolicyNote = "not converted: the operator renders no NetworkPolicy for MCP alone. After migration MCP " +
 		"is isolated only by the platform-wide NetworkPolicies (spec.networkPolicy), which admit ingress from the " +
@@ -722,6 +748,47 @@ const (
 	// Platform widens MCP from one group's members to every user, so the report must say so.
 	mcpGroupNote = "not converted: the value is not a string, and without spec.mcp.delegation.group MCP acts " +
 		"for every user. Set the group by hand"
+	// mcpGroupExternalNote is the reason for a delegation group with an external identity, which the Platform
+	// rejects because the operator creates the group in its own Keycloak.
+	mcpGroupExternalNote = "not converted: a delegation group applies to the managed identity only, because the " +
+		"operator creates it in the platform's Keycloak. With an external identity, limit who MCP acts for at " +
+		"the identity provider"
+	// mcpIdentityMissingNote is the note for a setting the Platform requires with an external identity and the
+	// values lack. It names the Platform field to set, the values path that was empty and what the field holds.
+	mcpIdentityMissingNote = "spec.mcp.identity.%s: no %s found in values, and an external identity requires it. " +
+		"Set it by hand to %s; the emitted identity block is INCOMPLETE until you do"
+	// mcpExchangeModeNote says the exchange mode was filled in. A chart may default to the other mode, so the
+	// note names it.
+	mcpExchangeModeNote = "spec.mcp.identity.exchangeMode: no mcpServer.security.exchangeMode found in values, so " +
+		"it is standard, the MCP server's own default. Set delegation by hand if your chart ran MCP in delegation mode"
+)
+
+const (
+	// keycloakPath is the path the platform's own managed Keycloak is served under on the platform's public host
+	// (KC_HTTP_RELATIVE_PATH). It is the builder's KeycloakRelativePath, copied because importing the builder would
+	// bring the operator's whole render tree into this standalone package; a test keeps the two equal.
+	keycloakPath = "/kc"
+	// mcpDefaultExchangeMode is the exchange mode the MCP server uses when none is set, and so the one an external
+	// identity gets when the values leave it out.
+	mcpDefaultExchangeMode = "standard"
+	// mcpClientSecretNamePlaceholder stands in for the name of the Secret that holds MCP's client secret, in the
+	// Secret the report asks you to create. The values name none, or name one that is not a valid Secret name, and
+	// the converter never invents one.
+	mcpClientSecretNamePlaceholder = "<MCP_CLIENT_SECRET_NAME>" //nolint:gosec // a placeholder for a Secret object NAME, not a credential
+)
+
+// mcpIdentityKind says what the conversion does with mcpServer.security.
+type mcpIdentityKind int
+
+const (
+	// managedIdentity leaves MCP on the platform's own Keycloak: the values name no issuer, or the one of that
+	// Keycloak. No identity block is emitted.
+	managedIdentity mcpIdentityKind = iota
+	// externalIdentity maps the values onto spec.mcp.identity: they name another issuer and turn MCP on.
+	externalIdentity
+	// deferredIdentity names another issuer while MCP is off. No identity block is emitted, and the values are
+	// reported.
+	deferredIdentity
 )
 
 // mcpServerRead lists what the conversion reads from the umbrella's mcpServer block: the access
@@ -738,51 +805,188 @@ var mcpServerRead = map[string][]string{
 	"additionalEnv": {"variables"},
 }
 
+// mcpIdentityRead lists the mcpServer.security values mapMCPIdentity copies onto an external identity. It
+// must match those reads: a value listed here that nothing reads would vanish without a report.
+var mcpIdentityRead = []string{
+	"issuer", "jwkSetUri", "tokenUri", "clientId", "clientSecretRef", "exchangeMode",
+	"exchangeScope", "requiredScope", "authorizationScopes", "apiAudience",
+}
+
+// mcpSecurityEnv names the environment variable of an mcpServer.security value that the Platform has no
+// field for. The operator renders the variable itself, and an entry in spec.mcp.env overrides it.
+var mcpSecurityEnv = map[string]string{
+	"allowedOrigins":       "ILM_MCP_SECURITY_ALLOWED_ORIGINS",
+	"jwsAlgorithms":        "ILM_MCP_SECURITY_JWS_ALGORITHMS",
+	"allowHttpBackchannel": "ILM_MCP_SECURITY_ALLOW_HTTP_BACKCHANNEL",
+}
+
 // mapMCP maps the umbrella's MCP values onto spec.mcp. The settings live under global.mcp. The
 // component's own values live under mcpServer: mapComponents has already filled its image,
 // replicas, resources and env through the component table, so what is read here is the access
-// level and the resources the chart keeps under image. The component table reads a top-level
-// resources key, which the chart does not have, so the chart's key wins when both are set.
+// level, the identity provider (mcpServer.security) and the resources the chart keeps under image.
+// The component table reads a top-level resources key, which the chart does not have, so the
+// chart's key wins when both are set.
 //
 // global.mcp.cimd.enabled is copied only when the values set it. The chart defaults it to true and
 // the Platform counts an unset value as true, so an absent value stays absent instead of becoming
 // a second spelling of the default.
 //
-// MCP's client secret is never copied, and neither is a reference to it: the operator generates
-// the secret with MCP's Keycloak client and relays it itself. Every other mcpServer value the
-// Platform does not take is reported by its exact path. The report names paths only, never values.
+// spec.mcp.identity is emitted only for MCP that the values turn on. The Platform checks an identity
+// block whether or not MCP is on, so an incomplete one would be rejected for a feature that is off.
+//
+// MCP's client secret is never copied. With the managed identity neither is a reference to it: the
+// operator generates the secret with MCP's Keycloak client and relays it itself. With an external
+// identity the reference is the name of the Secret that holds it, which mapMCPIdentity copies. Every
+// other mcpServer value the Platform does not take is reported by its exact path. The report names
+// paths only, never values.
 func (r *Result) mapMCP(values vals, spec *otilmv1alpha1.PlatformSpec) {
 	mcp := mapOf(mapOf(values["global"])["mcp"])
-	if enabled, ok := boolOf(mcp["enabled"]); ok {
-		spec.MCP.Enabled = enabled
-	}
+	server := mapOf(values["mcpServer"])
+
+	enabled, _ := boolOf(mcp["enabled"])
+	spec.MCP.Enabled = enabled
+	kind := r.mapMCPIdentity(mapOf(server["security"]), enabled, spec)
 	if cimd, ok := boolOf(mapOf(mcp["cimd"])["enabled"]); ok {
 		spec.MCP.CIMD.Enabled = ptrTo(cimd)
 	}
-	group := mapOf(mcp["delegation"])["group"]
-	spec.MCP.Delegation.Group = str(group)
-	if spec.MCP.Delegation.Group == "" && !isEmpty(group) {
-		r.unmapped = append(r.unmapped, "global.mcp.delegation.group ("+mcpGroupNote+")")
-	}
-	for _, key := range []string{"clientSecret", "clientSecretRef"} {
-		if !isEmpty(mcp[key]) {
-			r.unmapped = append(r.unmapped, "global.mcp."+key+" ("+mcpClientSecretNote+")")
-		}
-	}
+	r.mapMCPDelegationGroup(mapOf(mcp["delegation"])["group"], kind == externalIdentity, spec)
+	r.flagMCPClientSecrets(mcp, spec.MCP.Identity)
 
-	server := mapOf(values["mcpServer"])
 	spec.MCP.Access = str(server["access"])
 	if resources := resourcesFrom(mapOf(server["image"])); resources != nil {
 		spec.MCP.Resources = resources
 	}
-	r.flagUnmappedMCPServerKeys(server)
+	r.flagUnmappedMCPServerKeys(server, kind)
+}
+
+// mapMCPIdentity maps mcpServer.security onto spec.mcp.identity and reports what it did. A set issuer
+// names an identity provider the platform does not manage, unless it is the platform's own Keycloak
+// (ownKeycloakIssuer), which stays on the managed identity with no identity block. Without an issuer there
+// is nothing to name the provider, so endpoints alone do not make an external identity. With MCP off the
+// provider is not mapped either (deferredIdentity).
+//
+// With an external identity the Platform requires an issuer, a key-set and a token endpoint, a client, a
+// client secret reference and an exchange mode. An exchange mode the values leave unset is filled with
+// the MCP server's own default. Any other of them the values lack stays empty and is reported with the
+// Platform field to set: the converter never invents an endpoint, a client or a Secret name.
+func (r *Result) mapMCPIdentity(security vals, enabled bool, spec *otilmv1alpha1.PlatformSpec) mcpIdentityKind {
+	issuer := str(security["issuer"])
+	switch {
+	case issuer == "" || ownKeycloakIssuer(spec, issuer):
+		return managedIdentity
+	case !enabled:
+		return deferredIdentity
+	}
+	secret := mapOf(security["clientSecretRef"])
+	identity := &otilmv1alpha1.MCPIdentitySpec{
+		Mode:                modeExternal,
+		Issuer:              issuer,
+		JWKSetURI:           str(security["jwkSetUri"]),
+		TokenURI:            str(security["tokenUri"]),
+		ClientID:            str(security["clientId"]),
+		ClientSecretRef:     str(secret["name"]),
+		ClientSecretKey:     str(secret["key"]),
+		ExchangeMode:        str(security["exchangeMode"]),
+		ExchangeScope:       str(security["exchangeScope"]),
+		RequiredScope:       str(security["requiredScope"]),
+		AuthorizationScopes: stringSlice(security["authorizationScopes"]),
+		APIAudience:         str(security["apiAudience"]),
+	}
+	if identity.ExchangeMode == "" {
+		identity.ExchangeMode = mcpDefaultExchangeMode
+		r.customization = append(r.customization, mcpExchangeModeNote)
+	}
+	for _, required := range []struct{ field, valuesPath, value, what string }{
+		{"jwkSetUri", "mcpServer.security.jwkSetUri", identity.JWKSetURI, "the identity provider's key-set endpoint"},
+		{"tokenUri", "mcpServer.security.tokenUri", identity.TokenURI, "the identity provider's token endpoint"},
+		{"clientId", "mcpServer.security.clientId", identity.ClientID, "the ID of MCP's client at the identity provider"},
+		{"clientSecretRef", "mcpServer.security.clientSecretRef.name", identity.ClientSecretRef,
+			"the name of a Secret in this namespace that holds MCP's client secret"},
+	} {
+		if required.value == "" {
+			r.customization = append(r.customization,
+				fmt.Sprintf(mcpIdentityMissingNote, required.field, required.valuesPath, required.what))
+		}
+	}
+	spec.MCP.Identity = identity
+	return externalIdentity
+}
+
+// ownKeycloakIssuer reports whether the issuer belongs to the Keycloak the converted Platform manages for
+// itself: https://<host>/kc/... on the platform's public host, whichever realm it names, in whatever case the
+// host is written and with the https default port 443 spelled out or not. The Platform rejects such an issuer
+// with an external identity, because it prepares that Keycloak for MCP's managed identity only, so the
+// conversion leaves MCP on the managed identity. The host is the one the builder's PlatformHost resolves. The
+// converter sets no edge.host, which makes it spec.common.hostName; a test keeps that true.
+func ownKeycloakIssuer(spec *otilmv1alpha1.PlatformSpec, issuer string) bool {
+	host := strings.ToLower(spec.Common.HostName)
+	if spec.Keycloak == nil || spec.Keycloak.Mode != modeManaged || host == "" {
+		return false
+	}
+	issuer = strings.ToLower(issuer)
+	return strings.HasPrefix(issuer, "https://"+host+keycloakPath+"/") ||
+		strings.HasPrefix(issuer, "https://"+host+":443"+keycloakPath+"/")
+}
+
+// mapMCPDelegationGroup copies global.mcp.delegation.group onto the Platform with the managed identity,
+// which creates the group in the platform's Keycloak. An external identity rejects a group, so it is
+// reported instead. A group that is not a string is reported with the managed identity too: leaving it
+// out widens MCP from one group's members to every user.
+func (r *Result) mapMCPDelegationGroup(group interface{}, external bool, spec *otilmv1alpha1.PlatformSpec) {
+	if isEmpty(group) {
+		return
+	}
+	if external {
+		r.unmapped = append(r.unmapped, "global.mcp.delegation.group ("+mcpGroupExternalNote+")")
+		return
+	}
+	spec.MCP.Delegation.Group = str(group)
+	if spec.MCP.Delegation.Group == "" {
+		r.unmapped = append(r.unmapped, "global.mcp.delegation.group ("+mcpGroupNote+")")
+	}
+}
+
+// flagMCPClientSecrets reports the client secret values under global.mcp, which are never copied. With
+// the managed identity (a nil identity) the operator generates the secret, so no Secret is needed. With an
+// external identity MCP reads it from the Secret spec.mcp.identity.clientSecretRef names, so an inline
+// value is scaffolded as a Secret to create, like any other inline secret. The scaffold is a command line,
+// so it carries the name and key the values give that Secret only when each is a valid Secret name or key,
+// and otherwise the placeholder name or MCP's default key.
+func (r *Result) flagMCPClientSecrets(mcp vals, identity *otilmv1alpha1.MCPIdentitySpec) {
+	note := mcpClientSecretNote
+	if identity != nil {
+		note = mcpExternalClientSecretNote
+	}
+	for _, key := range []string{"clientSecret", "clientSecretRef"} {
+		if !isEmpty(mcp[key]) {
+			r.unmapped = append(r.unmapped, "global.mcp."+key+" ("+note+")")
+		}
+	}
+	if identity != nil && !isEmpty(mcp["clientSecret"]) {
+		name, key := mcpClientSecretNamePlaceholder, defaultMCPSecretKey
+		if len(validation.IsDNS1123Subdomain(identity.ClientSecretRef)) == 0 {
+			name = identity.ClientSecretRef
+		}
+		if len(validation.IsConfigMapKey(identity.ClientSecretKey)) == 0 {
+			key = identity.ClientSecretKey
+		}
+		r.addSecretTODO(secretTODO{
+			name: name,
+			keys: []string{key},
+			reason: "MCP's client secret at the identity provider (was global.mcp.clientSecret): the Secret that " +
+				"spec.mcp.identity.clientSecretRef must name. Skip it if that Secret already exists",
+			kubectl: fmt.Sprintf(
+				"kubectl create secret generic %s -n %s --from-literal=%s='<MCP_CLIENT_SECRET>'", name, r.Namespace, key),
+		})
+	}
 }
 
 // flagUnmappedMCPServerKeys reports every non-empty mcpServer value the conversion does not read,
 // by its exact values path. flagUnmappedTopLevel looks at top-level keys only and the component
 // table reads just part of each block, so without this a key such as toolsets, or an image sub-key
-// such as digest, would vanish with no note.
-func (r *Result) flagUnmappedMCPServerKeys(server vals) {
+// such as digest, would vanish with no note. kind says what became of mcpServer.security: an external
+// identity reads part of it.
+func (r *Result) flagUnmappedMCPServerKeys(server vals, kind mcpIdentityKind) {
 	for key, v := range server {
 		if isEmpty(v) {
 			continue
@@ -790,7 +994,7 @@ func (r *Result) flagUnmappedMCPServerKeys(server vals) {
 		read, isRead := mcpServerRead[key]
 		switch {
 		case key == "security":
-			r.flagUnmappedMCPSecurityKeys(mapOf(v))
+			r.flagUnmappedMCPSecurityKeys(mapOf(v), kind)
 		case key == "networkPolicy":
 			r.unmapped = append(r.unmapped, "mcpServer.networkPolicy ("+mcpNetworkPolicyNote+")")
 		case !isRead:
@@ -805,23 +1009,41 @@ func (r *Result) flagUnmappedMCPServerKeys(server vals) {
 	}
 }
 
-// flagUnmappedMCPSecurityKeys reports each non-empty mcpServer.security value with the reason that
-// fits it. An issuer, key-set or token endpoint means MCP is pointed at another identity provider,
-// which the operator does not run MCP against.
-func (r *Result) flagUnmappedMCPSecurityKeys(security vals) {
+// flagUnmappedMCPSecurityKeys reports each non-empty mcpServer.security value the conversion does not
+// map, with the reason that fits it. An external identity maps the values in mcpIdentityRead; the managed
+// identity maps none, because the operator derives its settings, and a deferred one maps none because MCP
+// is off.
+func (r *Result) flagUnmappedMCPSecurityKeys(security vals, kind mcpIdentityKind) {
 	for key, v := range security {
-		if isEmpty(v) {
+		if isEmpty(v) || (kind == externalIdentity && slices.Contains(mcpIdentityRead, key)) {
 			continue
 		}
-		note := mcpSecurityNote
-		switch key {
-		case "issuer", "jwkSetUri", "tokenUri":
-			note = mcpIdentityProviderNote
-		case "clientSecretRef":
-			note = mcpClientSecretNote
-		}
-		r.unmapped = append(r.unmapped, "mcpServer.security."+key+" ("+note+")")
+		r.unmapped = append(r.unmapped, "mcpServer.security."+key+" ("+mcpSecurityReason(key, kind)+")")
 	}
+}
+
+// mcpSecurityReason returns why an mcpServer.security value is not converted. With the managed identity an
+// issuer, key-set or token endpoint is the platform's own Keycloak, which the operator derives.
+func mcpSecurityReason(key string, kind mcpIdentityKind) string {
+	switch kind {
+	case deferredIdentity:
+		return mcpOffNote
+	case externalIdentity:
+		if key == "resource" {
+			return mcpResourceNote
+		}
+		if env, ok := mcpSecurityEnv[key]; ok {
+			return mcpNoFieldNote + ". The operator renders " + env + " itself, and spec.mcp.env overrides it"
+		}
+		return mcpNoFieldNote
+	}
+	switch key {
+	case "issuer", "jwkSetUri", "tokenUri":
+		return mcpOwnKeycloakNote
+	case "clientSecretRef":
+		return mcpClientSecretNote
+	}
+	return mcpSecurityNote
 }
 
 // timeQualityMonitorSecretName is the Secret the converter references for the monitor's broker
@@ -1097,7 +1319,8 @@ func (r *Result) Render() (string, error) {
 	return b.String(), nil
 }
 
-// writeHeader writes the top-of-file banner and the prerequisite-Secrets TODO block.
+// writeHeader writes the top-of-file banner and the prerequisite-Secrets TODO block. Text that came from
+// the values passes through commentText, so it stays on its comment line.
 func (r *Result) writeHeader(b *strings.Builder) {
 	b.WriteString(bannerRule)
 	b.WriteString("# Platform CR scaffolded by values2platform (best-effort).\n")
@@ -1115,15 +1338,16 @@ func (r *Result) writeHeader(b *strings.Builder) {
 		sort.Slice(todos, func(i, j int) bool { return todos[i].name < todos[j].name })
 		for _, s := range todos {
 			b.WriteString("#\n")
-			fmt.Fprintf(b, "#   * %s  (keys: %s)\n", s.name, strings.Join(s.keys, ", "))
-			fmt.Fprintf(b, "#     %s\n", s.reason)
-			fmt.Fprintf(b, "#     %s\n", s.kubectl)
+			fmt.Fprintf(b, "#   * %s  (keys: %s)\n", commentText(s.name), commentText(strings.Join(s.keys, ", ")))
+			fmt.Fprintf(b, "#     %s\n", commentText(s.reason))
+			fmt.Fprintf(b, "#     %s\n", commentText(s.kubectl))
 		}
 	}
 	b.WriteString(bannerRule)
 }
 
-// writeFooter writes the UNMAPPED and TODO(customization) notes after the CR.
+// writeFooter writes the UNMAPPED and TODO(customization) notes after the CR. Their paths name keys of
+// the values, so they pass through commentText as well.
 func (r *Result) writeFooter(b *strings.Builder) {
 	if len(r.unmapped) == 0 && len(r.customization) == 0 {
 		return
@@ -1132,9 +1356,9 @@ func (r *Result) writeFooter(b *strings.Builder) {
 	b.WriteString("# NOTES — gaps the converter could not (or should not) map automatically.\n")
 	b.WriteString(bannerRule)
 	for _, c := range r.customization {
-		fmt.Fprintf(b, "# TODO(customization): %s\n", c)
+		fmt.Fprintf(b, "# TODO(customization): %s\n", commentText(c))
 	}
 	for _, u := range r.unmapped {
-		fmt.Fprintf(b, "# UNMAPPED: %s\n", u)
+		fmt.Fprintf(b, "# UNMAPPED: %s\n", commentText(u))
 	}
 }

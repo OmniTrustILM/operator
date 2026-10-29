@@ -883,6 +883,10 @@ func TestBuildKeycloakEnablesMCPFeatures(t *testing.T) {
 		{"cimd unset", nil},
 		{"cimd on", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = ptr.To(true) }},
 		{"keycloak version pinned", func(p *otilmv1alpha1.Platform) { p.Spec.Keycloak.Managed.Version = "26.8.1" }},
+		{"identity with an empty mode", func(p *otilmv1alpha1.Platform) { p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{} }},
+		{"identity with mode managed", func(p *otilmv1alpha1.Platform) {
+			p.Spec.MCP.Identity = &otilmv1alpha1.MCPIdentitySpec{Mode: testMCPIdentityManaged}
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -914,6 +918,31 @@ func TestBuildKeycloakWithoutMCPHasNoFeatures(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, found, err := unstructured.NestedFieldNoCopy(buildKeycloak(tc.platform).Object, "spec", "features")
+			require.NoError(t, err)
+			assert.False(t, found, "spec.features must be absent")
+		})
+	}
+}
+
+// TestKeycloakFeaturesOffForExternalIdentity proves a platform whose MCP signs in through an external
+// identity provider asks its own Keycloak for no MCP features, whatever spec.mcp.cimd says: the
+// operator prepares nothing for MCP there, so the Keycloak CR carries no spec.features.
+func TestKeycloakFeaturesOffForExternalIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		cimd *bool
+	}{
+		{"cimd unset", nil},
+		{"cimd on", ptr.To(true)},
+		{"cimd off", ptr.To(false)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := mcpExternalPlatform(func(p *otilmv1alpha1.Platform) { p.Spec.MCP.CIMD.Enabled = tc.cimd })
+			require.True(t, MCPExternalIdentity(p), "the case must render MCP in external mode")
+
+			assert.Nil(t, keycloakEnabledFeatures(p))
+			_, found, err := unstructured.NestedFieldNoCopy(buildKeycloak(p).Object, "spec", "features")
 			require.NoError(t, err)
 			assert.False(t, found, "spec.features must be absent")
 		})
