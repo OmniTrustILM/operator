@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package convert
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -35,14 +36,19 @@ const (
 	testMCPIdPSecret     = "mcp-idp-client"
 	testDefaultSecretKey = "client-secret"
 	// unmappedPrefix starts the report line of a values path that is not converted, and mcpSecurityPrefix,
-	// mcpClientSecretPath and identityPrefix are the paths the report names.
+	// mcpClientSecretPath, mcpModePath and identityPrefix are the paths the report names.
 	unmappedPrefix      = "# UNMAPPED: "
 	mcpSecurityPrefix   = "mcpServer.security."
 	mcpClientSecretPath = "global.mcp.clientSecret"
+	mcpModePath         = "global.mcp.identity.mode"
 	identityPrefix      = "spec.mcp.identity."
-	// notConverted and ownKeycloakText are the words of the reasons the report gives.
-	notConverted    = "not converted"
-	ownKeycloakText = "platform's own Keycloak"
+	// notConverted, ownKeycloakText and mcpOffText are the words of the reasons the report gives, and
+	// noIdentityIncomplete is the message of the check that a conversion with no identity block has none to report as
+	// incomplete.
+	notConverted         = "not converted"
+	ownKeycloakText      = "platform's own Keycloak"
+	mcpOffText           = "MCP is off"
+	noIdentityIncomplete = "no identity block, so none is incomplete"
 )
 
 // decode parses an inline YAML values document into the loosely-typed tree the converter
@@ -814,6 +820,8 @@ func TestConvertWithoutMCPValuesLeavesMCPOff(t *testing.T) {
 global:
   mcp:
     enabled: false
+    identity:
+      mode: managed
     clientSecret: ""
     clientSecretRef: {}
     delegation:
@@ -1259,7 +1267,7 @@ mcpServer:
 		assert.Contains(t, line, notConverted, path)
 		assert.Contains(t, line, ownKeycloakText, path)
 	}
-	assert.NotContains(t, customizationNotes(r), identityPrefix, "no identity block, so none is incomplete")
+	assert.NotContains(t, customizationNotes(r), identityPrefix, noIdentityIncomplete)
 	assert.NotContains(t, rendered, "idp.example.invalid")
 }
 
@@ -1288,9 +1296,9 @@ func TestConvertMapsAnExternalIdentityOnlyWithMCPOn(t *testing.T) {
 			assert.Nil(t, r.Platform.Spec.MCP.Identity, "MCP is off, so no identity block is emitted")
 			line := unmappedLine(t, r, "mcpServer.security.issuer")
 			assert.Contains(t, line, notConverted, "issuer")
-			assert.Contains(t, line, "MCP is off")
+			assert.Contains(t, line, mcpOffText)
 			assert.Contains(t, line, "convert again")
-			assert.NotContains(t, customizationNotes(r), identityPrefix, "no identity block, so none is incomplete")
+			assert.NotContains(t, customizationNotes(r), identityPrefix, noIdentityIncomplete)
 			assert.Empty(t, r.secretTODOs)
 		})
 	}
@@ -1304,11 +1312,149 @@ func TestConvertMapsAnExternalIdentityOnlyWithMCPOn(t *testing.T) {
 		var reported []string
 		for _, line := range r.unmapped {
 			if strings.HasPrefix(line, mcpSecurityPrefix) {
-				assert.Contains(t, line, "MCP is off", line)
+				assert.Contains(t, line, mcpOffText, line)
 				reported = append(reported, strings.SplitN(line, " ", 2)[0])
 			}
 		}
 		assert.Len(t, reported, 10, "every security value of the fixture is reported: %v", reported)
+	})
+}
+
+// mcpModeValues returns the externalMCPValues of a platform with a bundled Keycloak, with MCP on or off and the mode
+// the caller gives, which is left out when nil, together with the mcpServer.security block it changed. Only a provider
+// whose issuer is that Keycloak's makes it MCP's own.
+func mcpModeValues(t *testing.T, mode interface{}, off bool, mutate func(security vals)) (values, security vals) {
+	t.Helper()
+	values = externalMCPValues(t, mutate)
+	mcp := vals{"enabled": !off}
+	if mode != nil {
+		mcp["identity"] = vals{"mode": mode}
+	}
+	values["global"] = vals{"hostName": testHostName, "keycloak": vals{"enabled": true}, "mcp": mcp}
+	return values, mapOf(mapOf(values["mcpServer"])["security"])
+}
+
+// mcpModeLines returns the report lines of global.mcp.identity.mode.
+func mcpModeLines(r *Result) []string {
+	var lines []string
+	for _, line := range r.unmapped {
+		if strings.HasPrefix(line, mcpModePath+" (") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// assertMCPModeReported checks the report lines of global.mcp.identity.mode: one containing wantReason, or none when
+// wantReason is empty.
+func assertMCPModeReported(t *testing.T, r *Result, mode interface{}, wantReason string) {
+	t.Helper()
+	want := 0
+	if wantReason != "" {
+		want = 1
+	}
+	lines := mcpModeLines(r)
+	require.Len(t, lines, want, "the mode is reported once when the conversion has no use for it, and else not")
+	for _, line := range lines {
+		assert.Contains(t, line, wantReason)
+		if echo := fmt.Sprint(mode); echo != "" {
+			assert.NotContains(t, line, echo, "the report names the path only, never the value")
+		}
+	}
+}
+
+// assertExternalMCPIdentity checks the identity block of a conversion that gets one, and that the report holds at most
+// the mode.
+func assertExternalMCPIdentity(t *testing.T, r *Result, security vals) {
+	t.Helper()
+	identity := r.Platform.Spec.MCP.Identity
+	require.NotNil(t, identity)
+	assert.Equal(t, modeExternal, identity.Mode)
+	assert.Equal(t, str(security["issuer"]), identity.Issuer, "the issuer is copied as it is, empty when the values lack it")
+	assert.Equal(t, "ilm-mcp", identity.ClientID, "the rest of the provider is mapped whether or not there is an issuer")
+	assert.Len(t, r.unmapped, len(mcpModeLines(r)), "every provider value is mapped, so only the mode can be reported")
+	notes := customizationNotes(r)
+	if str(security["issuer"]) != "" {
+		assert.NotContains(t, notes, identityPrefix, "nothing the identity requires is missing")
+		return
+	}
+	assert.Contains(t, notes, identityPrefix+"issuer: no mcpServer.security.issuer found in values")
+	assert.Contains(t, notes, "INCOMPLETE")
+	assert.Equal(t, 1, strings.Count(notes, identityPrefix), "only the issuer is missing: %s", notes)
+}
+
+// assertNoMCPIdentity checks a conversion that gets no identity block: its provider values are reported next to the
+// mode, the issuer and the endpoints with wantReason.
+func assertNoMCPIdentity(t *testing.T, r *Result, security vals, wantReason string) {
+	t.Helper()
+	assert.Nil(t, r.Platform.Spec.MCP.Identity)
+	assert.NotContains(t, customizationNotes(r), identityPrefix, noIdentityIncomplete)
+	assert.Len(t, r.unmapped, len(security)+len(mcpModeLines(r)), "nothing but the provider values and the mode is reported")
+	for _, key := range []string{"issuer", "jwkSetUri", "tokenUri"} {
+		if str(security[key]) != "" {
+			assert.Contains(t, unmappedLine(t, r, mcpSecurityPrefix+key), wantReason, key)
+		}
+	}
+}
+
+// TestConvertReadsTheMCPIdentityMode pins how global.mcp.identity.mode and mcpServer.security.issuer together decide
+// MCP's identity, and when the mode itself is reported.
+func TestConvertReadsTheMCPIdentityMode(t *testing.T) {
+	const allowed = "managed and external"
+	withoutIssuer := func(security vals) { delete(security, "issuer") }
+	withoutProvider := func(security vals) { clear(security) }
+	ownKeycloak := func(security vals) { security["issuer"] = issuerRealm }
+	tests := []struct {
+		name           string
+		mode           interface{}         // global.mcp.identity.mode; nil leaves it out
+		off            bool                // global.mcp.enabled is false
+		mutate         func(security vals) // changes the complete provider of externalMCPValues
+		wantIdentity   bool                // MCP gets an external identity block
+		wantReason     string              // what the report says of the provider values when it does not
+		wantModeReason string              // what the report says of the mode itself; empty when it says nothing
+	}{
+		{name: "external with an issuer", mode: modeExternal, wantIdentity: true},
+		{name: "external without an issuer", mode: modeExternal, mutate: withoutIssuer, wantIdentity: true},
+		{name: "external with MCP off", mode: modeExternal, off: true, wantReason: mcpOffText, wantModeReason: mcpOffText},
+		{name: "external without an issuer, MCP off", mode: modeExternal, off: true, mutate: withoutIssuer, wantReason: mcpOffText, wantModeReason: mcpOffText},
+		{name: "external without a provider, MCP off", mode: modeExternal, off: true, mutate: withoutProvider, wantModeReason: mcpOffText},
+		{name: "external with the platform's own Keycloak", mode: modeExternal, mutate: ownKeycloak, wantReason: ownKeycloakText, wantModeReason: ownKeycloakText},
+		{name: "external with the platform's own Keycloak, MCP off", mode: modeExternal, off: true, mutate: ownKeycloak, wantReason: ownKeycloakText, wantModeReason: ownKeycloakText},
+		{name: "managed with an external issuer", mode: modeManaged, wantReason: ownKeycloakText},
+		{name: "managed with an external issuer, MCP off", mode: modeManaged, off: true, wantReason: ownKeycloakText},
+		{name: "no mode with an issuer", wantIdentity: true},
+		{name: "no mode with an issuer, MCP off", off: true, wantReason: mcpOffText},
+		{name: "no mode without an issuer", mutate: withoutIssuer, wantReason: ownKeycloakText},
+		{name: "an unknown mode with an issuer", mode: "hybrid", wantIdentity: true, wantModeReason: allowed},
+		{name: "an unknown mode without an issuer", mode: "hybrid", mutate: withoutIssuer, wantReason: ownKeycloakText, wantModeReason: allowed},
+		{name: "an empty mode", mode: "", wantIdentity: true, wantModeReason: allowed},
+		{name: "an empty mode without an issuer", mode: "", mutate: withoutIssuer, wantReason: ownKeycloakText, wantModeReason: allowed},
+		{name: "an empty map as the mode", mode: vals{}, wantIdentity: true, wantModeReason: allowed},
+		{name: "an empty list as the mode", mode: []interface{}{}, wantIdentity: true, wantModeReason: allowed},
+		{name: "a mode that is not a string", mode: 2024, wantIdentity: true, wantModeReason: allowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			values, security := mcpModeValues(t, tt.mode, tt.off, tt.mutate)
+
+			r := Convert(values, "ilm", testNamespace)
+
+			assertMCPModeReported(t, r, tt.mode, tt.wantModeReason)
+			if tt.wantIdentity {
+				assertExternalMCPIdentity(t, r, security)
+			} else {
+				assertNoMCPIdentity(t, r, security, tt.wantReason)
+			}
+		})
+	}
+
+	t.Run("a null mode", func(t *testing.T) {
+		values := externalMCPValues(t, nil)
+		values["global"] = decode(t, "mcp: {enabled: true, identity: {mode: ~}}")
+		r := Convert(values, "ilm", testNamespace)
+
+		require.NotNil(t, r.Platform.Spec.MCP.Identity, "a null is no mode, as Helm reads it, so the issuer decides")
+		assert.Empty(t, r.unmapped, "a null is no value, so there is nothing to report")
 	})
 }
 
