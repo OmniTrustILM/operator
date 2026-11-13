@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package platform
 
 import (
+	"net/http"
 	"strings"
 
 	otilmv1alpha1 "github.com/OmniTrustILM/operator/api/v1alpha1"
@@ -219,6 +220,11 @@ const (
 	// path serves that request as well as the bare one.
 	gatewayMCPMetadataPath = "/.well-known/oauth-protected-resource"
 
+	// gatewayESTPath is the EST (RFC 7030) well-known path clients use, and gatewayCoreESTPath the
+	// path Core serves EST under; the gateway replaces the first with the second.
+	gatewayESTPath     = "/.well-known/est"
+	gatewayCoreESTPath = gatewayCoreAPIPath + "/v1/protocols" + gatewayESTPath
+
 	// Internal upstream Service names. These are the operator's clean, unsuffixed
 	// names; the gateway routes to these.
 	gatewayCoreHost  = "core"
@@ -257,6 +263,11 @@ type kongRoute struct {
 	StripPath    bool     `yaml:"strip_path"`
 	PreserveHost bool     `yaml:"preserve_host"`
 	Paths        []string `yaml:"paths"`
+	// Methods limits the route to these HTTP methods; empty matches every method.
+	Methods []string `yaml:"methods,omitempty"`
+	// RequestBuffering is left unset for Kong's default (buffered). It is a pointer so that an
+	// explicit false, which turns buffering off, is rendered instead of dropped as empty.
+	RequestBuffering *bool `yaml:"request_buffering,omitempty"`
 	// ResponseBuffering is left unset for Kong's default (buffered). It is a pointer so that an
 	// explicit false, which turns buffering off, is rendered instead of dropped as empty.
 	ResponseBuffering *bool `yaml:"response_buffering,omitempty"`
@@ -272,7 +283,7 @@ type kongPlugin struct {
 }
 
 // renderKongYAML builds the Kong declarative config (kong.yml) for the Platform.
-// It always emits the core, core-login-logout, and fe-administrator services and
+// It always emits the core, core-login-logout, core-est, and fe-administrator services and
 // routes; the /utils, /mq, /mcp, and cors/file-log entries are gated by the CR. The intra-
 // platform upstream hosts are the operator's clean Service names; the /mq upstream host
 // is resolved per-mode from the messaging connection (see gatewayMessagingMgmtHost). The
@@ -314,6 +325,7 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 					Paths: []string{login, logout},
 				}},
 			},
+			gatewayESTService(),
 			{
 				Name: "fe-administrator", Host: gatewayFeHost, Port: gatewayUpstreamPort, Protocol: "http",
 				Routes: []kongRoute{{
@@ -414,6 +426,24 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 // vs 5672), so the connection's Host is correct.
 func gatewayMessagingMgmtHost(p *otilmv1alpha1.Platform) string {
 	return ResolveMessagingConnection(p).Host
+}
+
+// gatewayESTService returns the gateway service that publishes Core's EST (RFC 7030) endpoints at the
+// well-known path: the matched prefix is replaced by Core's EST path, so the label, operation and
+// query reach Core unchanged. The route takes GET and POST only, keeps every header (Core reads the
+// client certificate from one), and buffers neither the request nor the response.
+func gatewayESTService() kongService {
+	return kongService{
+		Name: "core-est", Host: gatewayCoreHost, Port: gatewayUpstreamPort, Protocol: "http",
+		Path: gatewayCoreESTPath,
+		Routes: []kongRoute{{
+			Name: "core-est_route", StripPath: true, PreserveHost: true,
+			Paths:             []string{gatewayESTPath},
+			Methods:           []string{http.MethodGet, http.MethodPost},
+			RequestBuffering:  ptr.To(false),
+			ResponseBuffering: ptr.To(false),
+		}},
+	}
 }
 
 // gatewayMCPService returns the gateway service that publishes the MCP server: its endpoint
