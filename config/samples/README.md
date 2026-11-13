@@ -126,6 +126,7 @@ The operator also manages standalone `Connector` CRs:
 | [`connector_with_registration.yaml`](./connector_with_registration.yaml) | Self-registration with the platform (`registration.platformUrl` is the platform's **base API URL, `/api` included**; the operator appends only `/v2/connector/register`). |
 | [`connector_otpki.yaml`](./connector_otpki.yaml) | **OT PKI** connector — private-registry image + pull secret + its secret-backed login password key. |
 | [`connector_timestamp_formatting.yaml`](./connector_timestamp_formatting.yaml) | **Timestamp formatting** connector — private-registry image + pull secret. |
+| [`connector_network_discovery.yaml`](./connector_network_discovery.yaml) | **Network discovery** provider on several replicas — old-pods-first rollout, a 30 s termination grace period, a PodDisruptionBudget, and its database credentials from a Secret. |
 
 ## Proxy samples
 

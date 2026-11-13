@@ -312,7 +312,7 @@ The policy matches the operator by its namespace and by the `app.kubernetes.io/n
 
 ## The shipped samples
 
-Five ready-to-edit `Connector` samples ship with the operator:
+Six ready-to-edit `Connector` samples ship with the operator:
 
 | Sample | Shows |
 |---|---|
@@ -321,6 +321,7 @@ Five ready-to-edit `Connector` samples ship with the operator:
 | [`connector_with_registration.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/connector_with_registration.yaml) | Self-registration with the platform. |
 | [`connector_otpki.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/connector_otpki.yaml) | **OT PKI** connector — private-registry image, pull secret, and its secret-backed login password key. |
 | [`connector_timestamp_formatting.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/connector_timestamp_formatting.yaml) | **Timestamp formatting** connector — private-registry image and pull secret. |
+| [`connector_network_discovery.yaml`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/connector_network_discovery.yaml) | **Network discovery** provider on several replicas — old-pods-first rollout, a 30 s grace period, a PodDisruptionBudget, and database credentials from a Secret. |
 
 The full index, including every `Platform` and `Proxy` sample, is in [`config/samples/README.md`](https://github.com/OmniTrustILM/operator/blob/main/config/samples/README.md).
 

@@ -102,6 +102,42 @@ var _ = Describe("Connector samples", func() {
 		Expect(found).To(BeFalse(), "this connector needs no Secret of its own")
 	})
 
+	It("the network discovery sample runs several replicas, old pods first", func() {
+		// A valid Connector could still run its replicas side by side across an upgrade, or cut a
+		// slice short on shutdown; assert the settings the sample exists to show.
+		nd, err := decodeConnectorSample(filepath.Join(samplesDir(), "connector_network_discovery.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+
+		replicas, found, err := unstructured.NestedInt64(nd.Object, "spec", "replicas")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(replicas).To(BeNumerically(">", 1))
+
+		Expect(nestedString(nd, "spec", "strategy", "type")).To(Equal("RollingUpdate"))
+		surge, _, err := unstructured.NestedFieldNoCopy(nd.Object, "spec", "strategy", "rollingUpdate", "maxSurge")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(surge).To(BeEquivalentTo(0), "every old pod must stop before a new one starts")
+		Expect(nestedString(nd, "spec", "strategy", "rollingUpdate", "maxUnavailable")).To(Equal("100%"))
+
+		grace, found, err := unstructured.NestedInt64(nd.Object, "spec", "lifecycle", "terminationGracePeriodSeconds")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(grace).To(BeNumerically(">=", 30), "a pod must outlive the slice it is serving")
+
+		// The database credentials come from a Secret, never as inline env values.
+		refs, found, err := unstructured.NestedSlice(nd.Object, "spec", "secretRefs")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(found).To(BeTrue())
+		Expect(refs).To(HaveLen(1))
+		ref := refs[0].(map[string]interface{})
+		Expect(ref["type"]).To(Equal("env"))
+		var envVars []string
+		for _, k := range ref["keys"].([]interface{}) {
+			envVars = append(envVars, k.(map[string]interface{})["envVar"].(string))
+		}
+		Expect(envVars).To(ConsistOf("JDBC_USERNAME", "JDBC_PASSWORD"))
+	})
+
 	It("a sample that registers through an in-cluster Core runs in Core's namespace", func() {
 		// The connector's NetworkPolicy admits only its own namespace and the operator, so Core
 		// reaches a connector it registered only when both share a namespace.
