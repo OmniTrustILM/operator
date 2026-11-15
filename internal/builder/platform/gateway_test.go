@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 // envMap flattens a Component's inline env pairs into a name->value map.
@@ -140,6 +141,14 @@ func serviceByName(cfg kongConfig, name string) (kongService, bool) {
 	return kongService{}, false
 }
 
+func serviceNames(cfg kongConfig) []string {
+	names := make([]string, len(cfg.Services))
+	for i, s := range cfg.Services {
+		names[i] = s.Name
+	}
+	return names
+}
+
 func TestBuildGlobalConfigMapBaseRoutes(t *testing.T) {
 	cm := BuildGlobalConfigMap(basePlatform())
 
@@ -172,6 +181,9 @@ func TestBuildGlobalConfigMapBaseRoutes(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, gatewayFeHost, fe.Host)
 	assert.Equal(t, []string{gatewayFeBasePath}, fe.Routes[0].Paths)
+
+	assert.Equal(t, []string{"core", "core-login-logout", testESTService, "fe-administrator"}, serviceNames(cfg),
+		"the always-on services, with EST right after login/logout")
 }
 
 func TestBuildGlobalConfigMapConditionalsOff(t *testing.T) {
@@ -190,6 +202,9 @@ func TestBuildGlobalConfigMapConditionalsOff(t *testing.T) {
 	// does not exist.
 	_, hasMCP := serviceByName(cfg, testMCPName)
 	assert.False(t, hasMCP, "the MCP route must be absent when the MCP server is off")
+
+	_, hasEST := serviceByName(cfg, testESTService)
+	assert.True(t, hasEST, "the EST route has no gate")
 
 	assert.Empty(t, cfg.Plugins, "no plugins when cors and logging.request are off")
 }
@@ -322,7 +337,9 @@ func TestBuildGlobalConfigMapMCPRoute(t *testing.T) {
 		}
 		for _, r := range other.Routes {
 			assert.Empty(t, r.Plugins, "route %s must keep the client-certificate header", r.Name)
-			assert.Nil(t, r.ResponseBuffering, "route %s keeps the gateway's default buffering", r.Name)
+			if other.Name != testESTService {
+				assert.Nil(t, r.ResponseBuffering, "route %s keeps the gateway's default buffering", r.Name)
+			}
 		}
 	}
 }
@@ -411,6 +428,92 @@ func TestCoreEnvUsesClientCertHeaderName(t *testing.T) {
 			require.Truef(t, ok, "%s must be set", w.HeaderNameEnv)
 			assert.Equal(t, tc.want, got)
 		})
+	}
+}
+
+// wantESTService is the fixed gateway service for Core's EST endpoints (RFC 7030).
+var wantESTService = kongService{
+	Name: testESTService, Host: "core", Port: 8080, Protocol: "http",
+	Path: "/api/v1/protocols/.well-known/est",
+	Routes: []kongRoute{{
+		Name: "core-est_route", StripPath: true, PreserveHost: true,
+		Paths:             []string{"/.well-known/est"},
+		Methods:           []string{"GET", "POST"},
+		RequestBuffering:  ptr.To(false),
+		ResponseBuffering: ptr.To(false),
+	}},
+}
+
+func estService(t *testing.T, p *otilmv1alpha1.Platform) kongService {
+	t.Helper()
+	svc, ok := serviceByName(parseKong(t, BuildGlobalConfigMap(p)), testESTService)
+	require.True(t, ok, "the gateway always publishes the EST route")
+	return svc
+}
+
+func TestBuildGlobalConfigMapESTRoute(t *testing.T) {
+	assert.Equal(t, wantESTService, estService(t, basePlatform()))
+}
+
+// Every edge already sends / to Kong, so no edge mode changes the EST route.
+func TestBuildGlobalConfigMapESTRouteIndependentOfEdge(t *testing.T) {
+	secretTLS := &otilmv1alpha1.EdgeTLSSpec{Source: edgeSourceSecret, SecretRef: strPtr("my-tls")}
+	for name, p := range map[string]*otilmv1alpha1.Platform{
+		"edge disabled":              basePlatform(),
+		"ingress":                    edgePlatform(secretTLS),
+		"gateway API, owned Gateway": ownedGatewayPlatform(secretTLS),
+		"gateway API, shared Gateway": gatewayAPIPlatform(secretTLS,
+			&otilmv1alpha1.GatewayAPISpec{ParentRef: &otilmv1alpha1.GatewayParentRef{Name: testSharedGW}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, wantESTService, estService(t, p))
+		})
+	}
+}
+
+// EST, unlike MCP, keeps the client-certificate header Core reads.
+func TestBuildGlobalConfigMapESTRouteWithEverythingOn(t *testing.T) {
+	p := mcpPlatform(func(p *otilmv1alpha1.Platform) {
+		p.Spec.Utils.Enabled = true
+		p.Spec.Gateway.Cors.Enabled = true
+		p.Spec.Gateway.Logging.Request = true
+		p.Spec.Core.ClientCertHeader = testCustomClientCertHeader
+	})
+	cfg := parseKong(t, BuildGlobalConfigMap(p))
+
+	est, ok := serviceByName(cfg, testESTService)
+	require.True(t, ok)
+	assert.Equal(t, wantESTService, est)
+	for _, name := range []string{"keycloak", "utils", testMCPName} {
+		_, ok := serviceByName(cfg, name)
+		assert.True(t, ok, "service %s must be rendered", name)
+	}
+	assert.Len(t, cfg.Plugins, 2, "cors and file-log stay global")
+	mcp, _ := serviceByName(cfg, testMCPName)
+	assert.Equal(t, removedHeaders(testCustomClientCertHeader), mcp.Routes[0].Plugins[0].Config)
+}
+
+// Every other route renders exactly as before.
+func TestBuildGlobalConfigMapExistingRoutesOmitESTFields(t *testing.T) {
+	p := managedMQPlatform(func(p *otilmv1alpha1.Platform) {
+		p.Spec.Messaging.Management.Expose = true
+		p.Spec.Utils.Enabled = true
+	})
+	var raw struct {
+		Services []struct {
+			Name   string                   `yaml:"name"`
+			Routes []map[string]interface{} `yaml:"routes"`
+		} `yaml:"services"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(BuildGlobalConfigMap(p).Data[gatewayConfigKey]), &raw))
+	for _, svc := range raw.Services {
+		for _, route := range svc.Routes {
+			if svc.Name == testESTService {
+				continue
+			}
+			assert.NotContains(t, route, "methods", "service %s", svc.Name)
+			assert.NotContains(t, route, "request_buffering", "service %s", svc.Name)
+		}
 	}
 }
 

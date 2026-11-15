@@ -51,6 +51,8 @@ const (
 	// testRequestTransformer the Kong plugin that strips the client-certificate header from it.
 	testMCPMetadataPath    = "/.well-known/oauth-protected-resource"
 	testRequestTransformer = "request-transformer"
+	// testESTService is the gateway service that publishes Core's EST endpoints.
+	testESTService = "core-est"
 
 	// managed_database_test.go.
 	testDefaultKeptMsg = "default kept when not overridden"
