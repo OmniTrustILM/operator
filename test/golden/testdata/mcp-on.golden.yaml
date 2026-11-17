@@ -1040,6 +1040,11 @@ data:
               paths:
                 - /login
                 - /logout
+            - name: core-protected-resource-metadata_route
+              strip_path: false
+              preserve_host: true
+              paths:
+                - /.well-known/oauth-protected-resource/api
         - name: core-est
           host: core
           port: 8080
@@ -1086,7 +1091,8 @@ data:
               preserve_host: true
               paths:
                 - /mcp
-                - /.well-known/oauth-protected-resource
+                - /.well-known/oauth-protected-resource/mcp
+                - /\.well-known/oauth-protected-resource$
               response_buffering: false
               plugins:
                 - name: request-transformer

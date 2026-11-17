@@ -47,9 +47,10 @@ const (
 	// replaces it.
 	testDefaultClientCertHeader = "ssl-client-cert"
 	testCustomClientCertHeader  = "x-client-cert"
-	// testMCPMetadataPath is the OAuth protected-resource metadata path the MCP route serves, and
-	// testRequestTransformer the Kong plugin that strips the client-certificate header from it.
-	testMCPMetadataPath    = "/.well-known/oauth-protected-resource"
+	// testMetadataBarePath is a regex because a plain Kong path matches by prefix, and
+	// testRequestTransformer is the plugin that strips the client-certificate header from the MCP route.
+	testMetadataPath       = "/.well-known/oauth-protected-resource"
+	testMetadataBarePath   = `/\.well-known/oauth-protected-resource$`
 	testRequestTransformer = "request-transformer"
 	// testESTService is the gateway service that publishes Core's EST endpoints.
 	testESTService = "core-est"

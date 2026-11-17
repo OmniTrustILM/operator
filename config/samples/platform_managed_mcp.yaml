@@ -30,8 +30,8 @@
 # the Secret <platform>-mcp-client (ilm-mcp-client here).
 #
 # WHAT THE OPERATOR ADDS FOR MCP
-#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp and
-#     /.well-known/oauth-protected-resource;
+#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp,
+#     /.well-known/oauth-protected-resource/mcp and the bare /.well-known/oauth-protected-resource;
 #   - the Keycloak features token-exchange-delegation, parameterized-scopes and cimd, and MCP's
 #     client, client scopes, client policies and delegation permission in the realm;
 #   - the MCPConfigured condition, which with this managed identity reports whether the Keycloak
