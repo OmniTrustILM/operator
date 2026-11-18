@@ -965,6 +965,11 @@ data:
               paths:
                 - /login
                 - /logout
+            - name: core-protected-resource-metadata_route
+              strip_path: false
+              preserve_host: true
+              paths:
+                - /.well-known/oauth-protected-resource/api
         - name: core-est
           host: core
           port: 8080

@@ -44,8 +44,8 @@
 # for it.
 #
 # WHAT THE OPERATOR ADDS FOR MCP
-#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp and
-#     /.well-known/oauth-protected-resource;
+#   - the mcp-server Deployment, Service and ServiceAccount, and a Kong route for /mcp,
+#     /.well-known/oauth-protected-resource/mcp and the bare /.well-known/oauth-protected-resource;
 #   - the MCPConfigured condition, which reports only whether the client Secret holds a value
 #     under its key: True/External, or False/MissingSecret.
 #   Nothing in Keycloak, nothing at the provider, and no MCP delegate in ILM. Turning MCP on or

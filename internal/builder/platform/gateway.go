@@ -214,11 +214,15 @@ const (
 	gatewayMqPath       = "/mq"
 	gatewayUtilsPath    = "/utils"
 
-	// gatewayMCPMetadataPath is the path the MCP server publishes its OAuth protected-resource
-	// metadata under (RFC 9728). A client asks for it with the resource's own path appended,
-	// /.well-known/oauth-protected-resource/mcp, and a route path matches by prefix, so this one
-	// path serves that request as well as the bare one.
-	gatewayMCPMetadataPath = "/.well-known/oauth-protected-resource"
+	// A client asks for metadata (RFC 9728) with the resource path appended: .../api for Core,
+	// .../mcp for the MCP server.
+	gatewayMetadataPath = "/.well-known/oauth-protected-resource"
+	// gatewayMetadataBarePath matches the bare metadata path exactly, which the MCP server also
+	// answers. It is a regex because a plain route path matches by prefix and would also capture
+	// Core's metadata path. It carries no "~": under _format_version 2.1 Kong adds the prefix to
+	// every path holding a regex character, and rejects one that already has it. The dot is escaped
+	// so the regex matches that one path only.
+	gatewayMetadataBarePath = `/\.well-known/oauth-protected-resource$`
 
 	// gatewayESTPath is the EST (RFC 7030) well-known path clients use, and gatewayCoreESTPath the
 	// path Core serves EST under; the gateway replaces the first with the second.
@@ -323,6 +327,9 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 				Routes: []kongRoute{{
 					Name: "core-oauth2_route", StripPath: false, PreserveHost: true,
 					Paths: []string{login, logout},
+				}, {
+					Name: "core-protected-resource-metadata_route", StripPath: false, PreserveHost: true,
+					Paths: []string{gatewayMetadataPath + gatewayCoreAPIPath},
 				}},
 			},
 			gatewayESTService(),
@@ -364,8 +371,7 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 	// same expose gate) so RabbitMQ serves the UI/HTTP-API under /mq with /mq-prefixed assets.
 	//
 	// TWO plain-prefix routes make the UI load with OR without the trailing slash, plugin-free,
-	// leaning on Kong's longest-prefix route priority (no regex — Kong rejects a non-"~/"-prefixed
-	// regex path):
+	// leaning on Kong's longest-prefix route priority (no regex needed):
 	//   - "rabbitmq" — path "/mq/": the UI + HTTP API under /mq/ (and deeper), forwarded UNSTRIPPED
 	//     so RabbitMQ sees its own /mq prefix and its relative asset/API refs resolve under /mq/.
 	//     For "/mq/…" this is the LONGER (more specific) prefix, so Kong prefers it over "/mq".
@@ -447,8 +453,9 @@ func gatewayESTService() kongService {
 }
 
 // gatewayMCPService returns the gateway service that publishes the MCP server: its endpoint
-// (mcpPublicPath) and its OAuth protected-resource metadata. Both are forwarded with the public path
-// and Host intact, because MCP checks tokens against its public resource URL.
+// (mcpPublicPath) and its OAuth protected-resource metadata, under the MCP path and the bare path
+// only, so Core's metadata path never reaches MCP. All are forwarded with the public path and Host
+// intact, because MCP checks tokens against its public resource URL.
 //
 // Response buffering is off because MCP speaks streamable HTTP, whose responses can be event
 // streams: each event has to reach the client as it is produced, not once Kong has read the whole
@@ -464,7 +471,7 @@ func gatewayMCPService(p *otilmv1alpha1.Platform) kongService {
 		Name: mcpServerComponent, Host: mcpServerComponent, Port: mcpPort, Protocol: "http",
 		Routes: []kongRoute{{
 			Name: "mcp", StripPath: false, PreserveHost: true,
-			Paths:             []string{mcpPublicPath, gatewayMCPMetadataPath},
+			Paths:             []string{mcpPublicPath, gatewayMetadataPath + mcpPublicPath, gatewayMetadataBarePath},
 			ResponseBuffering: ptr.To(false),
 			Plugins: []kongPlugin{{
 				Name: "request-transformer",

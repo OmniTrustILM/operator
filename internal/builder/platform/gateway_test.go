@@ -316,8 +316,8 @@ func TestBuildGlobalConfigMapMCPRoute(t *testing.T) {
 	require.Len(t, svc.Routes, 1)
 	route := svc.Routes[0]
 	assert.Equal(t, "mcp", route.Name)
-	assert.Equal(t, []string{"/mcp", testMCPMetadataPath}, route.Paths,
-		"the MCP endpoint and, by prefix, its protected-resource metadata under /mcp too")
+	assert.Equal(t, []string{"/mcp", testMetadataPath + "/mcp", testMetadataBarePath}, route.Paths,
+		"the MCP endpoint, its protected-resource metadata, and the bare metadata path exactly, never Core's")
 	assert.False(t, route.StripPath, "strip_path=false so MCP sees the path it is served under")
 	assert.True(t, route.PreserveHost, "preserve_host so MCP builds its URLs from the public host")
 	require.NotNil(t, route.ResponseBuffering, "response buffering must be switched off explicitly")
@@ -375,6 +375,30 @@ func TestBuildGlobalConfigMapMCPRouteFollowsMCPEnabled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, ok := serviceByName(parseKong(t, BuildGlobalConfigMap(mcpPlatform(tc.mutate))), testMCPName)
 			assert.Equal(t, tc.want, ok)
+		})
+	}
+}
+
+func TestBuildGlobalConfigMapCoreMetadataRoute(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform *otilmv1alpha1.Platform
+	}{
+		{"MCP off", basePlatform()},
+		{"MCP on", mcpPlatform(nil)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, ok := serviceByName(parseKong(t, BuildGlobalConfigMap(tc.platform)), "core-login-logout")
+			require.True(t, ok)
+			assert.Equal(t, gatewayCoreAPIPath, svc.Path, "Core receives the path under /api")
+
+			require.Len(t, svc.Routes, 2)
+			route := svc.Routes[1]
+			assert.Equal(t, "core-protected-resource-metadata_route", route.Name)
+			assert.Equal(t, []string{testMetadataPath + "/api"}, route.Paths)
+			assert.False(t, route.StripPath, "strip_path=false so Core sees the metadata path after /api")
+			assert.True(t, route.PreserveHost, "preserve_host so Core builds the resource URL from the public host")
 		})
 	}
 }
