@@ -371,8 +371,7 @@ func renderKongYAML(p *otilmv1alpha1.Platform) string {
 	// same expose gate) so RabbitMQ serves the UI/HTTP-API under /mq with /mq-prefixed assets.
 	//
 	// TWO plain-prefix routes make the UI load with OR without the trailing slash, plugin-free,
-	// leaning on Kong's longest-prefix route priority (no regex — Kong rejects a non-"~/"-prefixed
-	// regex path):
+	// leaning on Kong's longest-prefix route priority (no regex needed):
 	//   - "rabbitmq" — path "/mq/": the UI + HTTP API under /mq/ (and deeper), forwarded UNSTRIPPED
 	//     so RabbitMQ sees its own /mq prefix and its relative asset/API refs resolve under /mq/.
 	//     For "/mq/…" this is the LONGER (more specific) prefix, so Kong prefers it over "/mq".
