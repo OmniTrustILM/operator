@@ -1,0 +1,61 @@
+# connector_network_discovery.yaml — the network discovery provider on several replicas.
+#
+# Its Discovery v2 interface keeps nothing between calls: Core stores every run's position and
+# replays it, so any replica can serve any call and a run survives losing a pod. Its v1 interface
+# keeps its runs in PostgreSQL and was never limited to one replica.
+#
+# The database credentials are delivered as POD ENV via secretKeyRef:
+#   kubectl create secret generic network-discovery-provider-db -n ilm \
+#     --from-literal=username=<user> --from-literal=password=<password>
+apiVersion: otilm.com/v1alpha1
+kind: Connector
+metadata:
+  name: network-discovery-provider
+  namespace: ilm
+  labels:
+    app.kubernetes.io/part-of: ilm-platform
+spec:
+  replicas: 3
+
+  image:
+    repository: hub.omnitrustregistry.com/ilm/ip-discovery-provider
+    tag: "1.8.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    port: 8080
+    type: ClusterIP
+
+  # Old pods first: every old pod stops before a new one starts. A pod of a release that held
+  # Discovery v2 runs in memory refuses the checkpoints the new one hands out, so the two must
+  # not serve side by side. Runs in progress pause for the gap and continue, because Core
+  # retries their calls until a new pod answers.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 100%
+
+  env:
+    - name: PORT
+      value: "8080"
+    - name: JDBC_URL
+      value: "jdbc:postgresql://postgresql.ilm.svc.cluster.local:5432/ilm?characterEncoding=UTF-8"
+
+  secretRefs:
+    - name: network-discovery-provider-db
+      type: env
+      keys:
+        - secretKey: username
+          envVar: JDBC_USERNAME
+        - secretKey: password
+          envVar: JDBC_PASSWORD
+
+  lifecycle:
+    # A pod being replaced finishes the slice it is serving before it exits: a slice answers
+    # within 20 s and the connector waits up to 25 s for it on shutdown.
+    terminationGracePeriodSeconds: 30
+    # Keeps all but one replica up through node drains.
+    podDisruptionBudget:
+      enabled: true
+      maxUnavailable: 1
